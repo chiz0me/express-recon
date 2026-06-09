@@ -1,0 +1,55 @@
+{
+  "name": "express-recon",
+  "version": "0.1.0",
+  "description": "Inventory & audit harness for Express 4/5 route surfaces — for humans, CI, and AI agents. Statically or at runtime enumerate routes, middleware chains, and flag unauthenticated endpoints.",
+  "license": "MIT",
+  "author": "chiz0me",
+  "homepage": "https://github.com/chiz0me/express-recon#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chiz0me/express-recon.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chiz0me/express-recon/issues"
+  },
+  "keywords": [
+    "express",
+    "security",
+    "audit",
+    "routes",
+    "middleware",
+    "authentication",
+    "authorization",
+    "static-analysis",
+    "sast",
+    "mcp"
+  ],
+  "main": "src/index.js",
+  "bin": {
+    "express-recon": "src/cli.js",
+    "express-recon-mcp": "src/mcp/server.js"
+  },
+  "files": [
+    "src",
+    ".claude/skills",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test testcases/",
+    "lint": "oxlint",
+    "fmt": "oxfmt"
+  },
+  "devDependencies": {
+    "express": "^5.1.0",
+    "oxfmt": "^0.41.0",
+    "oxlint": "^1.56.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "oxc-parser": "0.135.0",
+    "zod": "4.4.3"
+  }
+}

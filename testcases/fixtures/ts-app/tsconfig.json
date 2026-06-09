@@ -1,0 +1,9 @@
+{
+  // path alias used across the fixture
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}
