@@ -21,9 +21,12 @@ route as `proven` (behind known auth), `public` (no recognised auth), or
 Use whichever resolves first:
 
 - `express-recon` on PATH (globally installed), else
-- `node <path-to-express-recon>/src/cli.js` (this repo's checkout).
+- `node ${CLAUDE_PLUGIN_ROOT}/src/cli.js` (when running as an installed plugin;
+  if `${CLAUDE_PLUGIN_ROOT}/node_modules` is missing, run
+  `npm install --omit=dev --prefix ${CLAUDE_PLUGIN_ROOT}` once first), else
+- `node <path-to-express-recon>/src/cli.js` (a local repo checkout).
 
-If neither is available, tell the user how to install it (`npm i -g` the
+If none is available, tell the user how to install it (`npm i -g` the
 express-recon checkout) and stop.
 
 All commands below take `--src <repoDir>` (the target repo, default cwd).

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "express-recon",
+  "displayName": "Express Recon",
+  "version": "0.1.0",
+  "description": "Inventory & audit harness for Express 4/5 route surfaces. Enumerate routes and middleware chains, flag unauthenticated endpoints.",
+  "author": {
+    "name": "Naveen Yagati"
+  },
+  "homepage": "https://github.com/chiz0me/express-recon#readme",
+  "repository": "https://github.com/chiz0me/express-recon",
+  "license": "MIT",
+  "keywords": [
+    "express",
+    "security",
+    "audit",
+    "routes",
+    "middleware",
+    "authentication",
+    "static-analysis"
+  ]
+}
