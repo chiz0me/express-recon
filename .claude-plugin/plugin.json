@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "express-recon",
   "displayName": "Express Recon",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Inventory & audit harness for Express 4/5 route surfaces. Enumerate routes and middleware chains, flag unauthenticated endpoints.",
   "author": {
     "name": "Naveen Yagati"

@@ -29,6 +29,11 @@ jobs:
 
       - run: npm ci
 
+      - name: Verify package, plugin manifest, and release tag agree
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node scripts/check-version.js "$RELEASE_TAG"
+
       - run: npm test
 
       - run: npm publish
