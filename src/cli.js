@@ -143,7 +143,13 @@ function runReportCommand(command, args) {
   const registry = command === "audit" ? audit(opts, config) : inventory(opts);
   const report = buildReport(registry, { command, mode: args.mode });
   writeReport(report, args);
+  warnDiagnostics(report);
   return command === "audit" ? failOnExit(report, args.failOn) : 0;
+}
+
+function warnDiagnostics(report) {
+  for (const message of report.diagnostics || [])
+    process.stderr.write(`express-recon [warn]: ${message}\n`);
 }
 
 function runSuggestAuth(args) {

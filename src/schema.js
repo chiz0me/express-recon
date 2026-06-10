@@ -74,6 +74,11 @@ const REPORT_SCHEMA = {
       },
     },
     findings: { type: "array", items: finding, description: "audit only" },
+    diagnostics: {
+      type: "array",
+      items: { type: "string" },
+      description: "static-mode warnings about resolution confidence",
+    },
   },
   required: ["schemaVersion", "tool", "command", "mode", "routes", "globalMiddleware"],
 };
