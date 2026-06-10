@@ -1,6 +1,6 @@
 {
   "name": "express-recon",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Inventory & audit harness for Express 4/5 route surfaces — for humans, CI, and AI agents. Statically or at runtime enumerate routes, middleware chains, and flag unauthenticated endpoints.",
   "license": "MIT",
   "author": "chiz0me",
