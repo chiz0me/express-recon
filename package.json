@@ -40,7 +40,10 @@
   "scripts": {
     "test": "node --test",
     "lint": "oxlint",
-    "fmt": "oxfmt"
+    "fmt": "oxfmt",
+    "check:version": "node scripts/check-version.js",
+    "version": "node scripts/sync-version.js && git add .claude-plugin/plugin.json",
+    "prepublishOnly": "node scripts/check-version.js"
   },
   "devDependencies": {
     "express": "^5.1.0",
