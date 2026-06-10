@@ -28,6 +28,9 @@ function buildReport(registry, meta) {
     routes: registry.routes,
     globalMiddleware: registry.globalMiddleware,
   };
+  if (registry.diagnostics && registry.diagnostics.length) {
+    report.diagnostics = registry.diagnostics;
+  }
   if (meta.command === "audit") {
     report.summary = summarize(registry.routes);
     report.findings = buildFindings(registry.routes);

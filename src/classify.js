@@ -52,6 +52,7 @@ function classify(registry, options) {
   return {
     routes: registry.routes.map((r) => tagRoute(r, authMiddleware)),
     globalMiddleware: registry.globalMiddleware,
+    diagnostics: registry.diagnostics || [],
   };
 }
 
