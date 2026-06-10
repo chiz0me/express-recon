@@ -38,7 +38,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test testcases/",
+    "test": "node --test",
     "lint": "oxlint",
     "fmt": "oxfmt"
   },
