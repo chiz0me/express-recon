@@ -1,6 +1,6 @@
 # express-recon
 
-An inventory & audit harness for Express 4/5 route surfaces — built to be driven
+An inventory & audit harness for Express 4/5 route surfaces, built to be driven
 by **humans, CI, and AI agents** off the same contract. It enumerates every
 route, method, middleware chain, and source location, then (in audit mode)
 classifies each route as **proven** (behind known auth), **public** (no
@@ -9,13 +9,13 @@ findings including per-verb auth gaps.
 
 Two scanners, opposite failure modes:
 
-- **static** (default) — parses JS/TS source with an AST (resolves ESM imports,
+- **static** (default): parses JS/TS source with an AST (resolves ESM imports,
   tsconfig path aliases, and barrel re-exports). No app boot, no setup in the
   target repo, source file/line for free. Misses dynamically-registered routes.
-- **runtime** — loads the live app and walks its router stack. Sees dynamic
+- **runtime**: loads the live app and walks its router stack. Sees dynamic
   routes; the app must import cleanly. Mount-path prefixes are captured via
   instrumentation, so they survive on Express 5.
-- **hybrid** — static for breadth + locations, runtime to verify and recover
+- **hybrid**: static for breadth + locations, runtime to verify and recover
   what static missed. Lowest chance of missing an open endpoint.
 
 ## CLI
@@ -26,7 +26,7 @@ express-recon <command> [options]
 
 | command | what it does |
 |---------|--------------|
-| `inventory` | list routes, methods, middleware chains, source — no judgment |
+| `inventory` | list routes, methods, middleware chains, source (no judgment) |
 | `audit` | inventory + classify (proven/public/review) + findings |
 | `suggest-auth` | propose auth-middleware allowlist candidates (JSON) |
 | `schema` | print the JSON Schema of the report contract |
@@ -35,7 +35,7 @@ express-recon <command> [options]
 # Zero-setup audit of a checked-out repo:
 express-recon audit --src ./ --config ./recon.config.js --format pretty
 
-# CI / agent gate — non-zero exit if any unauthenticated route exists:
+# CI / agent gate: non-zero exit if any unauthenticated route exists:
 express-recon audit --src ./ --config ./recon.config.js --format json --fail-on public
 
 # Bootstrap the allowlist on an unfamiliar repo:
@@ -106,7 +106,7 @@ express-recon-mcp
 
 Tools: `inventory_routes({ dir })`, `audit_routes({ dir, authMiddleware? })`,
 `suggest_auth({ dir })`, `report_schema()`. Each returns the same JSON report
-contract as the CLI. **Static mode only** — the MCP tools parse source and never
+contract as the CLI. **Static mode only**: the MCP tools parse source and never
 execute the target repo, so an agent can't be coerced into running untrusted
 code. Runtime/hybrid stays a human-opt-in CLI path.
 
@@ -120,7 +120,20 @@ Register it with an MCP client (e.g. Claude Code / Claude Desktop):
 }
 ```
 
-The agent loop becomes: `suggest_auth` → `audit_routes` with the chosen
+Once registered, plain-language requests trigger the tools. Ask the agent things
+like:
+
+> "Which routes in this Express app have no authentication?"
+>
+> "Audit this repo and list every publicly reachable endpoint."
+>
+> "Inventory the routes in `./src` and show their middleware chains."
+>
+> "Suggest an auth-middleware allowlist for this codebase."
+
+The agent picks the matching tool (`audit_routes`, `inventory_routes`, or
+`suggest_auth`), runs it against the working directory, and acts on the returned
+`findings`. A typical loop: `suggest_auth` → `audit_routes` with the chosen
 allowlist → act on `findings`.
 
 ## Library
@@ -129,7 +142,7 @@ allowlist → act on `findings`.
 const { inventory, audit, suggestAuth, buildReport, instrument, formatters } =
   require("express-recon");
 
-// primitives — opts is { mode, src?, app? }
+// primitives: opts is { mode, src?, app? }
 const inv = inventory({ mode: "static", src: "./" });          // raw, no judgment
 const reg = audit({ mode: "static", src: "./" }, config);      // classified
 const report = buildReport(reg, { command: "audit", mode: "static" });
@@ -161,13 +174,13 @@ module.exports = {
 
 Classification (public-unless-proven):
 
-- **proven** — the chain contains a middleware whose name/callee is allow-listed.
-- **review** (`unknown`) — no match, but the chain has an *opaque* middleware (an
+- **proven**: the chain contains a middleware whose name/callee is allow-listed.
+- **review** (`unknown`): no match, but the chain has an *opaque* middleware (an
   inline/anonymous closure, or an unnameable expression) that could be hiding auth.
   Surfaced, not assumed safe.
-- **public** — no match and every middleware is a nameable identifier or call you
+- **public**: no match and every middleware is a nameable identifier or call you
   could have allow-listed (`express.json`, a logger). Treated as unauthenticated.
-  If a named middleware here is auth, add it to the allowlist and re-run — or run
+  If a named middleware here is auth, add it to the allowlist and re-run, or run
   `suggest-auth` to find candidates automatically.
 
 ## Runtime / hybrid: host-side gate
@@ -187,7 +200,7 @@ module.exports = app;
 ## Static mode: what it resolves
 
 Parses **JavaScript and TypeScript** (`.js/.jsx/.cjs/.mjs/.ts/.tsx/.mts/.cts`)
-with oxc — no type-checking, no build step. It proves from the AST:
+with oxc, no type-checking, no build step. It proves from the AST:
 
 - `app.METHOD(path, …)` and `.route(path).get().post()` chains.
 - `router.use([path], subRouter)` mounts, including across files.
@@ -200,10 +213,10 @@ with oxc — no type-checking, no build step. It proves from the AST:
 It does **not** resolve, and marks `pathConfidence: "partial"` rather than
 silently dropping a route:
 
-- Dynamically-registered routes (loops, data-driven) — shown as `/<dynamic>`.
+- Dynamically-registered routes (loops, data-driven), shown as `/<dynamic>`.
   Use `--mode hybrid` to recover them.
 - Non-literal mount paths/routers, and routers reached only through a
-  bare/node_modules import or a `tsconfig` that isn't found — emitted with an
+  bare/node_modules import or a `tsconfig` that isn't found, emitted with an
   unknown prefix. `tsconfig` `extends` chains aren't followed.
 - Path-scoped `app.use("/x", mw)` is over-approximated to the whole host (errs
   toward "has middleware", never toward "public").
