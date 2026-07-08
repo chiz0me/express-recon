@@ -35,6 +35,7 @@ Options:
   --out <dir>           write routes.json/routes.md into <dir> (else stdout)
   --fail-on <statuses>  audit only: exit 2 if any route matches, e.g. public or
                         public,unknown. For CI gates and agent assertions.
+  --include-tests       also scan test files/dirs (excluded by default)
   --help                show this message
 `;
 
@@ -52,6 +53,7 @@ function parseArgs(argv) {
     else if (arg === "--format") out.format = argv[++i];
     else if (arg === "--out") out.out = argv[++i];
     else if (arg === "--fail-on") out.failOn = argv[++i];
+    else if (arg === "--include-tests") out.includeTests = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return out;
@@ -103,6 +105,7 @@ function harnessOpts(args) {
     mode: args.mode,
     src: resolvePath(args.src || process.cwd()),
     app: needsApp ? loadApp(args.app) : undefined,
+    includeTests: args.includeTests,
   };
 }
 
@@ -131,7 +134,7 @@ function failOnExit(report, failOn) {
   if (!failOn) return 0;
   const statuses = failOn.split(",").map((s) => s.trim());
   for (const s of statuses) if (!STATUSES.has(s)) die(`--fail-on: unknown status "${s}"`);
-  const hit = report.routes.filter((r) => statuses.includes(r.authStatus));
+  const hit = report.routes.filter((r) => statuses.includes(r.authStatus) && !r.accepted);
   if (hit.length === 0) return 0;
   process.stderr.write(`express-recon: ${hit.length} route(s) matched --fail-on ${failOn}\n`);
   return 2;
@@ -174,8 +177,13 @@ function main(argv) {
   die(`Unknown command: ${args.command}\n${USAGE}`);
 }
 
+// Set the exit code and let the process end on its own rather than calling
+// process.exit(), which would truncate a large report still buffered in the
+// stdout pipe (~64KB) — e.g. `express-recon audit --format json | jq`. Static
+// scanning is synchronous and a required app registers no open handles until
+// it calls .listen(), so the event loop drains and exits once output flushes.
 try {
-  process.exit(main(process.argv.slice(2)));
+  process.exitCode = main(process.argv.slice(2));
 } catch (err) {
   die(err.message);
 }

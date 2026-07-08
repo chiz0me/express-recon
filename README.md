@@ -55,6 +55,7 @@ express-recon audit --mode hybrid --src ./ --app ./src/app.js \
 | `--format json,md,pretty` | output formats (default `pretty`) |
 | `--out <dir>` | write `routes.json`/`routes.md` (else stdout) |
 | `--fail-on <statuses>` | audit only: exit `2` if any route matches (e.g. `public,unknown`) |
+| `--include-tests` | also scan test files/dirs (`test/`, `__tests__/`, `*.test.*`, `*.spec.*` are excluded by default) |
 
 ## For agents & CI: the report contract
 
@@ -76,11 +77,12 @@ express-recon audit --mode hybrid --src ./ --app ./src/app.js \
       "pathConfidence": "full",  // "partial" when a mount/path couldn't be resolved
       "authStatus": "public",    // audit only: proven | public | unknown
       "tags": ["public"],        // audit only
+      "accepted": true,          // audit only: public but in the acceptedPublic baseline
       "presence": "both"         // hybrid only: both | static-only | runtime-only
     }
   ],
   "globalMiddleware": [{ "name": "helmet", "kind": "call", "raw": "helmet()" }],
-  "summary": { "routes": 1, "public": 1, "unknown": 0, "proven": 0 },  // audit only
+  "summary": { "routes": 1, "public": 1, "unknown": 0, "proven": 0, "accepted": 0 },  // audit only
   "findings": [                                                        // audit only
     { "id": "public-route", "severity": "high", "method": "PATCH",
       "path": "/widgets/:id", "source": { "file": "...", "line": 12 },
@@ -90,7 +92,8 @@ express-recon audit --mode hybrid --src ./ --app ./src/app.js \
 ```
 
 Finding ids: `public-route`, `per-verb-gap` (same path, different auth per
-method), `opaque-middleware`. `inventory` reports omit `summary`/`findings` and
+method), `opaque-middleware`, `stale-baseline` (an `acceptedPublic` entry that no
+longer matches a public route). `inventory` reports omit `summary`/`findings` and
 the per-route `authStatus`/`tags`.
 
 An agent workflow: `suggest-auth` to draft the allowlist → write `--config` →
@@ -157,6 +160,10 @@ const live = audit({ mode: "runtime", app: require("./src/app") }, config);
 ```
 
 The CLI does the `instrument()` step automatically for runtime/hybrid.
+`instrument()` also captures `use()` path scopes (strings and arrays), so a
+path-scoped guard is attributed only to routes under its prefix; without it,
+Express 5 keeps no recoverable path and scoped middleware is conservatively
+treated as host-wide.
 
 ## The auth allowlist
 
@@ -174,7 +181,10 @@ module.exports = {
 
 Classification (public-unless-proven):
 
-- **proven**: the chain contains a middleware whose name/callee is allow-listed.
+- **proven**: the chain contains a middleware whose name/callee is allow-listed,
+  either directly or inside a wrapper call (`asyncHandler(requireAuth)` matches
+  `requireAuth`). Note: a wrapper that *disables* its argument would still
+  match — allow-list only names that always enforce.
 - **review** (`unknown`): no match, but the chain has an *opaque* middleware (an
   inline/anonymous closure, or an unnameable expression) that could be hiding auth.
   Surfaced, not assumed safe.
@@ -182,6 +192,28 @@ Classification (public-unless-proven):
   could have allow-listed (`express.json`, a logger). Treated as unauthenticated.
   If a named middleware here is auth, add it to the allowlist and re-run, or run
   `suggest-auth` to find candidates automatically.
+
+## The public baseline (`acceptedPublic`)
+
+Some endpoints are meant to be open — health checks, webhooks, public reads. On a
+brownfield repo they'd make `--fail-on public` unusable. `acceptedPublic` is a
+reviewed allowlist of intentionally-open routes, keyed by `METHOD /path`:
+
+```js
+module.exports = {
+  authMiddleware: { requireAuth: "authenticated" },
+  acceptedPublic: ["GET /health", "POST /webhooks/stripe"],
+};
+```
+
+An accepted route stays `public` but is tagged `accepted`: its `public-route`
+finding is suppressed and it no longer trips `--fail-on public`, so CI fails only
+on **new** unauthenticated routes. The summary reports an `accepted` count.
+
+The baseline is checked against reality: an `acceptedPublic` entry that no longer
+matches a live public route — the route was deleted, or now has auth — surfaces as
+a `stale-baseline` finding (severity `low`) so the list can be pruned and can't
+silently pre-approve a future route that reuses the path.
 
 ## Runtime / hybrid: host-side gate
 
@@ -202,21 +234,41 @@ module.exports = app;
 Parses **JavaScript and TypeScript** (`.js/.jsx/.cjs/.mjs/.ts/.tsx/.mts/.cts`)
 with oxc, no type-checking, no build step. It proves from the AST:
 
-- `app.METHOD(path, …)` and `.route(path).get().post()` chains.
-- `router.use([path], subRouter)` mounts, including across files.
+- `app.METHOD(path, …)` and `.route(path).all().get().post()` chains — `.all()`
+  links count as middleware for the sibling verbs registered after them.
+- Chained registrations (`app.use(a).use(b)`, `router.get(…).post(…)`).
+- `router.use([path], subRouter)` mounts, including across files. Array paths
+  (`use(['/a','/b'], …)`, `get(['/a','/b'], …)`) expand to one route/mount per
+  path.
+- Paths built from same-file `const` strings, `+` concatenation, and template
+  literals (`` app.get(`${V1}/users`, …) ``).
+- **Path-scoped middleware is scoped**: `app.use("/admin", mw)` guards only
+  routes under `/admin`, and **registration order is honored** — a `use()` after
+  a route does not guard it (matching real Express semantics).
+- Wrapped guards: `asyncHandler(requireAuth)` matches the allowlist through the
+  wrapper's arguments.
 - Cross-file links via **`require` and ESM `import`** (default, named, namespace).
-- Module resolution via relative paths, **tsconfig `paths` aliases** + `baseUrl`,
-  and **barrel re-exports** (`export { default } from …`, `export * from …`).
+- Module resolution via relative paths, **package.json `imports` subpath
+  aliases** (`#routes/*`, including conditions objects), **tsconfig `paths`
+  aliases** + `baseUrl`, and **barrel re-exports** (`export { default } from …`,
+  `export * from …`).
 - `express.Router()` whether imported by `require`, default, or named `Router`.
 - `x as T`, `x!`, and parenthesized expressions are unwrapped.
+- Test files (`test/`, `tests/`, `__tests__/`, `*.test.*`, `*.spec.*`) are
+  excluded by default so fixture apps don't pollute the inventory
+  (`--include-tests` to opt back in).
 
 It does **not** resolve, and marks `pathConfidence: "partial"` rather than
 silently dropping a route:
 
 - Dynamically-registered routes (loops, data-driven), shown as `/<dynamic>`.
   Use `--mode hybrid` to recover them.
+- Registrar functions (`module.exports = (app) => { app.get(…) }`): the routes
+  are emitted with an unknown prefix plus a diagnostic naming the file, since
+  the host is bound at the call site. Hybrid mode recovers the real paths and
+  merges them back by suffix.
 - Non-literal mount paths/routers, and routers reached only through a
   bare/node_modules import or a `tsconfig` that isn't found, emitted with an
   unknown prefix. `tsconfig` `extends` chains aren't followed.
-- Path-scoped `app.use("/x", mw)` is over-approximated to the whole host (errs
+- Regex or computed `use()` scopes: the guard is kept on the whole host (errs
   toward "has middleware", never toward "public").

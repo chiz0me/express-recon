@@ -5,8 +5,12 @@ const { buildFindings } = require("./findings");
 const SCHEMA_VERSION = "1.0";
 
 function summarize(routes) {
-  const summary = { routes: routes.length, public: 0, unknown: 0, proven: 0 };
-  for (const r of routes) if (r.authStatus in summary) summary[r.authStatus]++;
+  const summary = { routes: routes.length, public: 0, unknown: 0, proven: 0, accepted: 0 };
+  for (const r of routes) {
+    if (r.authStatus === "public" || r.authStatus === "unknown" || r.authStatus === "proven")
+      summary[r.authStatus]++;
+    if (r.accepted) summary.accepted++;
+  }
   return summary;
 }
 
@@ -33,7 +37,7 @@ function buildReport(registry, meta) {
   }
   if (meta.command === "audit") {
     report.summary = summarize(registry.routes);
-    report.findings = buildFindings(registry.routes);
+    report.findings = buildFindings(registry.routes, registry.acceptedPublic);
   }
   return report;
 }
