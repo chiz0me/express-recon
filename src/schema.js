@@ -90,7 +90,8 @@ const REPORT_SCHEMA = {
     diagnostics: {
       type: "array",
       items: { type: "string" },
-      description: "static-mode warnings about resolution confidence",
+      description:
+        "warnings about resolution confidence (static) and sandboxed boot (runtime/hybrid)",
     },
   },
   required: ["schemaVersion", "tool", "command", "mode", "routes", "globalMiddleware"],

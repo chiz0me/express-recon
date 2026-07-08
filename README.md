@@ -215,10 +215,49 @@ matches a live public route — the route was deleted, or now has auth — surfa
 a `stale-baseline` finding (severity `low`) so the list can be pruned and can't
 silently pre-approve a future route that reuses the path.
 
-## Runtime / hybrid: host-side gate
+## Runtime / hybrid: sandboxed boot
 
-`--app` is required for runtime/hybrid; the CLI sets `EXPRESS_RECON_DRY=1`
-before requiring it, so gate boot side effects on it:
+`--app` is required for runtime/hybrid. The app is booted in a sandbox, so an
+unmodified app loads even with no database, cache, or broker reachable:
+
+- **Infra clients are stubbed.** `require`s of common infra packages (`pg`,
+  `mysql2`, `ioredis`, `redis`, `mongoose`, `mongodb`, `kafkajs`, `amqplib`,
+  `@prisma/client`, `knex`, `sequelize`, `typeorm`, `bullmq`, `nodemailer`,
+  any `@aws-sdk/*`, …) return inert stubs: every property/call/`new` chains,
+  `await client.connect()` resolves, nothing ever rejects. Interception happens
+  before module resolution, so the package doesn't even have to be installed.
+  Routes registered inside `connect().then(...)` (or after an `await`ed
+  connect) are still captured. Relative/absolute/`node:` imports — your actual
+  app code — are never touched.
+- **`listen()` never binds** (the callback still fires) and **`process.exit`
+  is ignored** during boot, so `.catch(() => process.exit(1))` teardown can't
+  kill the scan.
+- **Partial boots still report.** If the app throws *after* registering routes
+  (say, a config validator the sandbox couldn't satisfy), the routes captured
+  up to that point are harvested and the report carries a
+  `boot: … results may be partial` diagnostic instead of failing outright.
+
+Everything the sandbox did is surfaced in `report.diagnostics` (and mirrored to
+stderr as `[warn]` lines). Tune it via `--config`:
+
+```js
+module.exports = {
+  boot: {
+    env: { DATABASE_URL: "postgres://x", SESSION_SECRET: "recon" }, // satisfy env validators
+    stubModules: ["my-internal-db-client", "@my-scope/"],           // extras; trailing "/" = prefix
+    sandbox: false,                                                 // opt out entirely
+  },
+};
+```
+
+`boot.env` matters as often as the stubs: many boots die in an envalid/zod
+schema check, not on a socket.
+
+Known limits: callback-style connects (`client.connect(cb)` — stub callbacks
+are never invoked) and timer-deferred wiring (`setTimeout(wireRoutes, …)`) are
+missed; ESM-only apps can't be `require`d; an app that starts its own timers at
+boot keeps the CLI alive. For those, the explicit gate still works — the CLI
+sets `EXPRESS_RECON_DRY=1` before requiring the app:
 
 ```js
 const DRY = process.env.EXPRESS_RECON_DRY === "1";

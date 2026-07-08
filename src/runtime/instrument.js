@@ -23,16 +23,111 @@ const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"
  */
 function instrument(express) {
   if (express[PATCHED]) return express;
+  // Express 5's Router() chains instance → per-call Router object → shared
+  // Router.prototype; patching the immediate prototype would only affect the
+  // probe instance. Walk to the object that actually OWNS the methods (also
+  // correct on Express 4, where it's the module-level proto singleton).
+  const routerProto = ownerOf(express.Router(), "route");
   const targets = [
     { proto: express.application, getStack: appStack },
-    { proto: Object.getPrototypeOf(express.Router()), getStack: (r) => r.stack },
+    { proto: routerProto, getStack: (r) => r.stack },
   ];
   for (const { proto, getStack } of targets) wrapUse(proto, getStack);
   // Every verb registration (`app.get`, `router.get`, `.route().get()`) funnels
   // through the Route prototype, reachable only via a constructed instance.
   wrapRouteVerbs(Object.getPrototypeOf(express.Router().route("/__recon-probe")));
+  // Wrapped AFTER the probe `.route()` call above, so the probe router itself
+  // is never captured.
+  wrapRoute(routerProto);
   express[PATCHED] = true;
   return express;
+}
+
+/**
+ * Apps and routers seen registering routes/middleware, so a boot that throws
+ * AFTER wiring can still be walked (`harvestApp`) instead of yielding nothing.
+ * Process-global, like the prototype patches — callers reset per boot.
+ */
+const capturedRoots = new Set();
+
+/** Nearest object in `obj`'s prototype chain that owns `prop`. */
+function ownerOf(obj, prop) {
+  let p = obj;
+  while (p !== null && !Object.prototype.hasOwnProperty.call(p, prop)) {
+    p = Object.getPrototypeOf(p);
+  }
+  return p;
+}
+
+function resetCapture() {
+  capturedRoots.clear();
+}
+
+/**
+ * Every verb registration reaches its router through `Router#route`; capture
+ * `this` there (the Route-proto verb wrappers see a Route, which isn't
+ * walkable).
+ */
+function wrapRoute(routerProto) {
+  const original = routerProto.route;
+  routerProto.route = function instrumentedRoute(...args) {
+    capturedRoots.add(this);
+    return original.apply(this, args);
+  };
+}
+
+function stackOf(candidate) {
+  if (!candidate) return null;
+  if (Array.isArray(candidate.stack)) return candidate.stack;
+  return appStack(candidate);
+}
+
+function collectNested(root, nested, seen) {
+  const stack = stackOf(root);
+  if (!stack) return;
+  for (const layer of stack) {
+    const handle = layer.handle;
+    if (!handle || seen.has(handle)) continue;
+    seen.add(handle);
+    nested.add(handle);
+    const inner = appStack(handle) && (handle.router || handle._router);
+    if (inner) nested.add(inner);
+    collectNested(handle, nested, seen);
+  }
+}
+
+/**
+ * Top-level captured candidates: sub-routers reachable from another captured
+ * entry's stack are dropped (they'd double-count), as is an app's own internal
+ * router when the app itself was captured. Apps sort before bare routers.
+ */
+function getCapturedRoots() {
+  const roots = [...capturedRoots];
+  const nested = new Set();
+  const seen = new Set();
+  for (const root of roots) {
+    collectNested(root, nested, seen);
+    const inner = appStack(root) && (root.router || root._router);
+    if (inner) nested.add(inner);
+  }
+  const isApp = (c) => (typeof c.set === "function" && appStack(c) ? 1 : 0);
+  return roots.filter((r) => !nested.has(r)).sort((a, b) => isApp(b) - isApp(a));
+}
+
+/**
+ * Merge captured roots into one walkable host. Multiple disjoint roots (a boot
+ * that died before wiring them together) become a synthetic root router; each
+ * layer keeps its MOUNT_KEY prefix, and the `use` no-op satisfies walk()'s
+ * app-or-Router guard.
+ */
+function harvestApp(roots) {
+  if (roots.length === 1) return roots[0];
+  const stack = [];
+  for (const root of roots) {
+    const s = stackOf(root);
+    if (s) stack.push(...s);
+  }
+  return { stack, use() {} };
 }
 
 /**
@@ -90,6 +185,7 @@ function isPathArg(arg) {
 function wrapUse(proto, getStack) {
   const original = proto.use;
   proto.use = function instrumentedUse(...args) {
+    capturedRoots.add(this);
     const path = isPathArg(args[0]) ? args[0] : null;
     const before = getStack(this) ? getStack(this).length : 0;
     const result = original.apply(this, args);
@@ -103,4 +199,11 @@ function wrapUse(proto, getStack) {
   };
 }
 
-module.exports = { instrument, MOUNT_KEY, SOURCE_KEY };
+module.exports = {
+  instrument,
+  resetCapture,
+  getCapturedRoots,
+  harvestApp,
+  MOUNT_KEY,
+  SOURCE_KEY,
+};
