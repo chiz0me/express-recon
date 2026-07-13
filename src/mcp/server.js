@@ -38,11 +38,17 @@ function registerTools(server) {
       title: "Inventory Express routes",
       description:
         "Statically list every Express route, HTTP method, middleware chain, and source file/line under a directory. No security judgment, no code execution.",
-      inputSchema: { dir: z.string().describe("Absolute or cwd-relative repo directory to scan") },
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
+        includeTests: z
+          .boolean()
+          .optional()
+          .describe("Also scan test files/dirs (excluded by default)"),
+      },
     },
-    async ({ dir }) => {
+    async ({ dir, includeTests }) => {
       try {
-        const reg = inventory({ mode: "static", src: resolveDir(dir) });
+        const reg = inventory({ mode: "static", src: resolveDir(dir), includeTests });
         return jsonResult(buildReport(reg, { command: "inventory", mode: "static" }));
       } catch (err) {
         return errorResult(err);
@@ -64,13 +70,23 @@ function registerTools(server) {
           .describe(
             "Map of auth middleware name/callee -> tag. Run suggest_auth to discover candidates.",
           ),
+        acceptedPublic: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Baseline of reviewed intentionally-public routes as 'METHOD /path' keys (e.g. 'GET /health'); suppresses their public-route finding.",
+          ),
+        includeTests: z
+          .boolean()
+          .optional()
+          .describe("Also scan test files/dirs (excluded by default)"),
       },
     },
-    async ({ dir, authMiddleware }) => {
+    async ({ dir, authMiddleware, acceptedPublic, includeTests }) => {
       try {
         const reg = audit(
-          { mode: "static", src: resolveDir(dir) },
-          { authMiddleware: authMiddleware || {} },
+          { mode: "static", src: resolveDir(dir), includeTests },
+          { authMiddleware: authMiddleware || {}, acceptedPublic: acceptedPublic || [] },
         );
         return jsonResult(buildReport(reg, { command: "audit", mode: "static" }));
       } catch (err) {
@@ -85,11 +101,19 @@ function registerTools(server) {
       title: "Suggest auth-middleware allowlist",
       description:
         "Scan a repo and propose auth-middleware allowlist candidates (ranked, likely guards first) to seed the authMiddleware map for audit_routes.",
-      inputSchema: { dir: z.string().describe("Absolute or cwd-relative repo directory to scan") },
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
+        includeTests: z
+          .boolean()
+          .optional()
+          .describe("Also scan test files/dirs (excluded by default)"),
+      },
     },
-    async ({ dir }) => {
+    async ({ dir, includeTests }) => {
       try {
-        return jsonResult(suggestAuth(inventory({ mode: "static", src: resolveDir(dir) })));
+        return jsonResult(
+          suggestAuth(inventory({ mode: "static", src: resolveDir(dir), includeTests })),
+        );
       } catch (err) {
         return errorResult(err);
       }

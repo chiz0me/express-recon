@@ -12,6 +12,8 @@ const {
   REPORT_SCHEMA,
   formatters,
 } = require("./index");
+const { resetCapture, getCapturedRoots, harvestApp } = require("./runtime/instrument");
+const { installSandbox } = require("./runtime/sandbox");
 
 const USAGE = `
 express-recon — inventory & audit Express 4/5 route surfaces
@@ -29,12 +31,17 @@ Options:
   --mode static|runtime|hybrid   default: static
   --src <dir>           repo root to statically scan (static/hybrid; default cwd)
   --app <path>          JS file exporting the Express app (runtime/hybrid).
+                        Booted in a sandbox: infra clients (pg, redis, mongoose,
+                        …) are stubbed, listen()/process.exit are neutralized.
                         EXPRESS_RECON_DRY=1 is set before requiring it.
   --config <path>       JS file exporting { authMiddleware: { name: tag } } (audit)
+                        and boot options for runtime/hybrid:
+                        { boot: { sandbox: false, stubModules: [...], env: {...} } }
   --format json,md,pretty   default: pretty (json for suggest-auth/schema)
   --out <dir>           write routes.json/routes.md into <dir> (else stdout)
   --fail-on <statuses>  audit only: exit 2 if any route matches, e.g. public or
                         public,unknown. For CI gates and agent assertions.
+  --include-tests       also scan test files/dirs (excluded by default)
   --help                show this message
 `;
 
@@ -52,6 +59,7 @@ function parseArgs(argv) {
     else if (arg === "--format") out.format = argv[++i];
     else if (arg === "--out") out.out = argv[++i];
     else if (arg === "--fail-on") out.failOn = argv[++i];
+    else if (arg === "--include-tests") out.includeTests = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return out;
@@ -75,34 +83,57 @@ function instrumentApp(resolved) {
   }
 }
 
-function loadApp(appPath) {
+async function loadApp(appPath, boot) {
   if (!appPath) die("runtime/hybrid mode requires --app");
   process.env.EXPRESS_RECON_DRY = "1";
+  for (const [key, value] of Object.entries(boot.env || {})) process.env[key] = String(value);
   const resolved = resolvePath(appPath);
   instrumentApp(resolved);
+  resetCapture();
+  const sandbox = boot.sandbox === false ? null : installSandbox({ stubModules: boot.stubModules });
   let mod;
+  let bootError = null;
   try {
     mod = require(resolved);
   } catch (err) {
-    die(`Failed to require ${resolved}:\n  ${err.message}`);
+    bootError = err;
   }
-  const app = mod && mod.app ? mod.app : mod;
-  if (!app || (typeof app !== "function" && !app.use)) {
-    die(`Module at ${resolved} did not export an Express app (got ${typeof app}).`);
-  }
-  return app;
+  // Drain the microtask queue once, so routes registered after an awaited
+  // (stubbed) connect — `await client.connect(); wireRoutes(app)` — exist
+  // before the stack is walked. Stubs never do IO, so one tick suffices.
+  await new Promise((resolve) => setImmediate(resolve));
+  const bootDiagnostics = sandbox ? sandbox.diagnostics() : [];
+  if (sandbox) sandbox.uninstall(); // die() below needs the real process.exit
+  const exported = mod && mod.app ? mod.app : mod;
+  const usable = exported && (typeof exported === "function" || exported.use);
+  if (!bootError && usable) return { app: exported, bootDiagnostics };
+  const reason = bootError
+    ? `threw during require: ${bootError.message}`
+    : `did not export an Express app (got ${typeof exported})`;
+  const roots = getCapturedRoots();
+  if (roots.length === 0) die(`Failed to load ${resolved}:\n  ${reason}`);
+  bootDiagnostics.push(
+    `boot: ${resolved} ${reason}; harvested routes from ${roots.length} captured ` +
+      `app/router(s) registered before the failure — results may be partial`,
+  );
+  return { app: harvestApp(roots), bootDiagnostics };
 }
 
 function loadConfig(configPath) {
   return configPath ? require(resolvePath(configPath)) : {};
 }
 
-function harnessOpts(args) {
+async function harnessOpts(args, config) {
   const needsApp = args.mode === "runtime" || args.mode === "hybrid";
+  const loaded = needsApp ? await loadApp(args.app, config.boot || {}) : null;
   return {
-    mode: args.mode,
-    src: resolvePath(args.src || process.cwd()),
-    app: needsApp ? loadApp(args.app) : undefined,
+    opts: {
+      mode: args.mode,
+      src: resolvePath(args.src || process.cwd()),
+      app: loaded ? loaded.app : undefined,
+      includeTests: args.includeTests,
+    },
+    bootDiagnostics: loaded ? loaded.bootDiagnostics : [],
   };
 }
 
@@ -131,16 +162,18 @@ function failOnExit(report, failOn) {
   if (!failOn) return 0;
   const statuses = failOn.split(",").map((s) => s.trim());
   for (const s of statuses) if (!STATUSES.has(s)) die(`--fail-on: unknown status "${s}"`);
-  const hit = report.routes.filter((r) => statuses.includes(r.authStatus));
+  const hit = report.routes.filter((r) => statuses.includes(r.authStatus) && !r.accepted);
   if (hit.length === 0) return 0;
   process.stderr.write(`express-recon: ${hit.length} route(s) matched --fail-on ${failOn}\n`);
   return 2;
 }
 
-function runReportCommand(command, args) {
-  const config = command === "audit" ? loadConfig(args.config) : {};
-  const opts = harnessOpts(args);
+async function runReportCommand(command, args) {
+  const config = loadConfig(args.config); // inventory reads it too, for `boot`
+  const { opts, bootDiagnostics } = await harnessOpts(args, config);
   const registry = command === "audit" ? audit(opts, config) : inventory(opts);
+  if (bootDiagnostics.length > 0)
+    registry.diagnostics = [...(registry.diagnostics || []), ...bootDiagnostics];
   const report = buildReport(registry, { command, mode: args.mode });
   writeReport(report, args);
   warnDiagnostics(report);
@@ -152,13 +185,14 @@ function warnDiagnostics(report) {
     process.stderr.write(`express-recon [warn]: ${message}\n`);
 }
 
-function runSuggestAuth(args) {
-  const result = suggestAuth(inventory(harnessOpts(args)));
+async function runSuggestAuth(args) {
+  const { opts } = await harnessOpts(args, loadConfig(args.config));
+  const result = suggestAuth(inventory(opts));
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
   return 0;
 }
 
-function main(argv) {
+async function main(argv) {
   const args = parseArgs(argv);
   if (args.help || !args.command || args.command === "help") {
     process.stdout.write(USAGE);
@@ -174,8 +208,17 @@ function main(argv) {
   die(`Unknown command: ${args.command}\n${USAGE}`);
 }
 
-try {
-  process.exit(main(process.argv.slice(2)));
-} catch (err) {
-  die(err.message);
-}
+// Set the exit code and let the process end on its own rather than calling
+// process.exit(), which would truncate a large report still buffered in the
+// stdout pipe (~64KB) — e.g. `express-recon audit --format json | jq`. Static
+// scanning is synchronous, and under the boot sandbox listen() never binds a
+// port, so a loaded app leaves no open handles and the event loop drains once
+// output flushes. Caveat: an app that starts its own timers at boot
+// (setInterval health pingers) still holds the loop open — the escape hatches
+// are `boot: { sandbox: false }` plus an EXPRESS_RECON_DRY gate in the app.
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err) => die(err.message),
+);

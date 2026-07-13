@@ -54,8 +54,12 @@ function header(report) {
   ];
   if (report.summary) {
     const s = report.summary;
+    const accepted = s.accepted ? `   accepted: ${s.accepted}` : "";
     lines.push(
-      paint(`public: ${s.public}   review: ${s.unknown}   proven-auth: ${s.proven}`, COLORS.dim),
+      paint(
+        `public: ${s.public}   review: ${s.unknown}   proven-auth: ${s.proven}${accepted}`,
+        COLORS.dim,
+      ),
     );
   }
   lines.push(paint(`Global middleware: ${mwNames(report.globalMiddleware)}`, COLORS.dim), "");
@@ -68,8 +72,12 @@ function renderRoute(route, audit) {
   const src = paint(sourceLabel(route.source).padEnd(22), COLORS.dim);
   const mw = paint(mwNames(route.middlewares), COLORS.dim);
   if (!audit) return `  ${method} ${routePath} ${src} ${mw}`;
-  const status = paint(`[${route.authStatus}]`, STATUS_COLOR[route.authStatus] || COLORS.dim);
-  return `  ${method} ${routePath} ${padRight(status, 11)} ${src} ${mw}`;
+  const label = route.accepted ? "public·accepted" : route.authStatus;
+  const status = paint(
+    `[${label}]`,
+    route.accepted ? COLORS.dim : STATUS_COLOR[route.authStatus] || COLORS.dim,
+  );
+  return `  ${method} ${routePath} ${padRight(status, 18)} ${src} ${mw}`;
 }
 
 function format(report) {

@@ -3,14 +3,21 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { analyzeFile } = require("./analyze-file");
-const { loadTsconfig, createResolver, EXTENSIONS } = require("./resolve");
-const { joinPath } = require("../walk");
+const { loadTsconfig, loadImports, createResolver, EXTENSIONS } = require("./resolve");
+const { joinPath, scopedTo } = require("../walk");
 
 const SOURCE_EXT = new Set(EXTENSIONS);
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", "out"]);
+const TEST_DIRS = new Set(["test", "tests", "__tests__", "__mocks__"]);
+const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
-/** Recursively collect source files under `dir`, skipping vendored/build dirs. */
-function listSourceFiles(dir) {
+/**
+ * Recursively collect source files under `dir`, skipping vendored/build dirs.
+ * Test files are excluded by default — apps built inside tests/fixtures would
+ * otherwise pollute the inventory with routes that never ship.
+ */
+function listSourceFiles(dir, opts = {}) {
+  const includeTests = Boolean(opts.includeTests);
   const found = [];
   const stack = [dir];
   while (stack.length) {
@@ -24,8 +31,11 @@ function listSourceFiles(dir) {
     for (const entry of entries) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) stack.push(full);
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        if (!includeTests && TEST_DIRS.has(entry.name)) continue;
+        stack.push(full);
       } else if (SOURCE_EXT.has(path.extname(entry.name))) {
+        if (!includeTests && TEST_FILE.test(entry.name)) continue;
         found.push(full);
       }
     }
@@ -133,36 +143,68 @@ function buildGraph(files, resolve) {
       if (isRouteHost(node)) node.routes.push({ ...route, file: file.filePath });
       else stats.dropped++;
     }
-    for (const [host, mws] of file.globalMwByHost) resolveLocal(file, host).globalMw.push(...mws);
+    for (const [host, mws] of file.globalMwByHost) {
+      resolveLocal(file, host).globalMw.push(...mws.map((e) => ({ ...e, file: file.filePath })));
+    }
     for (const edge of file.edges) {
       const target = resolveRef(file, edge.targetRef);
       const hostNode = resolveLocal(file, edge.host);
       if (isRouteHost(target)) {
         hostNode.edges.push({
           mountPath: edge.mountPath,
+          partial: Boolean(edge.partial),
           targetId: target.id,
-          edgeMw: edge.edgeMw,
+          edgeMw: edge.edgeMw.map((e) => ({ ...e, file: file.filePath })),
+          line: edge.line,
+          file: file.filePath,
         });
       } else {
         // Not a router after all — a locally-required middleware (e.g. an auth
         // guard) used in `.use()`. Keep it in the chain instead of dropping it.
-        hostNode.globalMw.push(edge.fallbackMw, ...edge.edgeMw);
+        hostNode.globalMw.push(
+          { ...edge.fallbackMw, file: file.filePath },
+          ...edge.edgeMw.map((e) => ({ ...e, file: file.filePath })),
+        );
       }
     }
   }
   return { nodes, stats };
 }
 
+/**
+ * Does a `use()`-attached middleware apply to a route/edge registered on the
+ * same host? Express only runs middleware over registrations that come after
+ * it, so within one file the `use()` line must not exceed the target's line.
+ * Cross-file attachments (a router `use()`d from another module) keep the
+ * conservative include-always behavior.
+ */
+function appliesInOrder(entry, item) {
+  if (entry.file == null || entry.line == null || item.file == null || item.line == null)
+    return true;
+  if (entry.file !== item.file) return true;
+  return entry.line <= item.line;
+}
+
 function emitRoute(route, prefix, accMw, partial, out) {
   const dynamic = route.path === null;
   const full = dynamic ? joinPath(prefix, "<dynamic>") : joinPath(prefix, route.path);
+  const chain = accMw.filter((e) => scopedTo(full, e.scopeAbs)).map((e) => e.mw);
   out.push({
     method: route.method,
     path: full,
-    middlewares: accMw.concat(route.middlewares),
+    middlewares: chain.concat(route.middlewares),
     source: { file: route.file, line: route.line },
     pathConfidence: partial || dynamic ? "partial" : "full",
   });
+}
+
+/** Absolute guard scope of a `use(path, mw)` entry attached under `prefix`. */
+function absScope(prefix, scope) {
+  if (scope == null || scope === "" || scope === "/") return null;
+  // Wildcard patterns (`*`, `/api/*`) are not literal prefixes; treat them as
+  // host-wide rather than dropping the guard from every chain.
+  if (scope.includes("*")) return null;
+  return joinPath(prefix, scope);
 }
 
 /** Depth-first walk of the router graph from a root, emitting fully-pathed routes. */
@@ -170,13 +212,19 @@ function traverse(nodes, nodeId, prefix, inherited, partial, stack, ctx) {
   const node = nodes.get(nodeId);
   if (!node) return;
   ctx.visited.add(nodeId);
-  const accMw = inherited.concat(node.globalMw);
-  for (const route of node.routes) emitRoute(route, prefix, accMw, partial, ctx.out);
+  const own = node.globalMw.map((e) => ({ ...e, scopeAbs: absScope(prefix, e.scope) }));
+  for (const route of node.routes) {
+    const accMw = inherited.concat(own.filter((e) => appliesInOrder(e, route)));
+    emitRoute(route, prefix, accMw, partial, ctx.out);
+  }
   for (const edge of node.edges) {
     if (stack.has(edge.targetId)) continue;
     const childPrefix = edge.mountPath === null ? prefix : joinPath(prefix, edge.mountPath);
+    const forChild = inherited
+      .concat(own.filter((e) => appliesInOrder(e, edge)))
+      .concat(edge.edgeMw.map((e) => ({ ...e, scopeAbs: null })));
     const nextStack = new Set(stack).add(edge.targetId);
-    traverse(nodes, edge.targetId, childPrefix, accMw.concat(edge.edgeMw), partial, nextStack, ctx);
+    traverse(nodes, edge.targetId, childPrefix, forChild, partial || edge.partial, nextStack, ctx);
   }
 }
 
@@ -217,13 +265,17 @@ function diagnose({ appNodes, reachable, orphan, dropped }) {
  * Statically scan a repo for Express routes without executing any code.
  *
  * @param {string} rootDir  directory to scan
+ * @param {{includeTests?: boolean}} [opts]
  * @returns {{routes: object[], globalMiddleware: object[], diagnostics: string[]}}
  */
-function scan(rootDir) {
-  const files = listSourceFiles(rootDir)
+function scan(rootDir, opts = {}) {
+  // Absolute so file ids match the resolver's absolute mount targets — a
+  // relative rootDir would otherwise orphan every cross-file mount.
+  const root = path.resolve(rootDir);
+  const files = listSourceFiles(root, opts)
     .map((f) => analyzeFile(fs.readFileSync(f, "utf8"), f))
     .filter(Boolean);
-  const resolve = createResolver(loadTsconfig(rootDir));
+  const resolve = createResolver(loadTsconfig(root), loadImports(root));
   const { nodes, stats } = buildGraph(files, resolve);
 
   const ctx = { out: [], visited: new Set() };
@@ -235,20 +287,44 @@ function scan(rootDir) {
   }
   const reachable = ctx.out.length;
   // Routers never reached from an app: emit with unknown mount prefix so an
-  // audit never silently drops a route.
+  // audit never silently drops a route. Scope filtering is skipped — the true
+  // prefix is unknown, so a scoped guard can't be disproven.
   for (const node of nodes.values()) {
     if (ctx.visited.has(node.id) || node.routes.length === 0 || node.kind !== "router") continue;
-    for (const route of node.routes) emitRoute(route, "", node.globalMw, true, ctx.out);
+    for (const route of node.routes) {
+      const accMw = node.globalMw
+        .filter((e) => appliesInOrder(e, route))
+        .map((e) => ({ ...e, scopeAbs: null }));
+      emitRoute(route, "", accMw, true, ctx.out);
+    }
   }
   const orphan = ctx.out.length - reachable;
+
+  // Registrar-pattern routes (registered on a function parameter): host and
+  // prefix unknown, so they surface as partial orphans with a diagnostic.
+  const registrarHosts = new Map();
+  for (const file of files) {
+    for (const route of file.registrarRoutes) {
+      emitRoute({ ...route, file: file.filePath }, "", [], true, ctx.out);
+      const key = `'${route.host}' in ${file.filePath}`;
+      registrarHosts.set(key, (registrarHosts.get(key) || 0) + 1);
+    }
+  }
   const out = ctx.out;
 
   const seen = new Set();
   const routes = out.filter((r) => !seen.has(dedupeKey(r)) && seen.add(dedupeKey(r)));
   const globalMiddleware = [];
   for (const node of nodes.values())
-    if (node.kind === "app") globalMiddleware.push(...node.globalMw);
+    if (node.kind === "app") globalMiddleware.push(...node.globalMw.map((e) => e.mw));
   const diagnostics = diagnose({ appNodes, reachable, orphan, dropped: stats.dropped });
+  for (const [host, count] of registrarHosts) {
+    diagnostics.push(
+      `${count} route(s) registered on unresolved host ${host} — likely a registrar ` +
+        "function invoked elsewhere; mount prefixes are unknown. " +
+        "Re-run with --mode hybrid --app <entry> to recover them.",
+    );
+  }
   return { routes, globalMiddleware, diagnostics };
 }
 

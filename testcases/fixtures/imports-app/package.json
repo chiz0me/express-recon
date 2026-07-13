@@ -1,0 +1,11 @@
+{
+  "name": "imports-app",
+  "imports": {
+    "#routes/*": "./routes/*",
+    "#mw/*": "./src/mw/*",
+    "#config": {
+      "node": "./src/config.js",
+      "default": "./src/config.js"
+    }
+  }
+}

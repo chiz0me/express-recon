@@ -51,14 +51,30 @@ function calleeName(node) {
   return null;
 }
 
-/** Extract a static string from a string literal or expression-free template. */
-function staticString(node) {
+/**
+ * Extract a static string from a literal, template, `+` concatenation, or —
+ * when a `consts` map (name -> resolved string) is given — an identifier bound
+ * to a same-file string const, including inside template expressions.
+ */
+function staticString(node, consts) {
   const n = unwrap(node);
   if (!n) return null;
   if (n.type === "Literal" && typeof n.value === "string") return n.value;
-  if (n.type === "TemplateLiteral" && n.expressions.length === 0) {
-    return n.quasis.map((q) => q.value.cooked).join("");
+  if (n.type === "TemplateLiteral") {
+    const parts = n.expressions.map((e) => staticString(e, consts));
+    if (parts.some((p) => p === null)) return null;
+    let text = "";
+    n.quasis.forEach((q, i) => {
+      text += q.value.cooked + (parts[i] ?? "");
+    });
+    return text;
   }
+  if (n.type === "BinaryExpression" && n.operator === "+") {
+    const left = staticString(n.left, consts);
+    const right = staticString(n.right, consts);
+    return left !== null && right !== null ? left + right : null;
+  }
+  if (n.type === "Identifier" && consts && consts.has(n.name)) return consts.get(n.name);
   return null;
 }
 
@@ -66,6 +82,25 @@ function staticString(node) {
 function snippet(code, node, max = 80) {
   const text = code.slice(node.start, node.end).replace(/\s+/g, " ").trim();
   return text.length > max ? text.slice(0, max - 1) + "…" : text;
+}
+
+/** Function-ish names referenced inside call arguments (`asyncHandler(requireAuth)`). */
+function collectInnerNames(args, acc) {
+  for (const arg of args) {
+    const n = unwrap(arg);
+    if (!n) continue;
+    if (n.type === "Identifier") acc.push(n.name);
+    else if (n.type === "MemberExpression") {
+      const name = calleeName(n);
+      if (name) acc.push(name);
+    } else if (n.type === "CallExpression") {
+      const name = calleeName(n.callee);
+      if (name) acc.push(name);
+      collectInnerNames(n.arguments, acc);
+    } else if (n.type === "ArrayExpression") {
+      collectInnerNames(n.elements.filter(Boolean), acc);
+    }
+  }
 }
 
 /**
@@ -90,7 +125,17 @@ function middlewareFromArg(arg, code) {
   }
   if (node.type === "CallExpression") {
     const name = calleeName(node.callee);
-    return descriptor({ name: name || "<anonymous>", kind: "call", raw: snippet(code, node) });
+    const desc = descriptor({
+      name: name || "<anonymous>",
+      kind: "call",
+      raw: snippet(code, node),
+    });
+    // A wrapper call (`asyncHandler(requireAuth)`) hides its payload behind the
+    // wrapper's name; keep the inner names so the allowlist can still match.
+    const inner = [];
+    collectInnerNames(node.arguments, inner);
+    if (inner.length > 0) desc.inner = inner;
+    return desc;
   }
   if (node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression") {
     return descriptor({ name: "<anonymous>", kind: "anonymous", raw: "<inline fn>" });

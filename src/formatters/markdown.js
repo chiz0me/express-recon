@@ -34,7 +34,7 @@ function renderTable(routes, audit) {
     : ["Method", "Path", "Source", "Middlewares"];
   const body = sorted.map((r) => {
     const base = [r.method, pathCell(r)];
-    if (audit) base.push(r.authStatus);
+    if (audit) base.push(r.accepted ? "public (accepted)" : r.authStatus);
     base.push(sourceLabel(r.source), mwNames(r.middlewares));
     return renderRow(base);
   });
@@ -54,18 +54,25 @@ function findingList(findings, id, emptyMsg) {
     .join("\n");
 }
 
+function detailList(findings, id, emptyMsg) {
+  const matches = findings.filter((f) => f.id === id);
+  if (matches.length === 0) return emptyMsg;
+  return matches.map((f) => `- ${f.detail}`).join("\n");
+}
+
 function auditSections(report) {
   const f = report.findings;
   const s = report.summary;
-  return [
-    `Total routes: **${s.routes}** — public: **${s.public}**, needs review: **${s.unknown}**, proven auth: **${s.proven}**`,
+  const accepted = s.accepted ? `, accepted: **${s.accepted}**` : "";
+  const sections = [
+    `Total routes: **${s.routes}** — public: **${s.public}**, needs review: **${s.unknown}**, proven auth: **${s.proven}**${accepted}`,
     "",
     "## Public — no recognised auth middleware",
     "",
     findingList(
       f,
       "public-route",
-      "_None — every route matched an auth middleware or needs review._",
+      "_None — every route matched an auth middleware, is accepted, or needs review._",
     ),
     "",
     "## Per-verb auth gaps — same path, different auth per method",
@@ -77,6 +84,15 @@ function auditSections(report) {
     findingList(f, "opaque-middleware", "_None._"),
     "",
   ];
+  if (f.some((x) => x.id === "stale-baseline")) {
+    sections.push(
+      "## Stale baseline entries — prune from acceptedPublic",
+      "",
+      detailList(f, "stale-baseline", "_None._"),
+      "",
+    );
+  }
+  return sections;
 }
 
 function format(report) {

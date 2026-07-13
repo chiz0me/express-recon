@@ -18,9 +18,10 @@ const { reconcile } = require("./reconcile");
  */
 function inventory(opts) {
   const { mode } = opts;
+  const scanOpts = { includeTests: opts.includeTests };
   if (mode === "runtime") return walk(requireApp(opts));
-  if (mode === "static") return scan(requireSrc(opts));
-  if (mode === "hybrid") return reconcile(scan(requireSrc(opts)), walk(requireApp(opts)));
+  if (mode === "static") return scan(requireSrc(opts), scanOpts);
+  if (mode === "hybrid") return reconcile(scan(requireSrc(opts), scanOpts), walk(requireApp(opts)));
   throw new Error(`inventory: unknown mode "${mode}"`);
 }
 
@@ -35,7 +36,7 @@ function audit(opts, config) {
   const cfg = config || {};
   const { mode } = opts;
   if (mode === "hybrid") {
-    const staticReg = classify(scan(requireSrc(opts)), cfg);
+    const staticReg = classify(scan(requireSrc(opts), { includeTests: opts.includeTests }), cfg);
     const runtimeReg = classify(walk(requireApp(opts)), cfg);
     return reconcile(staticReg, runtimeReg);
   }

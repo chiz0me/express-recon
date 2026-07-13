@@ -25,9 +25,17 @@ const REVIEW_TAG = "unknown:review";
 function authStatusFor(middlewares, authMiddleware) {
   const tags = new Set();
   let opaque = false;
+  // Own-property lookup only: a middleware named `constructor` must not match
+  // Object.prototype and classify as proven.
+  const tagFor = (name) => (Object.hasOwn(authMiddleware, name) ? authMiddleware[name] : undefined);
   for (const mw of middlewares) {
-    const tag = authMiddleware[mw.name];
+    const tag = tagFor(mw.name);
     if (tag) tags.add(tag);
+    // Wrapped guards (`asyncHandler(requireAuth)`) match through their inner names.
+    for (const name of mw.inner || []) {
+      const innerTag = tagFor(name);
+      if (innerTag) tags.add(innerTag);
+    }
     if (isOpaque(mw)) opaque = true;
   }
   if (tags.size > 0) return { authStatus: "proven", tags: [...tags] };
@@ -35,24 +43,34 @@ function authStatusFor(middlewares, authMiddleware) {
   return { authStatus: "public", tags: [PUBLIC_TAG] };
 }
 
-function tagRoute(route, authMiddleware) {
+function routeKey(route) {
+  return `${route.method} ${route.path}`;
+}
+
+function tagRoute(route, authMiddleware, acceptedPublic) {
   const { authStatus, tags } = authStatusFor(route.middlewares, authMiddleware);
-  return { ...route, authStatus, tags };
+  const accepted = authStatus === "public" && acceptedPublic.has(routeKey(route));
+  return accepted ? { ...route, authStatus, tags, accepted: true } : { ...route, authStatus, tags };
 }
 
 /**
  * Annotate every route with `authStatus` + `tags` derived from
- * `options.authMiddleware`.
+ * `options.authMiddleware`. Routes whose `METHOD /path` key is in
+ * `options.acceptedPublic` — a reviewed baseline of intentionally-open
+ * endpoints — are additionally tagged `accepted`, which suppresses their
+ * `public-route` finding and `--fail-on public` match.
  *
  * @param {{routes: object[], globalMiddleware: object[]}} registry
- * @param {{authMiddleware?: Record<string,string>}} options
+ * @param {{authMiddleware?: Record<string,string>, acceptedPublic?: string[]}} options
  */
 function classify(registry, options) {
   const authMiddleware = (options && options.authMiddleware) || {};
+  const acceptedPublic = new Set((options && options.acceptedPublic) || []);
   return {
-    routes: registry.routes.map((r) => tagRoute(r, authMiddleware)),
+    routes: registry.routes.map((r) => tagRoute(r, authMiddleware, acceptedPublic)),
     globalMiddleware: registry.globalMiddleware,
     diagnostics: registry.diagnostics || [],
+    acceptedPublic: [...acceptedPublic],
   };
 }
 
@@ -68,7 +86,7 @@ function inconsistentPaths(routes) {
   const byPath = new Map();
   for (const route of routes) {
     const acc = byPath.get(route.path) || [];
-    acc.push({ method: route.method, authStatus: route.authStatus });
+    acc.push({ method: route.method, authStatus: route.authStatus, source: route.source || null });
     byPath.set(route.path, acc);
   }
   const result = [];

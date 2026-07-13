@@ -8,6 +8,11 @@ const descriptor = {
     name: { type: "string", description: "Identifier, dotted callee, or '<anonymous>'" },
     kind: { enum: ["identifier", "call", "anonymous", "unknown"] },
     raw: { type: "string", description: "Best-effort source snippet" },
+    inner: {
+      type: "array",
+      items: { type: "string" },
+      description: "Names referenced inside a wrapper call, e.g. asyncHandler(requireAuth)",
+    },
   },
   required: ["name", "kind", "raw"],
 };
@@ -26,13 +31,20 @@ const source = {
 const route = {
   type: "object",
   properties: {
-    method: { type: "string" },
-    path: { type: "string" },
+    method: { type: "string", description: "HTTP verb, or 'ALL' for router.all() routes" },
+    path: {
+      type: "string",
+      description: "Full mount path; '<dynamic>' marks an unresolvable segment",
+    },
     middlewares: { type: "array", items: descriptor },
     source,
     pathConfidence: { enum: ["full", "partial"] },
     authStatus: { enum: ["proven", "public", "unknown"], description: "audit only" },
     tags: { type: "array", items: { type: "string" }, description: "audit only" },
+    accepted: {
+      type: "boolean",
+      description: "audit only: public but acknowledged via the acceptedPublic baseline",
+    },
     presence: { enum: ["both", "static-only", "runtime-only"], description: "hybrid only" },
   },
   required: ["method", "path", "middlewares", "pathConfidence"],
@@ -41,7 +53,7 @@ const route = {
 const finding = {
   type: "object",
   properties: {
-    id: { enum: ["public-route", "per-verb-gap", "opaque-middleware"] },
+    id: { enum: ["public-route", "per-verb-gap", "opaque-middleware", "stale-baseline"] },
     severity: { enum: ["high", "medium", "low"] },
     method: { type: "string" },
     path: { type: "string" },
@@ -71,13 +83,15 @@ const REPORT_SCHEMA = {
         public: { type: "integer" },
         unknown: { type: "integer" },
         proven: { type: "integer" },
+        accepted: { type: "integer", description: "public routes acknowledged via acceptedPublic" },
       },
     },
     findings: { type: "array", items: finding, description: "audit only" },
     diagnostics: {
       type: "array",
       items: { type: "string" },
-      description: "static-mode warnings about resolution confidence",
+      description:
+        "warnings about resolution confidence (static) and sandboxed boot (runtime/hybrid)",
     },
   },
   required: ["schemaVersion", "tool", "command", "mode", "routes", "globalMiddleware"],

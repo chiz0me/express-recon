@@ -1,0 +1,165 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+
+const { audit } = require("../src/index");
+const { authStatusFor } = require("../src/classify");
+const { reconcile } = require("../src/reconcile");
+
+const FIXTURE = path.join(__dirname, "fixtures", "accuracy-app");
+const CONFIG = { authMiddleware: { requireAuth: "authenticated" } };
+
+function run() {
+  return audit({ mode: "static", src: FIXTURE }, CONFIG);
+}
+
+function index(routes) {
+  return Object.fromEntries(routes.map((r) => [`${r.method} ${r.path}`, r]));
+}
+
+test("a path-scoped guard proves only routes under its prefix", () => {
+  const routes = index(run().routes);
+  assert.equal(routes["GET /admin/panel"].authStatus, "proven");
+  assert.equal(routes["GET /outside"].authStatus, "public");
+});
+
+test("an array mount path scopes the guard to each listed prefix", () => {
+  const routes = index(run().routes);
+  assert.equal(routes["GET /x/thing"].authStatus, "proven");
+  assert.equal(routes["GET /z/thing"].authStatus, "public");
+});
+
+test("chained use()/verb registrations resolve to the root host", () => {
+  const routes = index(run().routes);
+  assert.equal(routes["GET /chained"].authStatus, "proven");
+  assert.ok(routes["GET /chained"].middlewares.some((m) => m.name === "limiter"));
+});
+
+test("route().all() guards apply to sibling verbs, without a phantom ALL route", () => {
+  const routes = index(run().routes);
+  assert.equal(routes["GET /config"].authStatus, "proven");
+  assert.equal(routes["PUT /config"].authStatus, "proven");
+  assert.equal(routes["ALL /config"], undefined);
+});
+
+test("array route paths expand to one full-confidence route per path", () => {
+  const routes = index(run().routes);
+  for (const key of ["GET /multi-a", "GET /multi-b"]) {
+    assert.equal(routes[key].authStatus, "proven");
+    assert.equal(routes[key].pathConfidence, "full");
+  }
+});
+
+test("app.get('view engine') is a settings getter, not a route", () => {
+  assert.ok(!run().routes.some((r) => r.path.includes("view engine")));
+});
+
+test("a guard use()d after a route does not prove it", () => {
+  const routes = index(run().routes);
+  assert.equal(routes["GET /late-unguarded"].authStatus, "public");
+  assert.equal(routes["GET /late-guarded"].authStatus, "proven");
+});
+
+test("a middleware named like an Object.prototype member is not proven", () => {
+  const { authStatus } = authStatusFor(
+    [{ name: "constructor", kind: "identifier", raw: "constructor" }],
+    {},
+  );
+  assert.equal(authStatus, "public");
+});
+
+test("const/concat/template paths resolve to full-confidence routes", () => {
+  const routes = index(run().routes);
+  for (const key of ["GET /api/v1/const", "GET /api/v1/tpl"]) {
+    assert.equal(routes[key].authStatus, "proven");
+    assert.equal(routes[key].pathConfidence, "full");
+  }
+});
+
+test("a guard wrapped in a call matches the allowlist through inner names", () => {
+  const routes = index(run().routes);
+  assert.equal(routes["GET /wrapped"].authStatus, "proven");
+});
+
+const REGISTRAR = path.join(__dirname, "fixtures", "registrar-app");
+
+test("registrar-pattern routes surface as partial orphans with a diagnostic", () => {
+  const { routes, diagnostics } = audit({ mode: "static", src: REGISTRAR }, CONFIG);
+  const keyed = index(routes);
+  assert.equal(keyed["POST /reg/users"].authStatus, "proven");
+  assert.equal(keyed["POST /reg/users"].pathConfidence, "partial");
+  assert.equal(keyed["GET /reg/health"].authStatus, "public");
+  assert.ok(diagnostics.some((d) => /registrar/.test(d)));
+});
+
+function staticRoute(path, extra) {
+  return {
+    method: "GET",
+    path,
+    pathConfidence: "partial",
+    source: { file: "r.js", line: 3 },
+    middlewares: [],
+    ...extra,
+  };
+}
+
+function runtimeRoute(path, source = null) {
+  return { method: "GET", path, pathConfidence: "full", source, middlewares: [] };
+}
+
+test("hybrid reconcile merges a partial static route with its runtime twin by suffix", () => {
+  const { routes } = reconcile(
+    { routes: [staticRoute("/users/:id")], globalMiddleware: [] },
+    { routes: [runtimeRoute("/api/users/:id")], globalMiddleware: [] },
+  );
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].path, "/api/users/:id");
+  assert.equal(routes[0].presence, "both");
+  assert.deepEqual(routes[0].source, { file: "r.js", line: 3 });
+});
+
+test("hybrid reconcile pairs routes by registration source when suffixes are ambiguous", () => {
+  const { routes } = reconcile(
+    { routes: [staticRoute("/users/:id")], globalMiddleware: [] },
+    {
+      routes: [
+        runtimeRoute("/api/users/:id", { file: "r.js", line: 3 }),
+        runtimeRoute("/admin/users/:id", { file: "r.js", line: 9 }),
+      ],
+      globalMiddleware: [],
+    },
+  );
+  const merged = routes.find((r) => r.presence === "both");
+  assert.equal(merged.path, "/api/users/:id");
+  assert.deepEqual(merged.source, { file: "r.js", line: 3 });
+  assert.equal(routes.filter((r) => r.presence === "runtime-only").length, 1);
+});
+
+test("an un-instrumented runtime walk yields null sources", () => {
+  const express = require("express");
+  const app = express();
+  app.get("/plain", (_req, res) => res.send("ok"));
+  const { routes } = audit({ mode: "runtime", app }, CONFIG);
+  assert.equal(routes[0].source, null);
+});
+
+test("hybrid reconcile leaves ambiguous suffix matches unmerged", () => {
+  const { routes } = reconcile(
+    { routes: [staticRoute("/users/:id")], globalMiddleware: [] },
+    {
+      routes: [runtimeRoute("/api/users/:id"), runtimeRoute("/admin/users/:id")],
+      globalMiddleware: [],
+    },
+  );
+  const presences = routes.map((r) => r.presence).sort();
+  assert.deepEqual(presences, ["runtime-only", "runtime-only", "static-only"]);
+});
+
+test("test files are excluded from scans by default", () => {
+  const withDefault = audit({ mode: "static", src: REGISTRAR }, CONFIG);
+  assert.ok(!withDefault.routes.some((r) => r.path === "/phantom"));
+  const withTests = audit({ mode: "static", src: REGISTRAR, includeTests: true }, CONFIG);
+  assert.ok(withTests.routes.some((r) => r.path === "/phantom"));
+});
