@@ -6,7 +6,15 @@ const { z } = require("zod");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 
-const { inventory, audit, suggestAuth, buildReport, REPORT_SCHEMA } = require("../index");
+const {
+  inventory,
+  audit,
+  suggestAuth,
+  buildReport,
+  REPORT_SCHEMA,
+  formatters,
+} = require("../index");
+const { loadPackageInfo } = require("../static/resolve");
 const pkg = require("../../package.json");
 
 /**
@@ -114,6 +122,43 @@ function registerTools(server) {
         return jsonResult(
           suggestAuth(inventory({ mode: "static", src: resolveDir(dir), includeTests })),
         );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "openapi_spec",
+    {
+      title: "Generate an OpenAPI 3.1 spec",
+      description:
+        "Statically audit a repo and emit an OpenAPI 3.1 document (as JSON text) for its Express routes. Paths, methods, path/query/header parameters, request/response placeholders, and per-operation security (from auth classification) are derived deterministically; schema bodies are AI-unrefined placeholders carrying x-express-recon source/auth metadata for an enrichment pass. Provide authMiddleware to populate the security section.",
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
+        authMiddleware: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe("Map of auth middleware name/callee -> tag (drives the security section)."),
+        includeTests: z
+          .boolean()
+          .optional()
+          .describe("Also scan test files/dirs (excluded by default)"),
+      },
+    },
+    async ({ dir, authMiddleware, includeTests }) => {
+      try {
+        const resolved = resolveDir(dir);
+        const reg = audit(
+          { mode: "static", src: resolved, includeTests },
+          { authMiddleware: authMiddleware || {}, acceptedPublic: [] },
+        );
+        const report = buildReport(reg, {
+          command: "audit",
+          mode: "static",
+          target: loadPackageInfo(resolved),
+        });
+        return { content: [{ type: "text", text: formatters.openapi.format(report) }] };
       } catch (err) {
         return errorResult(err);
       }

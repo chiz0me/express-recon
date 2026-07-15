@@ -153,4 +153,27 @@ function createResolver(tsconfig, pkgImports) {
   };
 }
 
-module.exports = { loadTsconfig, loadImports, createResolver, EXTENSIONS };
+/**
+ * Read `{ name, version }` from the nearest package.json (walking up from
+ * `rootDir`), for the OpenAPI `info` block. Returns null if none is found.
+ */
+function loadPackageInfo(rootDir) {
+  let dir = rootDir;
+  for (let i = 0; i < 12; i++) {
+    const file = path.join(dir, "package.json");
+    if (fs.existsSync(file)) {
+      const parsed = tolerantJsonParse(fs.readFileSync(file, "utf8"));
+      if (!parsed) return null;
+      const info = {};
+      if (typeof parsed.name === "string") info.name = parsed.name;
+      if (typeof parsed.version === "string") info.version = parsed.version;
+      return info.name || info.version ? info : null;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+module.exports = { loadTsconfig, loadImports, loadPackageInfo, createResolver, EXTENSIONS };

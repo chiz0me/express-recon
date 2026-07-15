@@ -14,6 +14,7 @@ const {
 } = require("./index");
 const { resetCapture, getCapturedRoots, harvestApp } = require("./runtime/instrument");
 const { installSandbox } = require("./runtime/sandbox");
+const { loadPackageInfo } = require("./static/resolve");
 
 const USAGE = `
 express-recon — inventory & audit Express 4/5 route surfaces
@@ -37,7 +38,9 @@ Options:
   --config <path>       JS file exporting { authMiddleware: { name: tag } } (audit)
                         and boot options for runtime/hybrid:
                         { boot: { sandbox: false, stubModules: [...], env: {...} } }
-  --format json,md,pretty   default: pretty (json for suggest-auth/schema)
+  --format json,md,pretty,openapi   default: pretty (json for suggest-auth/schema).
+                        openapi emits an OpenAPI 3.1 document (openapi.json); run it
+                        over the audit command to populate the security section.
   --out <dir>           write routes.json/routes.md into <dir> (else stdout)
   --fail-on <statuses>  audit only: exit 2 if any route matches, e.g. public or
                         public,unknown. For CI gates and agent assertions.
@@ -153,6 +156,8 @@ function writeReport(report, args) {
   const outDir = args.out ? resolvePath(args.out) : null;
   if (formats.has("json")) emit(formatters.json.format(report), "json", outDir, "routes.json");
   if (formats.has("md")) emit(formatters.markdown.format(report), "md", outDir, "routes.md");
+  if (formats.has("openapi"))
+    emit(formatters.openapi.format(report), "openapi", outDir, "openapi.json");
   if (formats.has("pretty") && (!outDir || formats.size === 1)) {
     process.stdout.write(formatters.pretty.format(report) + "\n");
   }
@@ -174,7 +179,8 @@ async function runReportCommand(command, args) {
   const registry = command === "audit" ? audit(opts, config) : inventory(opts);
   if (bootDiagnostics.length > 0)
     registry.diagnostics = [...(registry.diagnostics || []), ...bootDiagnostics];
-  const report = buildReport(registry, { command, mode: args.mode });
+  const target = loadPackageInfo(opts.src);
+  const report = buildReport(registry, { command, mode: args.mode, target });
   writeReport(report, args);
   warnDiagnostics(report);
   return command === "audit" ? failOnExit(report, args.failOn) : 0;

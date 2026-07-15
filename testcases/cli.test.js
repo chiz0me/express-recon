@@ -44,6 +44,19 @@ test("--fail-on proven exits 0 when no proven-only gate is tripped", () => {
   run(["audit", "--src", FIXTURE, "--format", "json", "--fail-on", "proven"], 0);
 });
 
+test("audit --format openapi emits an OpenAPI 3.1 doc with a security section", () => {
+  const doc = JSON.parse(run(["audit", "--src", FIXTURE, "--format", "openapi"]).stdout);
+  assert.equal(doc.openapi, "3.1.0");
+  assert.ok(doc.paths["/health"]);
+  assert.equal(doc["x-express-recon"].command, "audit");
+});
+
+test("inventory --format openapi carries no security schemes", () => {
+  const doc = JSON.parse(run(["inventory", "--src", FIXTURE, "--format", "openapi"]).stdout);
+  assert.equal(doc.openapi, "3.1.0");
+  assert.equal(doc.components, undefined);
+});
+
 test("schema command prints a JSON Schema", () => {
   const schema = JSON.parse(run(["schema"]).stdout);
   assert.equal(schema.title, "express-recon report");

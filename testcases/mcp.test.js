@@ -23,10 +23,30 @@ function parse(result) {
   return JSON.parse(result.content[0].text);
 }
 
-test("exposes the four harness tools", async () => {
+test("exposes the harness tools", async () => {
   const client = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ["audit_routes", "inventory_routes", "report_schema", "suggest_auth"]);
+  assert.deepEqual(names, [
+    "audit_routes",
+    "inventory_routes",
+    "openapi_spec",
+    "report_schema",
+    "suggest_auth",
+  ]);
+  await client.close();
+});
+
+test("openapi_spec returns an OpenAPI 3.1 document", async () => {
+  const client = await connect();
+  const doc = parse(
+    await client.callTool({
+      name: "openapi_spec",
+      arguments: { dir: FIXTURE, authMiddleware: { requireAuth: "authenticated" } },
+    }),
+  );
+  assert.equal(doc.openapi, "3.1.0");
+  assert.ok(doc.paths["/health"]);
+  assert.equal(doc["x-express-recon"].command, "audit");
   await client.close();
 });
 

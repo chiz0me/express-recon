@@ -32,6 +32,21 @@ function parse(code, filename) {
   }
 }
 
+/** Depth-first pre-order visit of every ESTree node, in document order. */
+function walk(node, visit) {
+  if (!node || typeof node.type !== "string") return;
+  visit(node);
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "start" || key === "end") continue;
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const item of child) walk(item, visit);
+    } else if (child && typeof child.type === "string") {
+      walk(child, visit);
+    }
+  }
+}
+
 /** Strip TS-only expression wrappers (`x as T`, `x!`, `(x)`) to the inner node. */
 function unwrap(node) {
   let current = node;
@@ -145,6 +160,7 @@ function middlewareFromArg(arg, code) {
 
 module.exports = {
   parse,
+  walk,
   unwrap,
   calleeName,
   staticString,

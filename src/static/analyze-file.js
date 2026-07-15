@@ -2,6 +2,7 @@
 
 const {
   parse,
+  walk,
   unwrap,
   calleeName,
   staticString,
@@ -9,21 +10,7 @@ const {
   middlewareFromArg,
   HTTP_METHODS,
 } = require("./ast");
-
-/** Depth-first pre-order visit of every ESTree node, in document order. */
-function walk(node, visit) {
-  if (!node || typeof node.type !== "string") return;
-  visit(node);
-  for (const key of Object.keys(node)) {
-    if (key === "loc" || key === "start" || key === "end") continue;
-    const child = node[key];
-    if (Array.isArray(child)) {
-      for (const item of child) walk(item, visit);
-    } else if (child && typeof child.type === "string") {
-      walk(child, visit);
-    }
-  }
-}
+const { extractIoHints } = require("./io-hints");
 
 /** Map a character offset to a 1-based line number via precomputed line starts. */
 function lineCounter(code) {
@@ -287,6 +274,111 @@ function middlewareArgs(args, code, dropLast) {
 }
 
 /**
+ * The terminal (handler) argument of a route registration — the last node after
+ * flattening arrays the same way `middlewareArgs` does. `middlewareArgs(…, true)`
+ * drops this same node as the handler; here we recover it to mine I/O hints.
+ */
+function terminalHandler(args) {
+  const flat = [];
+  for (const arg of args) {
+    const node = unwrap(arg);
+    if (node.type === "ArrayExpression") flat.push(...node.elements.filter(Boolean));
+    else flat.push(node);
+  }
+  return flat.length ? flat[flat.length - 1] : null;
+}
+
+const FN_NODE = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
+
+function emptyIo() {
+  return {
+    request: { body: [], query: [], params: [], headers: [] },
+    responses: [],
+    statusCodes: [],
+    handlerResolved: false,
+    handlerSource: null,
+  };
+}
+
+/** Mine a resolved handler function into an `io` object stamped with its source. */
+function mineFn(fn, lineAt, file) {
+  const hints = extractIoHints(fn);
+  return {
+    request: hints.request,
+    responses: hints.responses,
+    statusCodes: hints.statusCodes,
+    handlerResolved: true,
+    handlerSource: { file, line: lineAt(fn.start) },
+  };
+}
+
+/**
+ * Resolve a route's terminal handler node to statically-mined I/O hints. One
+ * hop: an inline function or same-file named handler is mined here; a first-party
+ * imported controller yields a module `handlerRef` the scan pass follows; a
+ * wrapper call (`asyncHandler(fn)`) is unwrapped to its last argument. Anything
+ * else degrades to `{ handlerResolved: false }`. `handlerName` captures the
+ * handler's identifier/dotted callee (e.g. `controllers.user.getUser`) even when
+ * the body can't be mined, so an AI pass knows which symbol to open.
+ *
+ * @returns {{io: object, handlerRef: object|null, handlerName: string|null}}
+ */
+function resolveHandler(handlerNode, ctx) {
+  const node = handlerNode && unwrap(handlerNode);
+  if (!node) return { io: emptyIo(), handlerRef: null, handlerName: null };
+  if (FN_NODE.has(node.type))
+    return { io: mineFn(node, ctx.lineAt, ctx.filePath), handlerRef: null, handlerName: null };
+  if (node.type === "Identifier") {
+    const fn = ctx.handlerIndex.get(node.name);
+    const io = fn ? mineFn(fn, ctx.lineAt, ctx.filePath) : emptyIo();
+    const ref = fn ? null : refFromExpr(node, ctx);
+    return { io, handlerRef: ref && ref.t === "module" ? ref : null, handlerName: node.name };
+  }
+  if (node.type === "MemberExpression") {
+    const ref = refFromExpr(node, ctx);
+    return {
+      io: emptyIo(),
+      handlerRef: ref.t === "module" ? ref : null,
+      handlerName: calleeName(node),
+    };
+  }
+  if (node.type === "CallExpression") {
+    const last = node.arguments[node.arguments.length - 1];
+    if (last) {
+      const inner = resolveHandler(last, ctx);
+      return { ...inner, handlerName: inner.handlerName ?? calleeName(node.callee) };
+    }
+  }
+  return { io: emptyIo(), handlerRef: null, handlerName: null };
+}
+
+/** Attach `io` (+ transient `__handlerRef`) for a route's handler to `route`. */
+function attachIo(route, handlerNode, ctx) {
+  const { io, handlerRef, handlerName } = resolveHandler(handlerNode, ctx);
+  if (handlerName) io.handlerName = handlerName;
+  route.io = io;
+  if (handlerRef) route.__handlerRef = handlerRef;
+}
+
+/**
+ * Same-file handler functions by name: top-level `function f(){}` declarations
+ * and `const f = (req,res) => …`. Lets a route registered as `.get('/x', getFoo)`
+ * resolve `getFoo` to its body for I/O mining.
+ */
+function collectHandlerIndex(program) {
+  const index = new Map();
+  walk(program, (node) => {
+    if (node.type === "FunctionDeclaration" && node.id && !index.has(node.id.name)) {
+      index.set(node.id.name, node);
+    } else if (node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init) {
+      const init = unwrap(node.init);
+      if (FN_NODE.has(init.type) && !index.has(node.id.name)) index.set(node.id.name, init);
+    }
+  });
+  return index;
+}
+
+/**
  * Unwrap `host.route('/x').all(...).get(...)` to its base `{host, pathNode}`.
  * `.all(...)` links run for every verb on the route, so their args are
  * collected as middleware for the sibling verbs registered after them.
@@ -396,8 +488,9 @@ function extractRoutes(program, code, ctx, out) {
     const mwSource = target.pathArg ? node.arguments.slice(1) : node.arguments;
     const chainMw = middlewareArgs(target.allArgs, code, false);
     const middlewares = chainMw.concat(middlewareArgs(mwSource, code, true));
+    const handlerNode = terminalHandler(mwSource);
     for (const path of pathsFrom(target.pathNode, ctx.consts)) {
-      collected.push({
+      const route = {
         host: target.host,
         method: method === "all" ? "ALL" : method.toUpperCase(),
         path,
@@ -408,7 +501,9 @@ function extractRoutes(program, code, ctx, out) {
         // reconcile can pair routes by source.
         line: ctx.lineAt(node.callee.property.start),
         chainStart: target.chainStart,
-      });
+      };
+      attachIo(route, handlerNode, ctx);
+      collected.push(route);
     }
   });
   // `.route('/x').all(guard).get(h)`: the `.all` link is middleware for the
@@ -561,15 +656,19 @@ function extractRegistrarRoutes(program, code, ctx, out) {
       const paths = pathsFrom(node.arguments[0], ctx.consts);
       if (paths.some((p) => p === null || !p.startsWith("/"))) return;
       seen.add(node.start);
-      const middlewares = middlewareArgs(node.arguments.slice(1), code, true);
+      const mwSource = node.arguments.slice(1);
+      const middlewares = middlewareArgs(mwSource, code, true);
+      const handlerNode = terminalHandler(mwSource);
       for (const path of paths) {
-        out.registrarRoutes.push({
+        const route = {
           host: obj.name,
           method: method === "all" ? "ALL" : method.toUpperCase(),
           path,
           middlewares,
           line: ctx.lineAt(node.callee.property.start),
-        });
+        };
+        attachIo(route, handlerNode, ctx);
+        out.registrarRoutes.push(route);
       }
     });
   });
@@ -633,7 +732,9 @@ function analyzeFile(code, filePath) {
   if (!program) return null;
   const { requires, routers } = collectBindings(program);
   const consts = collectStringConsts(program);
-  const ctx = { requires, routers, consts, lineAt: lineCounter(code) };
+  const lineAt = lineCounter(code);
+  const handlerIndex = collectHandlerIndex(program);
+  const ctx = { requires, routers, consts, lineAt, handlerIndex, filePath };
   const out = {
     filePath,
     requires,
@@ -642,6 +743,8 @@ function analyzeFile(code, filePath) {
     edges: [],
     registrarRoutes: [],
     globalMwByHost: new Map(),
+    handlerIndex,
+    lineAt,
   };
   extractRoutes(program, code, ctx, out);
   extractMounts(program, code, ctx, out);

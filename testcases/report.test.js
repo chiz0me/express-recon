@@ -16,7 +16,7 @@ test("audit report carries a versioned contract with summary + findings", () => 
     command: "audit",
     mode: "static",
   });
-  assert.equal(report.schemaVersion, "1.0");
+  assert.equal(report.schemaVersion, "1.1");
   assert.equal(report.tool, "express-recon");
   assert.equal(report.summary.routes, report.routes.length);
   const publicFinding = report.findings.find(
