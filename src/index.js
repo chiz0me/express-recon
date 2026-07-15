@@ -32,5 +32,6 @@ module.exports = {
     json: require("./formatters/json"),
     markdown: require("./formatters/markdown"),
     pretty: require("./formatters/pretty"),
+    openapi: require("./formatters/openapi"),
   },
 };

@@ -31,6 +31,9 @@ express-recon <command> [options]
 | `suggest-auth` | propose auth-middleware allowlist candidates (JSON) |
 | `schema` | print the JSON Schema of the report contract |
 
+`inventory`/`audit` also emit an **OpenAPI 3.1** document via `--format openapi`
+(see [OpenAPI / Swagger output](#openapi--swagger-output)).
+
 ```bash
 # Zero-setup audit of a checked-out repo:
 express-recon audit --src ./ --config ./recon.config.js --format pretty
@@ -52,7 +55,7 @@ express-recon audit --mode hybrid --src ./ --app ./src/app.js \
 | `--src <dir>` | repo root to scan (static/hybrid; default cwd) |
 | `--app <path>` | JS file exporting the Express app (runtime/hybrid) |
 | `--config <path>` | JS file exporting `{ authMiddleware: { name: tag } }` |
-| `--format json,md,pretty` | output formats (default `pretty`) |
+| `--format json,md,pretty,openapi` | output formats (default `pretty`) |
 | `--out <dir>` | write `routes.json`/`routes.md` (else stdout) |
 | `--fail-on <statuses>` | audit only: exit `2` if any route matches (e.g. `public,unknown`) |
 | `--include-tests` | also scan test files/dirs (`test/`, `__tests__/`, `*.test.*`, `*.spec.*` are excluded by default) |
@@ -64,7 +67,7 @@ express-recon audit --mode hybrid --src ./ --app ./src/app.js \
 
 ```jsonc
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "tool": "express-recon",
   "command": "audit",            // or "inventory"
   "mode": "static",
@@ -74,6 +77,14 @@ express-recon audit --mode hybrid --src ./ --app ./src/app.js \
       "path": "/widgets/:id",
       "middlewares": [{ "name": "express.json", "kind": "call", "raw": "express.json()" }],
       "source": { "file": "src/routes/widgets.js", "line": 12 },
+      "io": {                    // static/hybrid: request/response hints mined from the handler
+        "request": { "body": ["name"], "query": [], "params": ["id"], "headers": [] },
+        "responses": [{ "status": 200, "bodyKeys": ["id", "name"] }],
+        "statusCodes": [],
+        "handlerResolved": true,
+        "handlerName": "updateWidget",
+        "handlerSource": { "file": "src/routes/widgets.js", "line": 12 }
+      },
       "pathConfidence": "full",  // "partial" when a mount/path couldn't be resolved
       "authStatus": "public",    // audit only: proven | public | unknown
       "tags": ["public"],        // audit only
@@ -99,6 +110,50 @@ the per-route `authStatus`/`tags`.
 An agent workflow: `suggest-auth` to draft the allowlist → write `--config` →
 `audit --format json` → act on `findings` → `--fail-on public` to assert.
 
+## OpenAPI / Swagger output
+
+`--format openapi` renders the route inventory as an **OpenAPI 3.1** document:
+
+```bash
+express-recon audit --src ./ --config ./recon.config.js --format openapi --out ./out
+# writes ./out/openapi.json (loads in Swagger UI / Redoc)
+```
+
+What the tool derives deterministically, with no app boot:
+
+- **Paths & operations** — Express `:param`/`{param}`/`*` templated to OpenAPI
+  `{param}`; `router.all()` expanded across the concrete verbs.
+- **Parameters** — path params from the template; query and header params from
+  the mined `io` hints.
+- **Request/response placeholders** — a `requestBody` object schema of the field
+  names the handler reads (`req.body.*`, destructuring), and a response per
+  status code (`res.status(N).json({...})`) carrying its top-level keys.
+- **Security** — `components.securitySchemes` + per-operation `security` from the
+  audit's auth classification (run over `audit`, not `inventory`, to get this).
+- **Traceback** — every operation carries an `x-express-recon` extension with the
+  handler `source` file:line, `authStatus`, middleware chain, `handlerResolved`,
+  and `handlerName` (the dotted callee, e.g. `controllers.user.getUser`) so an AI
+  pass can jump straight to the controller method even on dependency-injected apps
+  where the body isn't statically resolvable.
+
+The schema bodies are **placeholders** — field names without refined types,
+marked `x-express-recon-unrefined`. To turn them into real request/response JSON
+Schema and per-endpoint notes, run the bundled **`openapi-doc` skill**, which
+reads each handler's code (AI-assisted) and fills in the schemas, `enum`s, shared
+`components/schemas`, and `summary`/`description` for each operation, validates
+the merged document, and renders a viewable HTML page (Redoc). The skeleton alone
+is a usable, if under-specified, spec; the skill is what documents the
+input/output structures.
+
+**Coverage depends on how the app wires handlers.** Inline handlers and
+first-party controllers resolve statically, so their request/response hints and
+`handlerSource` come for free. Dependency-injection apps
+(`module.exports = (controllers) => { router.get('/x', controllers.foo.bar) }`)
+and feature-flag/dynamic dispatch can't be followed statically — those operations
+still get a correct skeleton (path, method, security, `handlerName`) but sparse
+hints, and the `openapi-doc` skill documents them by reading the named controller.
+Nothing is invented: an unresolved handler is flagged, not guessed.
+
 ## MCP server (for agents)
 
 A Model Context Protocol server exposes the harness as typed tools over stdio:
@@ -108,8 +163,10 @@ express-recon-mcp
 ```
 
 Tools: `inventory_routes({ dir })`, `audit_routes({ dir, authMiddleware? })`,
-`suggest_auth({ dir })`, `report_schema()`. Each returns the same JSON report
-contract as the CLI. **Static mode only**: the MCP tools parse source and never
+`suggest_auth({ dir })`, `openapi_spec({ dir, authMiddleware? })`,
+`report_schema()`. Each returns the JSON report contract (or, for
+`openapi_spec`, an OpenAPI 3.1 document) as the CLI. **Static mode only**: the
+MCP tools parse source and never
 execute the target repo, so an agent can't be coerced into running untrusted
 code. Runtime/hybrid stays a human-opt-in CLI path.
 

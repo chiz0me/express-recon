@@ -60,8 +60,18 @@ module.exports = {
     "passport.authenticate": "session",
     snsSignatureVerifier: "signed:aws-sns",
   },
+  // Optional: routes that are meant to be open (health, webhooks, public reads).
+  // Keyed by "METHOD /path"; keeps them public but suppresses their finding and
+  // the --fail-on public match, so CI fails only on NEW unauthenticated routes.
+  acceptedPublic: ["GET /health", "POST /webhooks/stripe"],
 };
 ```
+
+On a brownfield repo, seed `acceptedPublic` with the endpoints that are
+intentionally open after reviewing them — otherwise every legitimately-public
+route trips `--fail-on public`. An entry that no longer matches a live public
+route (deleted, or now guarded) surfaces as a `stale-baseline` finding so the
+list can be pruned.
 
 ## 3. Audit
 
@@ -80,6 +90,8 @@ Findings ids to surface:
   (e.g. `POST` proven, `PATCH` public). A classic write-path bypass.
 - `opaque-middleware` (**medium**) — guarded only by an inline/anonymous fn;
   read the source to judge.
+- `stale-baseline` (**low**) — an `acceptedPublic` entry no longer matches a live
+  public route; prune it so it can't silently pre-approve a future route.
 
 ## 4. Report to the user
 
@@ -118,3 +130,6 @@ express-recon audit --src <repoDir> --config <cfg> --format json --fail-on publi
 - Inventory only (no security judgment): `express-recon inventory --src <repoDir>`.
 - Never run `--mode runtime`/`hybrid` on a repo you don't trust to import — it
   executes the app's module-load code. `static` never executes the target.
+- To also **document the API** (OpenAPI 3.1 / Swagger with request/response
+  schemas and per-endpoint notes), use the `openapi-doc` skill, or add
+  `--format openapi` to the same `audit` command for the deterministic skeleton.

@@ -76,7 +76,14 @@ function reconcile(staticReg, runtimeReg) {
         : null);
     if (match) {
       claimed.add(key(match));
-      routes.push({ ...match, source: route.source || null, presence: "both" });
+      // The runtime twin has no statically-mined I/O hints; carry the static
+      // route's `io` (and source) onto the merged route.
+      routes.push({
+        ...match,
+        source: route.source || null,
+        presence: "both",
+        ...(route.io ? { io: route.io } : {}),
+      });
     } else {
       routes.push({ ...route, presence: "static-only" });
     }

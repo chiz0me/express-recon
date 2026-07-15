@@ -28,6 +28,43 @@ const source = {
   ],
 };
 
+const io = {
+  type: "object",
+  description:
+    "static/hybrid only: best-effort request/response shape hints mined from the handler AST",
+  properties: {
+    request: {
+      type: "object",
+      properties: {
+        body: { type: "array", items: { type: "string" } },
+        query: { type: "array", items: { type: "string" } },
+        params: { type: "array", items: { type: "string" } },
+        headers: { type: "array", items: { type: "string" } },
+      },
+    },
+    responses: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          status: { type: ["integer", "null"] },
+          bodyKeys: { oneOf: [{ type: "null" }, { type: "array", items: { type: "string" } }] },
+        },
+      },
+    },
+    statusCodes: { type: "array", items: { type: "integer" } },
+    handlerResolved: {
+      type: "boolean",
+      description: "false when the handler couldn't be resolved to a function body to mine",
+    },
+    handlerName: {
+      type: "string",
+      description: "handler identifier/dotted callee (e.g. 'controllers.user.getUser'), if named",
+    },
+    handlerSource: source,
+  },
+};
+
 const route = {
   type: "object",
   properties: {
@@ -38,6 +75,7 @@ const route = {
     },
     middlewares: { type: "array", items: descriptor },
     source,
+    io,
     pathConfidence: { enum: ["full", "partial"] },
     authStatus: { enum: ["proven", "public", "unknown"], description: "audit only" },
     tags: { type: "array", items: { type: "string" }, description: "audit only" },
@@ -73,6 +111,11 @@ const REPORT_SCHEMA = {
     tool: { const: "express-recon" },
     command: { enum: ["inventory", "audit"] },
     mode: { enum: ["static", "runtime", "hybrid"] },
+    target: {
+      type: "object",
+      description: "target package identity, when a package.json was found",
+      properties: { name: { type: "string" }, version: { type: "string" } },
+    },
     routes: { type: "array", items: route },
     globalMiddleware: { type: "array", items: descriptor },
     summary: {

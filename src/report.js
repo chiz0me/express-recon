@@ -2,7 +2,7 @@
 
 const { buildFindings } = require("./findings");
 
-const SCHEMA_VERSION = "1.0";
+const SCHEMA_VERSION = "1.1";
 
 function summarize(routes) {
   const summary = { routes: routes.length, public: 0, unknown: 0, proven: 0, accepted: 0 };
@@ -20,7 +20,7 @@ function summarize(routes) {
  * `inventory` reports omit all security judgment.
  *
  * @param {{routes: object[], globalMiddleware: object[]}} registry
- * @param {{command: "inventory"|"audit", mode: string}} meta
+ * @param {{command: "inventory"|"audit", mode: string, target?: {name?: string, version?: string}}} meta
  * @returns {object}
  */
 function buildReport(registry, meta) {
@@ -32,6 +32,7 @@ function buildReport(registry, meta) {
     routes: registry.routes,
     globalMiddleware: registry.globalMiddleware,
   };
+  if (meta.target) report.target = meta.target;
   if (registry.diagnostics && registry.diagnostics.length) {
     report.diagnostics = registry.diagnostics;
   }

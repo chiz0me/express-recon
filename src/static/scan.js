@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { analyzeFile } = require("./analyze-file");
+const { extractIoHints } = require("./io-hints");
 const { loadTsconfig, loadImports, createResolver, EXTENSIONS } = require("./resolve");
 const { joinPath, scopedTo } = require("../walk");
 
@@ -93,6 +94,56 @@ function resolveRefValue(file, ref, props, byPath, resolve, seen) {
     }
     default:
       return null;
+  }
+}
+
+/** Map an export ref (+ pending property path) to a same-file handler function. */
+function refToFn(tf, ref, props) {
+  if (!ref) return null;
+  if (ref.t === "factory") return refToFn(tf, ref.ret, props);
+  if (ref.t === "local") return props.length === 0 ? tf.handlerIndex.get(ref.name) || null : null;
+  if (ref.t === "object")
+    return props.length === 0 ? null : refToFn(tf, ref.props.get(props[0]), props.slice(1));
+  // ref.t === "module" would be a second cross-file hop — capped at one.
+  return null;
+}
+
+/** Resolve an exported name (honoring the CommonJS default-object form) to a fn node. */
+function exportedFnNode(tf, exportName, props) {
+  const direct = refToFn(tf, tf.exportRefs.get(exportName), props);
+  if (direct) return direct;
+  if (exportName !== "default" && tf.exportRefs.has("default"))
+    return refToFn(tf, tf.exportRefs.get("default"), [exportName, ...props]);
+  return null;
+}
+
+/**
+ * One-hop cross-file handler resolution: for routes whose handler is a
+ * first-party imported controller (`.get('/x', controllers.getUser)`), follow
+ * the import to the target file, mine the controller's I/O hints, and fold them
+ * back onto `route.io`. Degrades silently for external/unresolved handlers. Runs
+ * before `buildGraph` so the mutated `io` propagates through its `{...route}` copy.
+ */
+function resolveImportedHandlers(files, resolve) {
+  const byPath = new Map(files.map((f) => [f.filePath, f]));
+  for (const file of files) {
+    for (const route of [...file.routes, ...file.registrarRoutes]) {
+      const ref = route.__handlerRef;
+      if (ref && route.io && !route.io.handlerResolved) {
+        const target = resolve(file.filePath, ref.source);
+        const tf = target && byPath.get(target);
+        const fn = tf && exportedFnNode(tf, ref.exportName, ref.props);
+        if (fn) {
+          const hints = extractIoHints(fn);
+          route.io.request = hints.request;
+          route.io.responses = hints.responses;
+          route.io.statusCodes = hints.statusCodes;
+          route.io.handlerResolved = true;
+          route.io.handlerSource = { file: tf.filePath, line: tf.lineAt(fn.start) };
+        }
+      }
+      delete route.__handlerRef;
+    }
   }
 }
 
@@ -195,6 +246,7 @@ function emitRoute(route, prefix, accMw, partial, out) {
     middlewares: chain.concat(route.middlewares),
     source: { file: route.file, line: route.line },
     pathConfidence: partial || dynamic ? "partial" : "full",
+    ...(route.io ? { io: route.io } : {}),
   });
 }
 
@@ -276,6 +328,7 @@ function scan(rootDir, opts = {}) {
     .map((f) => analyzeFile(fs.readFileSync(f, "utf8"), f))
     .filter(Boolean);
   const resolve = createResolver(loadTsconfig(root), loadImports(root));
+  resolveImportedHandlers(files, resolve);
   const { nodes, stats } = buildGraph(files, resolve);
 
   const ctx = { out: [], visited: new Set() };
