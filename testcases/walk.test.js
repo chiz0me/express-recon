@@ -38,7 +38,7 @@ function byKey(routes) {
   return Object.fromEntries(routes.map((r) => [`${r.method} ${r.path}`, r]));
 }
 
-test("walks an express 5 app and emits one entry per (method,path)", () => {
+test("walks an Express app and emits one entry per (method,path)", () => {
   const { routes } = auditApp(makeApp(), CFG);
   assert.deepEqual(Object.keys(byKey(routes)).sort(), [
     "GET /approval",
@@ -88,7 +88,7 @@ test("tags signature-verified and authenticated routes as proven", () => {
   assert.equal(keyed["POST /approval"].authStatus, "proven");
 });
 
-test("recovers mount-path prefixes on Express 5 when instrumented", () => {
+test("recovers mount-path prefixes when instrumented", () => {
   instrument(express);
   const app = express();
   const admin = express.Router();

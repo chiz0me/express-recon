@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const { audit } = require("../src/index");
@@ -20,6 +22,26 @@ function scanRepo(dir, config) {
 
 function index(routes) {
   return Object.fromEntries(routes.map((r) => [`${r.method} ${r.path}`, r]));
+}
+
+function withBrokenFixture(run) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-broken-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const app = express();",
+        'app.get("/visible", (_req, res) => res.send("ok"));',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    fs.writeFileSync(path.join(dir, "broken.js"), '"use strict";\nconst = ;\n');
+    return run(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 test("reconstructs paths across a mounted sub-router", () => {
@@ -66,4 +88,20 @@ test("captures app-level global middleware", () => {
   const { globalMiddleware } = scanRepo(FIXTURE, CONFIG);
   const names = globalMiddleware.map((m) => m.name).sort();
   assert.deepEqual(names, ["express.json", "logger"]);
+});
+
+test("reports incomplete coverage when a source file cannot be parsed", () => {
+  const result = withBrokenFixture((dir) => scanRepo(dir, CONFIG));
+  assert.deepEqual(result.scanCoverage, {
+    discovered: 2,
+    analyzed: 1,
+    failed: 1,
+    complete: false,
+  });
+  assert.ok(result.routes.some((route) => route.path === "/visible"));
+  assert.ok(
+    result.diagnostics.some(
+      (message) => message.includes("could not parse") && message.includes("broken.js"),
+    ),
+  );
 });

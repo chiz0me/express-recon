@@ -9,7 +9,10 @@ const { authStatusFor } = require("../src/classify");
 const { reconcile } = require("../src/reconcile");
 
 const FIXTURE = path.join(__dirname, "fixtures", "accuracy-app");
-const CONFIG = { authMiddleware: { requireAuth: "authenticated" } };
+const CONFIG = {
+  authMiddleware: { requireAuth: "authenticated" },
+  authWrappers: ["asyncHandler"],
+};
 
 function run() {
   return audit({ mode: "static", src: FIXTURE }, CONFIG);
@@ -81,6 +84,38 @@ test("const/concat/template paths resolve to full-confidence routes", () => {
 test("a guard wrapped in a call matches the allowlist through inner names", () => {
   const routes = index(run().routes);
   assert.equal(routes["GET /wrapped"].authStatus, "proven");
+});
+
+test("an unconfigured wrapper containing an auth name stays unknown", () => {
+  const { authStatus } = authStatusFor(
+    [
+      {
+        name: "conditional",
+        kind: "call",
+        raw: "conditional(requireAuth)",
+        inner: ["requireAuth"],
+      },
+    ],
+    CONFIG.authMiddleware,
+  );
+  assert.equal(authStatus, "unknown");
+});
+
+test("a configured transparent wrapper may prove its inner auth middleware", () => {
+  const { authStatus } = authStatusFor(
+    [
+      {
+        name: "asyncHandler",
+        kind: "call",
+        raw: "asyncHandler(requireAuth)",
+        inner: ["requireAuth"],
+      },
+    ],
+    CONFIG.authMiddleware,
+    false,
+    CONFIG.authWrappers,
+  );
+  assert.equal(authStatus, "proven");
 });
 
 const REGISTRAR = path.join(__dirname, "fixtures", "registrar-app");
@@ -155,6 +190,33 @@ test("hybrid reconcile leaves ambiguous suffix matches unmerged", () => {
   );
   const presences = routes.map((r) => r.presence).sort();
   assert.deepEqual(presences, ["runtime-only", "runtime-only", "static-only"]);
+});
+
+test("hybrid exact matches use runtime middleware and auth classification", () => {
+  const staticView = staticRoute("/account", {
+    pathConfidence: "full",
+    authStatus: "proven",
+    tags: ["authenticated"],
+    middlewares: [{ name: "configuredGuard", kind: "identifier", raw: "configuredGuard" }],
+    io: { handlerResolved: true },
+  });
+  const runtimeView = runtimeRoute("/account");
+  runtimeView.authStatus = "public";
+  runtimeView.tags = ["public"];
+  runtimeView.middlewares = [{ name: "jsonParser", kind: "identifier", raw: "jsonParser" }];
+
+  const { routes } = reconcile(
+    { routes: [staticView], globalMiddleware: [] },
+    { routes: [runtimeView], globalMiddleware: [] },
+  );
+
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].presence, "both");
+  assert.equal(routes[0].authStatus, "public");
+  assert.deepEqual(routes[0].tags, ["public"]);
+  assert.deepEqual(routes[0].middlewares, runtimeView.middlewares);
+  assert.deepEqual(routes[0].source, staticView.source);
+  assert.deepEqual(routes[0].io, staticView.io);
 });
 
 test("test files are excluded from scans by default", () => {

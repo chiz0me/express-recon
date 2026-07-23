@@ -1,0 +1,7 @@
+[
+  {
+    "id": "health-rate-limit",
+    "match": { "methods": ["GET"], "paths": ["/health"] },
+    "require": { "anyMiddleware": ["rateLimit"] }
+  }
+]

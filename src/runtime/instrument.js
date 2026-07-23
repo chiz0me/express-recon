@@ -82,6 +82,18 @@ function stackOf(candidate) {
   return appStack(candidate);
 }
 
+/** Express 4's deprecated `app.router` getter throws, so `_router` comes first. */
+function appRouter(app) {
+  if (!app) return null;
+  if (app._router && Array.isArray(app._router.stack)) return app._router;
+  try {
+    if (app.router && Array.isArray(app.router.stack)) return app.router;
+  } catch {
+    // Express 4 app.router; no usable router exists if _router was absent.
+  }
+  return null;
+}
+
 function collectNested(root, nested, seen) {
   const stack = stackOf(root);
   if (!stack) return;
@@ -90,7 +102,7 @@ function collectNested(root, nested, seen) {
     if (!handle || seen.has(handle)) continue;
     seen.add(handle);
     nested.add(handle);
-    const inner = appStack(handle) && (handle.router || handle._router);
+    const inner = appRouter(handle);
     if (inner) nested.add(inner);
     collectNested(handle, nested, seen);
   }
@@ -107,7 +119,7 @@ function getCapturedRoots() {
   const seen = new Set();
   for (const root of roots) {
     collectNested(root, nested, seen);
-    const inner = appStack(root) && (root.router || root._router);
+    const inner = appRouter(root);
     if (inner) nested.add(inner);
   }
   const isApp = (c) => (typeof c.set === "function" && appStack(c) ? 1 : 0);
@@ -174,7 +186,8 @@ function wrapRouteVerbs(routeProto) {
 }
 
 function appStack(app) {
-  return (app.router && app.router.stack) || (app._router && app._router.stack) || null;
+  const router = appRouter(app);
+  return router ? router.stack : null;
 }
 
 function isPathArg(arg) {

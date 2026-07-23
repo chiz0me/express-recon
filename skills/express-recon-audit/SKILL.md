@@ -45,6 +45,11 @@ signature / authorization middleware — names like `requireAuth`,
 `passport.authenticate`, `verifyToken`, `*SignatureVerifier`, `ensureLoggedIn`.
 Ignore body parsers, loggers, CORS, helmet, compression.
 
+If a guard appears inside a wrapper call such as `asyncHandler(requireAuth)`,
+add the outer callee to `authWrappers` only after verifying that it always
+executes and preserves the wrapped middleware. Unconfigured wrappers remain
+`unknown`; this avoids proving conditional or disabling wrappers as safe.
+
 If the user already has a known auth-middleware list, skip discovery and use it.
 
 ## 2. Write a config
@@ -60,6 +65,8 @@ module.exports = {
     "passport.authenticate": "session",
     snsSignatureVerifier: "signed:aws-sns",
   },
+  // Calls listed here must always execute/preserve their wrapped middleware.
+  authWrappers: ["asyncHandler"],
   // Optional: routes that are meant to be open (health, webhooks, public reads).
   // Keyed by "METHOD /path"; keeps them public but suppresses their finding and
   // the --fail-on public match, so CI fails only on NEW unauthenticated routes.
@@ -92,6 +99,14 @@ Findings ids to surface:
   read the source to judge.
 - `stale-baseline` (**low**) — an `acceptedPublic` entry no longer matches a live
   public route; prune it so it can't silently pre-approve a future route.
+- `policy-violation` (configured severity) — a route failed a named middleware,
+  auth, role, scope, ordering, or composed policy. Report `ruleId`, structured
+  `evidence`, and any expired exception.
+
+Every finding includes a stable `fingerprint`, `severity`, `confidence`, and
+source location when one was resolved. Also inspect `scanCoverage`: if
+`complete` is false, do not present the audit as complete; surface the
+diagnostics and fix or explicitly scope the failed files.
 
 ## 4. Report to the user
 
@@ -111,18 +126,38 @@ Lead with the `public-route` and `per-verb-gap` findings, each with its
 To fail a pipeline when any unauthenticated route exists:
 
 ```bash
-express-recon audit --src <repoDir> --config <cfg> --format json --fail-on public
-# exit code 2 if any public route remains; use public,unknown to also gate review items
+express-recon audit --src <repoDir> --config <cfg> --format json \
+  --fail-on public,incomplete
+# exit code 2 if any public route remains or static coverage is incomplete;
+# add unknown to also gate review items
 ```
+
+For a pull request, scan the base revision first and pass its JSON report to the
+PR scan:
+
+```bash
+express-recon audit --src <baseDir> --config <cfg> --format json --out <baseOut> \
+  --fail-on incomplete
+express-recon audit --src <prDir> --config <cfg> \
+  --baseline <baseOut>/routes.json --format json,md --out <prOut> \
+  --fail-on new,regression,incomplete
+```
+
+Review `delta.newFindings` by fingerprint and severity, and
+`delta.authRegressions` with their source locations and explanations. The
+repository includes a GitHub Actions JSON/Markdown example at
+`examples/github-actions/express-recon-pr.yml`; it uses job summaries,
+annotations, and artifacts, not SARIF.
 
 ## Modes
 
 - `static` (default) — no app boot; safe on any checkout. Handles JS+TS, ESM
   imports, tsconfig path aliases, barrel re-exports.
 - `hybrid` (`--mode hybrid --app <file>`) — adds runtime verification and
-  recovers dynamically-registered routes static can't see. Only when the app
-  imports cleanly; the CLI sets `EXPRESS_RECON_DRY=1` so the host can skip boot
-  side effects.
+  recovers dynamically-registered routes static can't see. Only for trusted
+  code; the CLI sets `EXPRESS_RECON_DRY=1` and isolates the parent environment
+  by default, but the worker is not an OS sandbox. Native ESM dependency imports
+  are not covered by the CommonJS infrastructure-module stubs.
 
 ## Notes
 

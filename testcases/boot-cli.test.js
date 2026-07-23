@@ -35,9 +35,53 @@ test("runtime mode boots an app whose infra deps are not installed", () => {
   assert.ok(keys.includes("POST /api/widgets"));
   assert.ok(report.diagnostics.some((d) => d.includes("stubbed infra modules")));
   assert.ok(report.diagnostics.some((d) => d.includes("no port was bound")));
+  assert.ok(report.diagnostics.some((d) => d.includes("isolated worker process")));
 });
 
-test("hybrid mode reconciles static and sandboxed runtime", () => {
+test("runtime mode rejects the static coverage completeness gate", () => {
+  const res = run(
+    ["audit", "--mode", "runtime", "--app", APP, "--format", "json", "--fail-on", "incomplete"],
+    1,
+  );
+  assert.match(res.stderr, /requires static or hybrid mode/);
+});
+
+test("runtime worker isolates the parent environment unless inheritance is requested", () => {
+  const app = path.join(DIR, "env-app.js");
+  const env = { ...process.env, EXPRESS_RECON_PARENT_SECRET: "sensitive" };
+  const isolated = spawnSync(
+    "node",
+    [CLI, "inventory", "--mode", "runtime", "--app", app, "--format", "json"],
+    { encoding: "utf8", timeout: 30000, env },
+  );
+  assert.equal(isolated.status, 0, isolated.stderr);
+  assert.ok(
+    JSON.parse(isolated.stdout).routes.some((route) => route.path === "/parent-env-isolated"),
+  );
+
+  const inherited = spawnSync(
+    "node",
+    [
+      CLI,
+      "inventory",
+      "--mode",
+      "runtime",
+      "--app",
+      app,
+      "--config",
+      path.join(DIR, "inherit-env.config.js"),
+      "--format",
+      "json",
+    ],
+    { encoding: "utf8", timeout: 30000, env },
+  );
+  assert.equal(inherited.status, 0, inherited.stderr);
+  assert.ok(
+    JSON.parse(inherited.stdout).routes.some((route) => route.path === "/parent-env-inherited"),
+  );
+});
+
+test("hybrid mode reconciles static and worker runtime", () => {
   const res = run([
     "audit",
     "--mode",
@@ -70,6 +114,49 @@ test("routes registered inside connect().then are captured", () => {
   ]);
   const report = JSON.parse(res.stdout);
   assert.ok(report.routes.some((r) => r.path === "/deferred"));
+});
+
+test("routes registered inside Node-style infra callbacks are captured", () => {
+  const res = run([
+    "inventory",
+    "--mode",
+    "runtime",
+    "--app",
+    path.join(DIR, "callback-app.js"),
+    "--format",
+    "json",
+  ]);
+  const report = JSON.parse(res.stdout);
+  assert.ok(report.routes.some((route) => route.path === "/callback-deferred"));
+  assert.ok(report.diagnostics.some((diagnostic) => diagnostic.includes("callback-style infra")));
+});
+
+test("ESM-only applications load through dynamic import", () => {
+  const res = run([
+    "inventory",
+    "--mode",
+    "runtime",
+    "--app",
+    path.join(DIR, "esm-app.mjs"),
+    "--format",
+    "json",
+  ]);
+  const report = JSON.parse(res.stdout);
+  assert.ok(report.routes.some((route) => route.path === "/esm/route"));
+});
+
+test("short timer-deferred route registration settles before the worker returns", () => {
+  const res = run([
+    "inventory",
+    "--mode",
+    "runtime",
+    "--app",
+    path.join(DIR, "deferred-app.js"),
+    "--format",
+    "json",
+  ]);
+  const report = JSON.parse(res.stdout);
+  assert.ok(report.routes.some((route) => route.path === "/timer-deferred"));
 });
 
 test("a boot crash after wiring still yields harvested routes", () => {
@@ -117,4 +204,56 @@ test("static mode over the fixture dir needs no sandbox or env", () => {
   const res = run(["inventory", "--src", DIR, "--format", "json"]);
   const report = JSON.parse(res.stdout);
   assert.ok(report.routes.some((r) => r.path === "/health"));
+});
+
+test("worker completion is not blocked by target timers", () => {
+  const started = Date.now();
+  const res = run([
+    "inventory",
+    "--mode",
+    "runtime",
+    "--app",
+    path.join(DIR, "timer-app.js"),
+    "--format",
+    "json",
+  ]);
+  const report = JSON.parse(res.stdout);
+  assert.ok(report.routes.some((r) => r.path === "/timer"));
+  assert.ok(Date.now() - started < 5000);
+});
+
+test("boot.timeoutMs terminates a blocked target", () => {
+  const res = run(
+    [
+      "inventory",
+      "--mode",
+      "runtime",
+      "--app",
+      path.join(DIR, "hang-app.js"),
+      "--config",
+      path.join(DIR, "timeout.config.js"),
+      "--format",
+      "json",
+    ],
+    1,
+  );
+  assert.match(res.stderr, /timed out after 150ms/);
+});
+
+test("boot.maxOutputBytes bounds the serialized runtime registry", () => {
+  const res = run(
+    [
+      "inventory",
+      "--mode",
+      "runtime",
+      "--app",
+      path.join(DIR, "large-app.js"),
+      "--config",
+      path.join(DIR, "small-output.config.js"),
+      "--format",
+      "json",
+    ],
+    1,
+  );
+  assert.match(res.stderr, /exceeded boot\.maxOutputBytes/);
 });

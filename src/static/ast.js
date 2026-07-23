@@ -16,18 +16,29 @@ const TS_WRAPPERS = new Set([
 /**
  * Parse a JS/TS/JSX source file into an ESTree program. oxc-parser strips
  * TypeScript types and infers the dialect from the filename extension. Returns
- * null if parsing produced no usable program (the caller skips the file).
+ * null if parsing produced errors or no usable program. The optional callback
+ * lets the scanner surface the failure instead of silently losing coverage.
  *
  * @param {string} code
  * @param {string} filename  used by oxc to pick the dialect (.ts/.tsx/.js…)
+ * @param {(message: string) => void} [onError]
  * @returns {object|null}
  */
-function parse(code, filename) {
+function parse(code, filename, onError) {
   try {
     const result = oxc.parseSync(filename, code);
+    if (result && Array.isArray(result.errors) && result.errors.length > 0) {
+      const first = result.errors[0];
+      const extra = result.errors.length > 1 ? ` (+${result.errors.length - 1} more)` : "";
+      onError?.(`${first.message || "parse error"}${extra}`);
+      return null;
+    }
     const program = result && result.program;
-    return program && Array.isArray(program.body) ? program : null;
-  } catch {
+    if (program && Array.isArray(program.body)) return program;
+    onError?.("parser returned no usable program");
+    return null;
+  } catch (err) {
+    onError?.(err && err.message ? err.message : String(err));
     return null;
   }
 }

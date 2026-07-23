@@ -24,8 +24,9 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # Node 22 bundles npm 10.x; trusted publishing requires npm >= 11.5.1
-      - run: npm install -g npm@latest
+      # Node 22 bundles npm 10.x; trusted publishing requires npm >= 11.5.1.
+      # Pin the toolchain so a new npm release cannot change release behavior.
+      - run: npm install -g npm@11.18.0
 
       - run: npm ci
 

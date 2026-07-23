@@ -9,6 +9,8 @@ const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = require("@modelcontextprotocol/sdk/inMemory.js");
 
 const FIXTURE = path.join(__dirname, "fixtures", "static-app");
+const ACCURACY_FIXTURE = path.join(__dirname, "fixtures", "accuracy-app");
+const SCOPE_FIXTURE = path.join(__dirname, "fixtures", "scope-app");
 
 async function connect() {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -28,10 +30,13 @@ test("exposes the harness tools", async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "audit_routes",
+    "finding_by_fingerprint",
     "inventory_routes",
     "openapi_spec",
+    "query_audit",
     "report_schema",
     "suggest_auth",
+    "validate_policies",
   ]);
   await client.close();
 });
@@ -64,6 +69,48 @@ test("audit_routes returns the audit report contract", async () => {
   await client.close();
 });
 
+test("audit_routes only trusts inner auth names through configured wrappers", async () => {
+  const client = await connect();
+  const baseArguments = {
+    dir: ACCURACY_FIXTURE,
+    authMiddleware: { requireAuth: "authenticated" },
+  };
+  const withoutWrapper = parse(
+    await client.callTool({ name: "audit_routes", arguments: baseArguments }),
+  );
+  const configured = parse(
+    await client.callTool({
+      name: "audit_routes",
+      arguments: { ...baseArguments, authWrappers: ["asyncHandler"] },
+    }),
+  );
+  const route = (report) => report.routes.find((item) => item.path === "/wrapped");
+  assert.equal(route(withoutWrapper).authStatus, "unknown");
+  assert.equal(route(configured).authStatus, "proven");
+  await client.close();
+});
+
+test("audit_routes evaluates configurable route policies", async () => {
+  const client = await connect();
+  const report = parse(
+    await client.callTool({
+      name: "audit_routes",
+      arguments: {
+        dir: FIXTURE,
+        policies: [
+          {
+            id: "health-rate-limit",
+            match: { methods: ["GET"], paths: ["/health"] },
+            require: { anyMiddleware: ["rateLimit"] },
+          },
+        ],
+      },
+    }),
+  );
+  assert.ok(report.findings.some((finding) => finding.ruleId === "health-rate-limit"));
+  await client.close();
+});
+
 test("inventory_routes omits findings", async () => {
   const client = await connect();
   const report = parse(
@@ -71,6 +118,26 @@ test("inventory_routes omits findings", async () => {
   );
   assert.equal(report.command, "inventory");
   assert.equal(report.findings, undefined);
+  await client.close();
+});
+
+test("inventory_routes applies scan include and exclude globs", async () => {
+  const client = await connect();
+  const report = parse(
+    await client.callTool({
+      name: "inventory_routes",
+      arguments: {
+        dir: SCOPE_FIXTURE,
+        ignoreFile: false,
+        include: ["src/**"],
+        exclude: ["src/skip/**"],
+      },
+    }),
+  );
+  assert.deepEqual(
+    report.routes.map((route) => route.path),
+    ["/main"],
+  );
   await client.close();
 });
 
@@ -83,14 +150,110 @@ test("suggest_auth proposes candidates", async () => {
   await client.close();
 });
 
-test("a bad directory returns an error result, not a crash", async () => {
+test("query_audit returns compact summaries and cursor-paginated findings", async () => {
+  const client = await connect();
+  const summary = parse(
+    await client.callTool({
+      name: "query_audit",
+      arguments: { dir: FIXTURE, kind: "summary" },
+    }),
+  );
+  assert.equal(summary.kind, "summary");
+  assert.ok(summary.summary.routes > 0);
+  assert.equal(summary.scanCoverage.complete, true);
+  assert.equal(summary.routes, undefined);
+
+  const first = parse(
+    await client.callTool({
+      name: "query_audit",
+      arguments: { dir: FIXTURE, kind: "findings", limit: 2 },
+    }),
+  );
+  assert.equal(first.items.length, 2);
+  assert.ok(first.nextCursor);
+  const second = parse(
+    await client.callTool({
+      name: "query_audit",
+      arguments: {
+        dir: FIXTURE,
+        kind: "findings",
+        limit: 2,
+        cursor: first.nextCursor,
+      },
+    }),
+  );
+  assert.ok(second.items.length > 0);
+  assert.notEqual(second.items[0].fingerprint, first.items[0].fingerprint);
+  await client.close();
+});
+
+test("finding_by_fingerprint returns the finding and associated route", async () => {
+  const client = await connect();
+  const report = parse(
+    await client.callTool({ name: "audit_routes", arguments: { dir: FIXTURE } }),
+  );
+  const expected = report.findings.find((finding) => finding.method);
+  const result = parse(
+    await client.callTool({
+      name: "finding_by_fingerprint",
+      arguments: { dir: FIXTURE, fingerprint: expected.fingerprint },
+    }),
+  );
+  assert.equal(result.finding.fingerprint, expected.fingerprint);
+  assert.equal(result.route.path, expected.path);
+  await client.close();
+});
+
+test("validate_policies normalizes expressions and reports expired exceptions", async () => {
+  const client = await connect();
+  const result = parse(
+    await client.callTool({
+      name: "validate_policies",
+      arguments: {
+        now: "2031-01-01",
+        policies: [
+          {
+            id: "admin",
+            require: { all: [{ auth: true }, { roles: ["admin"] }] },
+            exceptions: [
+              {
+                id: "old",
+                reason: "migration",
+                expires: "2030-01-01",
+                match: { paths: ["/admin/**"] },
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(result.valid, true);
+  assert.equal(result.expiredExceptions[0].exceptionId, "old");
+  await client.close();
+});
+
+test("validate_policies reports a consistent error for an invalid evaluation date", async () => {
+  const client = await connect();
+  const result = await client.callTool({
+    name: "validate_policies",
+    arguments: { now: "0", policies: [] },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /policy evaluation now must be a valid date/);
+  await client.close();
+});
+
+test("a missing directory returns a well-formed incomplete scan", async () => {
   const client = await connect();
   const result = await client.callTool({
     name: "audit_routes",
     arguments: { dir: path.join(FIXTURE, "does-not-exist") },
   });
-  // missing dir yields an empty scan, not an error; assert it stays well-formed
   assert.ok(!result.isError);
-  assert.equal(JSON.parse(result.content[0].text).routes.length, 0);
+  const report = JSON.parse(result.content[0].text);
+  assert.equal(report.routes.length, 0);
+  assert.equal(report.scanCoverage.complete, false);
+  assert.ok(report.diagnostics.some((message) => message.includes("could not read directory")));
   await client.close();
 });
