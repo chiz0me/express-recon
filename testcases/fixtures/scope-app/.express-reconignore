@@ -1,0 +1,4 @@
+# Generated routes do not ship.
+generated/**
+private/**
+!private/keep.js

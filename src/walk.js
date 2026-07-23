@@ -9,15 +9,20 @@ const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"
  * Locate the top-level router on an Express app across v4/v5.
  *
  * Express 5 exposes a lazy `app.router` getter; Express 4 stores it on
- * `app._router` after the first route is registered. Touching `app.router`
- * also forces lazy init on v5, which is what we want before walking.
+ * `app._router` after the first route is registered. Express 4 also defines a
+ * deprecated `app.router` getter that throws when touched, so `_router` must be
+ * checked first.
  */
 function getRootRouter(app) {
   if (typeof app !== "function" && (!app || !app.use)) {
     throw new Error("express-recon: expected an Express app or Router");
   }
-  if (app.router && app.router.stack) return app.router;
   if (app._router && app._router.stack) return app._router;
+  try {
+    if (app.router && app.router.stack) return app.router;
+  } catch {
+    // Express 4's deprecated app.router getter throws; _router was checked above.
+  }
   if (app.stack) return app;
   throw new Error("express-recon: app has no router stack — register at least one route first");
 }

@@ -40,6 +40,60 @@ const DEFAULT_STUB_MODULES = [
 
 const DEFAULT_STUB_PREFIXES = ["@aws-sdk/"];
 
+// These methods accept long-lived listeners or user-supplied work functions,
+// not Node-style completion callbacks. Invoking them with `(null, stub)` would
+// manufacture events or run transaction bodies with the wrong arguments.
+// Ambiguous names such as `each` and `pipeline` stay excluded deliberately:
+// missing a completion callback is safer than executing a data/work callback.
+const NON_COMPLETION_METHODS = new Set([
+  "$transaction",
+  "addListener",
+  "consume",
+  "each",
+  "eachBatch",
+  "eachMessage",
+  "filter",
+  "forEach",
+  "handle",
+  "handler",
+  "map",
+  "middleware",
+  "observe",
+  "off",
+  "on",
+  "once",
+  "pipe",
+  "pipeline",
+  "prependListener",
+  "prependOnceListener",
+  "process",
+  "reduce",
+  "register",
+  "removeAllListeners",
+  "removeListener",
+  "session",
+  "subscribe",
+  "tap",
+  "transaction",
+  "transactionProvider",
+  "transact",
+  "transform",
+  "unsubscribe",
+  "use",
+  "watch",
+  "withSession",
+  "withTransaction",
+]);
+
+function finalSegment(name) {
+  const segment = name.slice(name.lastIndexOf(".") + 1);
+  return segment.replace(/^new /, "").replace(/\(\)$/, "");
+}
+
+function errorMessage(err) {
+  return err && err.message ? err.message : String(err);
+}
+
 /**
  * An inert stand-in for an infra client: every property access, call, and
  * `new` yields another stub, so arbitrary client code chains without throwing.
@@ -48,26 +102,52 @@ const DEFAULT_STUB_PREFIXES = ["@aws-sdk/"];
  * NON-thenable stub — a stub that resolved to itself would send promise
  * adoption into an infinite microtask loop. `onFulfilled` really runs, so an
  * app that registers routes inside `connect().then(...)` still wires them.
- * Function arguments are never invoked (calling app callbacks with stub inputs
- * could run arbitrary logic), and nothing ever rejects — `.catch` teardown
- * like `process.exit(1)` stays inert.
+ * A final function argument is treated as a Node-style completion callback and
+ * invoked asynchronously with `(null, inertResult)`. Listener, subscription,
+ * consumer, and transaction methods are excluded because their functions are
+ * handlers/work rather than completions. Nothing ever rejects, so `.catch`
+ * teardown like `process.exit(1)` stays inert.
  *
  * @param {string} name  dotted provenance, shown by util.inspect/String().
- * @param {{thenable?: boolean}} [opts]
+ * @param {{
+ *   thenable?: boolean,
+ *   callbackState?: {callbackCalls: number, callbackErrors: Array<{name: string, message: string}>}
+ * }} [opts]
  * @returns {Function} callable/constructable Proxy
  */
 function makeStub(name, opts = {}) {
   const thenable = opts.thenable !== false;
+  const callbackState = opts.callbackState || { callbackCalls: 0, callbackErrors: [] };
   const children = new Map();
   const target = function reconStub() {};
   // util.inspect reads the target directly (proxy get traps are bypassed to
   // avoid side effects), so the custom-inspect fn must be an own property.
   target[INSPECT] = () => `[express-recon stub: ${name}]`;
+  const child = (childName, childOpts = {}) => makeStub(childName, { callbackState, ...childOpts });
   const settle = (onSettled) =>
     Promise.resolve().then(() => {
-      const settled = makeStub(name, { thenable: false });
+      const settled = child(name, { thenable: false });
       return onSettled ? onSettled(settled) : settled;
     });
+  const invokeCompletion = (args) => {
+    const callback = args.at(-1);
+    if (typeof callback !== "function" || NON_COMPLETION_METHODS.has(finalSegment(name))) return;
+
+    callbackState.callbackCalls += 1;
+    const result = child(`${name} callback result`, { thenable: false });
+    queueMicrotask(() => {
+      try {
+        const returned = callback(null, result);
+        if (returned && typeof returned.then === "function") {
+          returned.then(undefined, (err) => {
+            callbackState.callbackErrors.push({ name, message: errorMessage(err) });
+          });
+        }
+      } catch (err) {
+        callbackState.callbackErrors.push({ name, message: errorMessage(err) });
+      }
+    });
+  };
   return new Proxy(target, {
     get(t, prop) {
       if (typeof prop === "symbol") {
@@ -93,14 +173,16 @@ function makeStub(name, opts = {}) {
       // Proxy invariant: `prototype` is a non-configurable own prop on a
       // function target, so the trap must not replace it with a stub.
       if (prop === "prototype") return t.prototype;
-      if (!children.has(prop)) children.set(prop, makeStub(`${name}.${prop}`));
+      if (!children.has(prop)) children.set(prop, child(`${name}.${prop}`));
       return children.get(prop);
     },
-    apply() {
-      return makeStub(`${name}()`);
+    apply(_target, _thisArg, args) {
+      invokeCompletion(args);
+      return child(`${name}()`);
     },
-    construct() {
-      return makeStub(`new ${name}()`);
+    construct(_target, args) {
+      invokeCompletion(args);
+      return child(`new ${name}()`);
     },
     has(t, prop) {
       return typeof prop === "string";
@@ -150,14 +232,21 @@ function installSandbox(opts = {}) {
     else exact.add(entry);
   }
 
-  const state = { stubbed: new Set(), listens: 0, exitCalls: [] };
+  const state = {
+    stubbed: new Set(),
+    listens: 0,
+    exitCalls: [],
+    callbackCalls: 0,
+    callbackErrors: [],
+  };
   const stubCache = new Map();
 
   const origLoad = Module._load;
   Module._load = function sandboxedLoad(request, parent, isMain) {
     if (shouldStub(request, exact, prefixes)) {
       state.stubbed.add(packageRoot(request));
-      if (!stubCache.has(request)) stubCache.set(request, makeStub(request));
+      if (!stubCache.has(request))
+        stubCache.set(request, makeStub(request, { callbackState: state }));
       return stubCache.get(request);
     }
     return origLoad.call(this, request, parent, isMain);
@@ -195,6 +284,15 @@ function installSandbox(opts = {}) {
         out.push(
           `boot: app called process.exit(${state.exitCalls.join(", ")}) during boot — ignored`,
         );
+      if (state.callbackCalls > 0)
+        out.push(
+          `boot: invoked ${state.callbackCalls} callback-style infra continuation(s) with inert results`,
+        );
+      for (const error of state.callbackErrors) {
+        out.push(
+          `boot: callback passed to ${error.name} threw: ${error.message} — results may be partial`,
+        );
+      }
       return out;
     },
   };

@@ -55,10 +55,21 @@ function header(report) {
   if (report.summary) {
     const s = report.summary;
     const accepted = s.accepted ? `   accepted: ${s.accepted}` : "";
+    const policies = s.policyViolations ? `   policy-violations: ${s.policyViolations}` : "";
+    const exceptions = s.policyExceptions ? `   policy-exceptions: ${s.policyExceptions}` : "";
     lines.push(
       paint(
-        `public: ${s.public}   review: ${s.unknown}   proven-auth: ${s.proven}${accepted}`,
+        `public: ${s.public}   review: ${s.unknown}   proven-auth: ${s.proven}${accepted}${policies}${exceptions}`,
         COLORS.dim,
+      ),
+    );
+  }
+  if (report.delta) {
+    const d = report.delta.summary;
+    lines.push(
+      paint(
+        `delta: +${d.addedRoutes}/-${d.removedRoutes} routes   regressions: ${d.authRegressions}   new findings: ${d.newFindings}`,
+        d.authRegressions || d.newFindings ? COLORS.yellow : COLORS.dim,
       ),
     );
   }

@@ -20,7 +20,7 @@ function sourceMatch(route, runtimeRoutes, staticKeys, claimed) {
       r.source.file === route.source.file &&
       r.source.line === route.source.line &&
       !staticKeys.has(key(r)) &&
-      !claimed.has(key(r)),
+      !claimed.has(r),
   );
   return candidates.length === 1 ? candidates[0] : null;
 }
@@ -40,9 +40,38 @@ function suffixMatch(route, runtimeRoutes, staticKeys, claimed) {
       r.method === route.method &&
       r.path.endsWith(suffix) &&
       !staticKeys.has(key(r)) &&
-      !claimed.has(key(r)),
+      !claimed.has(r),
   );
   return candidates.length === 1 ? candidates[0] : null;
+}
+
+/** Pair an exact route key, preferring an equal registration source when available. */
+function exactMatch(route, runtimeRoutes, claimed) {
+  const candidates = runtimeRoutes.filter((r) => key(r) === key(route) && !claimed.has(r));
+  if (candidates.length === 0) return null;
+  if (route.source && route.source.file && route.source.line != null) {
+    const bySource = candidates.filter(
+      (candidate) =>
+        candidate.source &&
+        candidate.source.file === route.source.file &&
+        candidate.source.line === route.source.line,
+    );
+    if (bySource.length === 1) return bySource[0];
+  }
+  return candidates[0];
+}
+
+/**
+ * Runtime is authoritative for middleware and auth: it observed the route that
+ * actually booted. Static analysis contributes source and handler I/O metadata.
+ */
+function mergePair(route, match) {
+  return {
+    ...match,
+    source: route.source || match.source || null,
+    presence: "both",
+    ...(route.io ? { io: route.io } : {}),
+  };
 }
 
 /**
@@ -59,14 +88,14 @@ function suffixMatch(route, runtimeRoutes, staticKeys, claimed) {
  * @returns {{routes: object[], globalMiddleware: object[]}}
  */
 function reconcile(staticReg, runtimeReg) {
-  const runtimeKeys = new Set(runtimeReg.routes.map(key));
   const staticKeys = new Set(staticReg.routes.map(key));
   const claimed = new Set();
   const routes = [];
   for (const route of staticReg.routes) {
-    if (runtimeKeys.has(key(route))) {
-      // The runtime walk confirmed this exact path, so it is no longer partial.
-      routes.push({ ...route, pathConfidence: "full", presence: "both" });
+    const exact = exactMatch(route, runtimeReg.routes, claimed);
+    if (exact) {
+      claimed.add(exact);
+      routes.push(mergePair(route, exact));
       continue;
     }
     const match =
@@ -75,22 +104,14 @@ function reconcile(staticReg, runtimeReg) {
         ? suffixMatch(route, runtimeReg.routes, staticKeys, claimed)
         : null);
     if (match) {
-      claimed.add(key(match));
-      // The runtime twin has no statically-mined I/O hints; carry the static
-      // route's `io` (and source) onto the merged route.
-      routes.push({
-        ...match,
-        source: route.source || null,
-        presence: "both",
-        ...(route.io ? { io: route.io } : {}),
-      });
+      claimed.add(match);
+      routes.push(mergePair(route, match));
     } else {
       routes.push({ ...route, presence: "static-only" });
     }
   }
   for (const route of runtimeReg.routes) {
-    if (!staticKeys.has(key(route)) && !claimed.has(key(route)))
-      routes.push({ ...route, presence: "runtime-only" });
+    if (!claimed.has(route)) routes.push({ ...route, presence: "runtime-only" });
   }
   // Both sides were classified with the same config, so the accepted tags on
   // routes already agree; carry the baseline list and static diagnostics
@@ -98,8 +119,9 @@ function reconcile(staticReg, runtimeReg) {
   return {
     routes,
     globalMiddleware: staticReg.globalMiddleware,
-    diagnostics: staticReg.diagnostics || [],
+    diagnostics: [...(staticReg.diagnostics || []), ...(runtimeReg.diagnostics || [])],
     acceptedPublic: staticReg.acceptedPublic || [],
+    ...(staticReg.scanCoverage ? { scanCoverage: staticReg.scanCoverage } : {}),
   };
 }
 

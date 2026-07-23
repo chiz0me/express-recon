@@ -46,6 +46,42 @@ test(".then(cb) invokes cb asynchronously and chains catch/finally", async () =>
   assert.ok(finallyRan);
 });
 
+test("Node-style completion callbacks run asynchronously with an inert result", async () => {
+  const stub = makeStub("db");
+  let received;
+  let calls = 0;
+  const returned = stub.connect((err, client) => {
+    calls += 1;
+    received = { err, client };
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(typeof returned.query, "function");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 1);
+  assert.equal(received.err, null);
+  assert.equal(typeof received.client, "function");
+  assert.equal(received.client.then, undefined);
+  assert.equal(typeof received.client.release(), "function");
+});
+
+test("listener and transaction functions are not mistaken for completion callbacks", async () => {
+  const stub = makeStub("db");
+  let calls = 0;
+  const handler = () => {
+    calls += 1;
+  };
+
+  stub.on("ready", handler);
+  stub.once("error", handler);
+  stub.transaction(handler);
+  stub.consume("jobs", handler);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 0);
+});
+
 test("stubs chain through get/call/new with stable identity", () => {
   const stub = makeStub("pg");
   assert.equal(stub.a, stub.a);

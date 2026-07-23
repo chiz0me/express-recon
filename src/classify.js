@@ -5,6 +5,51 @@ const { isOpaque } = require("./middleware");
 const PUBLIC_TAG = "public";
 const REVIEW_TAG = "unknown:review";
 
+function validateAuthMiddleware(authMiddleware) {
+  if (!authMiddleware || typeof authMiddleware !== "object" || Array.isArray(authMiddleware)) {
+    throw new Error("authMiddleware must be an object");
+  }
+  for (const [name, value] of Object.entries(authMiddleware)) {
+    if (!name.trim()) throw new Error("authMiddleware names must not be empty");
+    if (typeof value === "string" && value) continue;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`authMiddleware.${name} must be a tag string or grant object`);
+    }
+    const unknown = Object.keys(value).filter(
+      (field) => !["tag", "tags", "roles", "scopes"].includes(field),
+    );
+    if (unknown.length) {
+      throw new Error(`authMiddleware.${name} contains unknown field(s): ${unknown.join(", ")}`);
+    }
+    const values = [
+      ...(value.tag === undefined ? [] : [value.tag]),
+      ...(value.tags || []),
+      ...(value.roles || []),
+      ...(value.scopes || []),
+    ];
+    if (
+      !["tags", "roles", "scopes"].every(
+        (field) => value[field] === undefined || Array.isArray(value[field]),
+      ) ||
+      values.length === 0 ||
+      values.some((item) => typeof item !== "string" || !item)
+    ) {
+      throw new Error(
+        `authMiddleware.${name} must contain non-empty string tags, roles, or scopes`,
+      );
+    }
+  }
+}
+
+function validateAuthWrappers(authWrappers) {
+  if (
+    !Array.isArray(authWrappers) ||
+    authWrappers.some((name) => typeof name !== "string" || !name.trim())
+  ) {
+    throw new Error("authWrappers must be an array of non-empty wrapper names");
+  }
+}
+
 /**
  * Auth status for a route, under a public-unless-proven policy:
  *
@@ -19,38 +64,101 @@ const REVIEW_TAG = "unknown:review";
  *   it to `authMiddleware` and re-run.
  *
  * @param {import("./middleware").Descriptor[]} middlewares
- * @param {Record<string,string>} authMiddleware  name/dotted-callee -> tag
- * @returns {{authStatus: string, tags: string[]}}
+ * @param {Record<string,string|{tag?:string,tags?:string[],roles?:string[],scopes?:string[]}>} authMiddleware
+ * @param {boolean} [validated]
+ * @param {string[]} [authWrappers] calls that unconditionally preserve/execute wrapped middleware
+ * @returns {{authStatus: string, tags: string[], roles: string[], scopes: string[], authEvidence: object}}
  */
-function authStatusFor(middlewares, authMiddleware) {
+function authStatusFor(middlewares, authMiddleware, validated = false, authWrappers = []) {
+  if (!validated) {
+    validateAuthMiddleware(authMiddleware);
+    validateAuthWrappers(authWrappers);
+  }
+  const transparentWrappers = new Set(authWrappers);
   const tags = new Set();
+  const roles = new Set();
+  const scopes = new Set();
+  const matched = [];
   let opaque = false;
   // Own-property lookup only: a middleware named `constructor` must not match
   // Object.prototype and classify as proven.
-  const tagFor = (name) => (Object.hasOwn(authMiddleware, name) ? authMiddleware[name] : undefined);
+  const grantFor = (name) => {
+    if (!Object.hasOwn(authMiddleware, name)) return null;
+    const value = authMiddleware[name];
+    if (typeof value === "string" && value) return { tags: [value], roles: [], scopes: [] };
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const grantTags = [
+      ...(typeof value.tag === "string" && value.tag ? [value.tag] : []),
+      ...(Array.isArray(value.tags) ? value.tags : []),
+    ];
+    const grantRoles = Array.isArray(value.roles) ? value.roles : [];
+    const grantScopes = Array.isArray(value.scopes) ? value.scopes : [];
+    if (![...grantTags, ...grantRoles, ...grantScopes].every((item) => typeof item === "string")) {
+      return null;
+    }
+    if (grantTags.length === 0 && (grantRoles.length > 0 || grantScopes.length > 0)) {
+      grantTags.push("authenticated");
+    }
+    return { tags: grantTags, roles: grantRoles, scopes: grantScopes };
+  };
+  const applyGrant = (name) => {
+    const grant = grantFor(name);
+    if (!grant) return;
+    for (const tag of grant.tags) tags.add(tag);
+    for (const role of grant.roles) roles.add(role);
+    for (const scope of grant.scopes) scopes.add(scope);
+    matched.push({ name, ...grant });
+  };
   for (const mw of middlewares) {
-    const tag = tagFor(mw.name);
-    if (tag) tags.add(tag);
-    // Wrapped guards (`asyncHandler(requireAuth)`) match through their inner names.
-    for (const name of mw.inner || []) {
-      const innerTag = tagFor(name);
-      if (innerTag) tags.add(innerTag);
+    applyGrant(mw.name);
+    const inner = mw.inner || [];
+    if (transparentWrappers.has(mw.name)) {
+      // Only configured pass-through wrappers may prove an inner guard. An
+      // arbitrary call could conditionally disable or merely reference it.
+      for (const name of inner) applyGrant(name);
+    } else if (inner.some((name) => grantFor(name))) {
+      opaque = true;
     }
     if (isOpaque(mw)) opaque = true;
   }
-  if (tags.size > 0) return { authStatus: "proven", tags: [...tags] };
-  if (opaque) return { authStatus: "unknown", tags: [REVIEW_TAG] };
-  return { authStatus: "public", tags: [PUBLIC_TAG] };
+  const authEvidence = { matched };
+  if (matched.length > 0) {
+    return {
+      authStatus: "proven",
+      tags: [...tags],
+      roles: [...roles],
+      scopes: [...scopes],
+      authEvidence,
+    };
+  }
+  if (opaque) {
+    return {
+      authStatus: "unknown",
+      tags: [REVIEW_TAG],
+      roles: [],
+      scopes: [],
+      authEvidence: { matched: [], opaque: true },
+    };
+  }
+  return {
+    authStatus: "public",
+    tags: [PUBLIC_TAG],
+    roles: [],
+    scopes: [],
+    authEvidence,
+  };
 }
 
 function routeKey(route) {
   return `${route.method} ${route.path}`;
 }
 
-function tagRoute(route, authMiddleware, acceptedPublic) {
-  const { authStatus, tags } = authStatusFor(route.middlewares, authMiddleware);
+function tagRoute(route, authMiddleware, authWrappers, acceptedPublic) {
+  const classification = authStatusFor(route.middlewares, authMiddleware, true, authWrappers);
+  const { authStatus } = classification;
   const accepted = authStatus === "public" && acceptedPublic.has(routeKey(route));
-  return accepted ? { ...route, authStatus, tags, accepted: true } : { ...route, authStatus, tags };
+  const classified = { ...route, ...classification };
+  return accepted ? { ...classified, accepted: true } : classified;
 }
 
 /**
@@ -61,16 +169,20 @@ function tagRoute(route, authMiddleware, acceptedPublic) {
  * `public-route` finding and `--fail-on public` match.
  *
  * @param {{routes: object[], globalMiddleware: object[]}} registry
- * @param {{authMiddleware?: Record<string,string>, acceptedPublic?: string[]}} options
+ * @param {{authMiddleware?: Record<string,string|object>, authWrappers?: string[], acceptedPublic?: string[]}} options
  */
 function classify(registry, options) {
   const authMiddleware = (options && options.authMiddleware) || {};
+  const authWrappers = (options && options.authWrappers) || [];
+  validateAuthMiddleware(authMiddleware);
+  validateAuthWrappers(authWrappers);
   const acceptedPublic = new Set((options && options.acceptedPublic) || []);
   return {
-    routes: registry.routes.map((r) => tagRoute(r, authMiddleware, acceptedPublic)),
+    routes: registry.routes.map((r) => tagRoute(r, authMiddleware, authWrappers, acceptedPublic)),
     globalMiddleware: registry.globalMiddleware,
     diagnostics: registry.diagnostics || [],
     acceptedPublic: [...acceptedPublic],
+    ...(registry.scanCoverage ? { scanCoverage: registry.scanCoverage } : {}),
   };
 }
 
@@ -98,4 +210,12 @@ function inconsistentPaths(routes) {
   return result.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-module.exports = { classify, authStatusFor, inconsistentPaths, PUBLIC_TAG, REVIEW_TAG };
+module.exports = {
+  classify,
+  authStatusFor,
+  inconsistentPaths,
+  validateAuthMiddleware,
+  validateAuthWrappers,
+  PUBLIC_TAG,
+  REVIEW_TAG,
+};

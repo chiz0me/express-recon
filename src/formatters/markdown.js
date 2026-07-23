@@ -20,7 +20,20 @@ function mwNames(middlewares) {
 }
 
 function sourceLabel(s) {
-  return s && s.file ? `${path.basename(s.file)}:${s.line}` : "—";
+  if (!s?.file) return "—";
+  const relative = path.relative(process.cwd(), s.file);
+  const file = relative && !relative.startsWith("..") ? relative : s.file;
+  return `${file.split(path.sep).join("/")}:${s.line ?? "?"}`;
+}
+
+function findingIdentity(finding) {
+  return [
+    `**${finding.severity}**`,
+    finding.source ? sourceLabel(finding.source) : null,
+    finding.fingerprint ? `\`${finding.fingerprint}\`` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function pathCell(r) {
@@ -47,9 +60,9 @@ function findingList(findings, id, emptyMsg) {
   return matches
     .map((f) => {
       if (f.id === "per-verb-gap") {
-        return `- \`${f.path}\` — ${f.methods.map((m) => `${m.method}=${m.authStatus}`).join(", ")}`;
+        return `- ${findingIdentity(f)} · \`${f.path}\` — ${f.methods.map((m) => `${m.method}=${m.authStatus}`).join(", ")}`;
       }
-      return `- \`${f.method} ${f.path}\` — ${sourceLabel(f.source)}`;
+      return `- ${findingIdentity(f)} · \`${f.method} ${f.path}\``;
     })
     .join("\n");
 }
@@ -64,8 +77,14 @@ function auditSections(report) {
   const f = report.findings;
   const s = report.summary;
   const accepted = s.accepted ? `, accepted: **${s.accepted}**` : "";
+  const policyViolations = s.policyViolations
+    ? `, policy violations: **${s.policyViolations}**`
+    : "";
+  const policyExceptions = s.policyExceptions
+    ? `, active exceptions: **${s.policyExceptions}**`
+    : "";
   const sections = [
-    `Total routes: **${s.routes}** — public: **${s.public}**, needs review: **${s.unknown}**, proven auth: **${s.proven}**${accepted}`,
+    `Total routes: **${s.routes}** — public: **${s.public}**, needs review: **${s.unknown}**, proven auth: **${s.proven}**${accepted}${policyViolations}${policyExceptions}`,
     "",
     "## Public — no recognised auth middleware",
     "",
@@ -84,6 +103,33 @@ function auditSections(report) {
     findingList(f, "opaque-middleware", "_None._"),
     "",
   ];
+  if (f.some((x) => x.id === "policy-violation")) {
+    sections.push(
+      "## Configured policy violations",
+      "",
+      f
+        .filter((finding) => finding.id === "policy-violation")
+        .map(
+          (finding) =>
+            `- **${finding.ruleId}** · ${findingIdentity(finding)} · \`${finding.method} ${finding.path}\` — ${finding.detail}`,
+        )
+        .join("\n"),
+      "",
+    );
+  }
+  if (report.policyExceptions?.length) {
+    sections.push(
+      "## Active policy exceptions",
+      "",
+      report.policyExceptions
+        .map(
+          (exception) =>
+            `- **${exception.policyId}/${exception.exceptionId}** · \`${exception.method} ${exception.path}\` — expires ${exception.expires}: ${exception.reason}`,
+        )
+        .join("\n"),
+      "",
+    );
+  }
   if (f.some((x) => x.id === "stale-baseline")) {
     sections.push(
       "## Stale baseline entries — prune from acceptedPublic",
@@ -95,11 +141,49 @@ function auditSections(report) {
   return sections;
 }
 
+function deltaSections(delta) {
+  const s = delta.summary;
+  const sections = [
+    "## Baseline delta",
+    "",
+    `Routes added: **${s.addedRoutes}**, removed: **${s.removedRoutes}**; auth regressions: **${s.authRegressions}**, improvements: **${s.authImprovements}**; new findings: **${s.newFindings}**, resolved: **${s.resolvedFindings}**`,
+    "",
+  ];
+  if (delta.authRegressions.length) {
+    sections.push(
+      "### Authentication regressions",
+      "",
+      delta.authRegressions
+        .map(
+          (change) =>
+            `- \`${change.method} ${change.path}\` · ${sourceLabel(change.source)} — ${change.from} → **${change.to}**. ${change.explanation}`,
+        )
+        .join("\n"),
+      "",
+    );
+  }
+  if (delta.newFindings.length) {
+    sections.push(
+      "### Net-new findings",
+      "",
+      delta.newFindings
+        .map(
+          (finding) =>
+            `- **${finding.ruleId}** · ${findingIdentity(finding)}${finding.method ? ` · \`${finding.method} ${finding.path}\`` : ""} — ${finding.detail}`,
+        )
+        .join("\n"),
+      "",
+    );
+  }
+  return sections;
+}
+
 function format(report) {
   const audit = report.command === "audit";
   const sections = [`# Express route ${audit ? "audit" : "inventory"}`, ""];
   if (audit) sections.push(...auditSections(report));
   else sections.push(`Total routes: **${report.routes.length}**`, "");
+  if (report.delta) sections.push(...deltaSections(report.delta));
   sections.push(
     "## Global middleware",
     "",

@@ -1,0 +1,13 @@
+authMiddleware:
+  requireAuth:
+    tags: [authenticated]
+    roles: [member]
+    scopes: [profile:read]
+policies:
+  - id: health-rate-limit
+    severity: medium
+    match:
+      methods: [GET]
+      paths: [/health]
+    require:
+      anyMiddleware: [rateLimit, slowDown]

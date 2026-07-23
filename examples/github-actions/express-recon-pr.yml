@@ -1,0 +1,169 @@
+# Express Recon PR security review (JSON/Markdown; intentionally no SARIF).
+#
+# Prerequisites in the consuming Express repository:
+#   1. Add express-recon as a pinned devDependency and commit package-lock.json.
+#   2. Commit a data-only recon.config.json or recon.config.yaml.
+#
+# Copy this file to .github/workflows/express-recon.yml.
+name: Express route security review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: express-recon-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the PR
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: current
+          persist-credentials: false
+
+      - name: Check out the merge base
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: baseline
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: current/package-lock.json
+
+      - name: Install the pinned scanner
+        run: npm ci --ignore-scripts --prefix current
+
+      # Use the PR's data-only configuration for both revisions so a config
+      # change cannot manufacture a delta by changing the rules between scans.
+      - name: Build the base-branch report
+        run: |
+          current/node_modules/.bin/express-recon audit \
+            --src baseline \
+            --config current/recon.config.json \
+            --format json \
+            --out baseline-results \
+            --fail-on incomplete
+
+      - name: Audit the PR and capture the gate result
+        id: audit
+        shell: bash
+        run: |
+          set +e
+          current/node_modules/.bin/express-recon audit \
+            --src current \
+            --config current/recon.config.json \
+            --baseline baseline-results/routes.json \
+            --format json,md \
+            --out current-results \
+            --fail-on new,regression,incomplete
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Add delta findings and annotations to the PR checks
+        if: always() && hashFiles('current-results/routes.json') != ''
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const report = JSON.parse(fs.readFileSync("current-results/routes.json", "utf8"));
+          const root = path.resolve("current");
+          const relativeSource = (source) => {
+            if (!source?.file) return null;
+            const relative = path.relative(root, source.file).split(path.sep).join("/");
+            return relative.startsWith("../") ? null : relative;
+          };
+          const link = (source) => {
+            const file = relativeSource(source);
+            if (!file) return "location unavailable";
+            const encoded = file.split("/").map(encodeURIComponent).join("/");
+            const line = source.line ? `#L${source.line}` : "";
+            return `[${file}:${source.line ?? "?"}](https://github.com/${process.env.REPOSITORY}/blob/${process.env.HEAD_SHA}/${encoded}${line})`;
+          };
+          const escapeData = (value) =>
+            String(value).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+          const escapeProperty = (value) =>
+            escapeData(value).replaceAll(":", "%3A").replaceAll(",", "%2C");
+          const annotate = (finding) => {
+            const file = relativeSource(finding.source);
+            if (!file) return;
+            const level = finding.severity === "high" ? "error" : "warning";
+            const props = [
+              `file=${escapeProperty(file)}`,
+              finding.source.line ? `line=${finding.source.line}` : null,
+              `title=${escapeProperty(`${finding.severity}: ${finding.ruleId}`)}`,
+            ].filter(Boolean).join(",");
+            console.log(
+              `::${level} ${props}::${escapeData(`${finding.method || ""} ${finding.path || ""} — ${finding.detail} (${finding.fingerprint})`)}`,
+            );
+          };
+
+          const delta = report.delta;
+          const lines = [
+            "## Express Recon: PR delta",
+            "",
+            `New findings: **${delta.summary.newFindings}** · Auth regressions: **${delta.summary.authRegressions}** · Added routes: **${delta.summary.addedRoutes}**`,
+            "",
+          ];
+          if (delta.newFindings.length) {
+            lines.push("### Net-new findings", "");
+            for (const finding of delta.newFindings) {
+              annotate(finding);
+              lines.push(
+                `- **${finding.severity}** · **${finding.ruleId}** · \`${finding.method || ""} ${finding.path || ""}\` · ${link(finding.source)} · \`${finding.fingerprint}\``,
+              );
+            }
+            lines.push("");
+          }
+          if (delta.authRegressions.length) {
+            lines.push("### Authentication regressions", "");
+            for (const change of delta.authRegressions) {
+              lines.push(
+                `- \`${change.method} ${change.path}\` · ${link(change.source)} — ${change.from} → **${change.to}**. ${change.explanation}`,
+              );
+            }
+            lines.push("");
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`);
+          NODE
+          cat current-results/routes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full JSON and Markdown reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: express-recon-pr-${{ github.event.pull_request.number }}
+          path: |
+            baseline-results/routes.json
+            current-results/routes.json
+            current-results/routes.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce the PR gate
+        if: always()
+        shell: bash
+        run: |
+          exit_code="${{ steps.audit.outputs.exit_code }}"
+          if [[ -z "$exit_code" ]]; then
+            echo "express-recon did not produce a gate result" >&2
+            exit 1
+          fi
+          exit "$exit_code"

@@ -9,8 +9,97 @@ const { joinPath, scopedTo } = require("../walk");
 
 const SOURCE_EXT = new Set(EXTENSIONS);
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", "out"]);
-const TEST_DIRS = new Set(["test", "tests", "__tests__", "__mocks__"]);
+const TEST_DIRS = new Set([
+  "test",
+  "tests",
+  "testcases",
+  "spec",
+  "specs",
+  "__tests__",
+  "__mocks__",
+]);
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+const DEFAULT_IGNORE_FILE = ".express-reconignore";
+
+function stringPatterns(value, label) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error(`${label} must be an array of non-empty glob strings`);
+  }
+  return value.map((item) => item.trim());
+}
+
+function escapeRegex(char) {
+  return /[\\^$.*+?()[\]{}|]/.test(char) ? `\\${char}` : char;
+}
+
+/**
+ * Compile a root-relative path glob. `*` and `?` stay inside one segment;
+ * `**` crosses directories; a double-star path segment may match zero or more
+ * directories.
+ */
+function pathGlob(pattern) {
+  let normalized = pattern.replaceAll("\\", "/").replace(/^\.?\//, "");
+  if (normalized.endsWith("/")) normalized += "**";
+  let source = "^";
+  for (let i = 0; i < normalized.length; i++) {
+    if (normalized[i] === "*" && normalized[i + 1] === "*") {
+      if (normalized[i + 2] === "/") {
+        source += "(?:.*/)?";
+        i += 2;
+      } else {
+        source += ".*";
+        i++;
+      }
+    } else if (normalized[i] === "*") {
+      source += "[^/]*";
+    } else if (normalized[i] === "?") {
+      source += "[^/]";
+    } else {
+      source += escapeRegex(normalized[i]);
+    }
+  }
+  return new RegExp(`${source}$`);
+}
+
+function readIgnoreRules(root, ignoreFile) {
+  if (ignoreFile === false) return [];
+  if (ignoreFile !== undefined && typeof ignoreFile !== "string") {
+    throw new Error("scan.ignoreFile must be a path string or false");
+  }
+  const file = path.resolve(root, ignoreFile || DEFAULT_IGNORE_FILE);
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT" && ignoreFile === undefined) return [];
+    throw new Error(`Could not read scan ignore file ${file}: ${err.message}`);
+  }
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => ({
+      include: line.startsWith("!"),
+      pattern: pathGlob(line.startsWith("!") ? line.slice(1) : line),
+    }));
+}
+
+function scanScope(root, opts) {
+  const include = stringPatterns(opts.include, "scan.include").map(pathGlob);
+  const exclude = stringPatterns(opts.exclude, "scan.exclude").map(pathGlob);
+  const ignoreRules = readIgnoreRules(root, opts.ignoreFile);
+  return (file) => {
+    const relative = path.relative(root, file).split(path.sep).join("/");
+    if (include.length && !include.some((pattern) => pattern.test(relative))) return false;
+    if (exclude.some((pattern) => pattern.test(relative))) return false;
+    let ignored = false;
+    for (const rule of ignoreRules) {
+      if (rule.pattern.test(relative)) ignored = !rule.include;
+    }
+    return !ignored;
+  };
+}
 
 /**
  * Recursively collect source files under `dir`, skipping vendored/build dirs.
@@ -19,6 +108,9 @@ const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
  */
 function listSourceFiles(dir, opts = {}) {
   const includeTests = Boolean(opts.includeTests);
+  const inScope = scanScope(path.resolve(dir), opts);
+  const onTraversalError =
+    typeof opts.onTraversalError === "function" ? opts.onTraversalError : () => {};
   const found = [];
   const stack = [dir];
   while (stack.length) {
@@ -26,7 +118,8 @@ function listSourceFiles(dir, opts = {}) {
     let entries;
     try {
       entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      onTraversalError(current, err);
       continue;
     }
     for (const entry of entries) {
@@ -37,7 +130,7 @@ function listSourceFiles(dir, opts = {}) {
         stack.push(full);
       } else if (SOURCE_EXT.has(path.extname(entry.name))) {
         if (!includeTests && TEST_FILE.test(entry.name)) continue;
-        found.push(full);
+        if (inScope(full)) found.push(full);
       }
     }
   }
@@ -317,16 +410,46 @@ function diagnose({ appNodes, reachable, orphan, dropped }) {
  * Statically scan a repo for Express routes without executing any code.
  *
  * @param {string} rootDir  directory to scan
- * @param {{includeTests?: boolean}} [opts]
+ * @param {{includeTests?: boolean, include?: string[], exclude?: string[], ignoreFile?: string|false}} [opts]
  * @returns {{routes: object[], globalMiddleware: object[], diagnostics: string[]}}
  */
 function scan(rootDir, opts = {}) {
   // Absolute so file ids match the resolver's absolute mount targets — a
   // relative rootDir would otherwise orphan every cross-file mount.
   const root = path.resolve(rootDir);
-  const files = listSourceFiles(root, opts)
-    .map((f) => analyzeFile(fs.readFileSync(f, "utf8"), f))
-    .filter(Boolean);
+  const diagnostics = [];
+  let failed = 0;
+  const filePaths = listSourceFiles(root, {
+    ...opts,
+    onTraversalError(current, err) {
+      failed++;
+      diagnostics.push(
+        `scan: could not read directory ${current}: ${err && err.message ? err.message : String(err)}`,
+      );
+    },
+  });
+  const files = [];
+  for (const file of filePaths) {
+    let code;
+    try {
+      code = fs.readFileSync(file, "utf8");
+    } catch (err) {
+      failed++;
+      diagnostics.push(`scan: could not read source file ${file}: ${err.message}`);
+      continue;
+    }
+    const model = analyzeFile(code, file, (message) => {
+      diagnostics.push(`scan: could not parse ${file}: ${message}`);
+    });
+    if (model) files.push(model);
+    else failed++;
+  }
+  const scanCoverage = {
+    discovered: filePaths.length,
+    analyzed: files.length,
+    failed,
+    complete: failed === 0,
+  };
   const resolve = createResolver(loadTsconfig(root), loadImports(root));
   resolveImportedHandlers(files, resolve);
   const { nodes, stats } = buildGraph(files, resolve);
@@ -370,7 +493,7 @@ function scan(rootDir, opts = {}) {
   const globalMiddleware = [];
   for (const node of nodes.values())
     if (node.kind === "app") globalMiddleware.push(...node.globalMw.map((e) => e.mw));
-  const diagnostics = diagnose({ appNodes, reachable, orphan, dropped: stats.dropped });
+  diagnostics.push(...diagnose({ appNodes, reachable, orphan, dropped: stats.dropped }));
   for (const [host, count] of registrarHosts) {
     diagnostics.push(
       `${count} route(s) registered on unresolved host ${host} — likely a registrar ` +
@@ -378,7 +501,7 @@ function scan(rootDir, opts = {}) {
         "Re-run with --mode hybrid --app <entry> to recover them.",
     );
   }
-  return { routes, globalMiddleware, diagnostics };
+  return { routes, globalMiddleware, diagnostics, scanCoverage };
 }
 
 module.exports = { scan, listSourceFiles, buildGraph };

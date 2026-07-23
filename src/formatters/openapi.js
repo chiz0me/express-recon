@@ -152,6 +152,9 @@ function buildOperation(route, verb, opId, tag, isAudit, pathParams, schemes) {
   op["x-express-recon"] = {
     source: route.source || null,
     authStatus: route.authStatus ?? null,
+    authTags: route.tags || [],
+    roles: route.roles || [],
+    scopes: route.scopes || [],
     middlewares: route.middlewares.map((m) => m.name),
     pathConfidence: route.pathConfidence,
     handlerResolved: route.io ? route.io.handlerResolved : null,

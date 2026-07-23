@@ -1,6 +1,6 @@
 {
   "name": "express-recon",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Inventory & audit harness for Express 4/5 route surfaces — for humans, CI, and AI agents. Statically or at runtime enumerate routes, middleware chains, and flag unauthenticated endpoints.",
   "license": "MIT",
   "author": "chiz0me",
@@ -32,20 +32,27 @@
   "files": [
     "src",
     "skills",
-    "README.md"
+    "examples",
+    "README.md",
+    "SECURITY.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.js\" --test-coverage-lines=92 --test-coverage-branches=77 --test-coverage-functions=90",
     "lint": "oxlint",
     "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check src testcases",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
     "check:version": "node scripts/check-version.js",
     "version": "node scripts/sync-version.js && git add .claude-plugin/plugin.json",
     "prepublishOnly": "node scripts/check-version.js"
   },
   "devDependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "express": "^5.1.0",
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0"
@@ -53,6 +60,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "oxc-parser": "0.135.0",
+    "yaml": "2.9.0",
     "zod": "4.4.3"
   }
 }

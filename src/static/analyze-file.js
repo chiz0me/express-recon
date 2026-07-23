@@ -725,10 +725,11 @@ function collectNamedExport(node, exportRefs) {
  *
  * @param {string} code
  * @param {string} filePath  absolute path (node-id namespace + dialect hint)
+ * @param {(message: string) => void} [onParseError]
  * @returns {object|null} file model, or null if the file doesn't parse.
  */
-function analyzeFile(code, filePath) {
-  const program = parse(code, filePath);
+function analyzeFile(code, filePath, onParseError) {
+  const program = parse(code, filePath, onParseError);
   if (!program) return null;
   const { requires, routers } = collectBindings(program);
   const consts = collectStringConsts(program);
