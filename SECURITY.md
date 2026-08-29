@@ -44,14 +44,17 @@ artifacts have been written. They contain commit IDs, compact inventory evidence
 artifact paths, sizes, and SHA-256 integrity digests, but no source snapshot or
 token. `--resume` rejects incompatible tool/config/scope fingerprints and
 rescans entries whose artifacts are missing, non-regular, or fail integrity
-validation. Checkpoints and private-repository artifacts remain sensitive
+validation. Explicitly compatible releases validate the checkpoint's original
+fingerprint and artifact digests before upgrading it to the current compatibility
+generation. Checkpoints and private-repository artifacts remain sensitive
 metadata and should receive the same access controls as the final report.
 
 `GH_TOKEN`/`GITHUB_TOKEN` are read from the environment for API access and
 private Git fetches. The token is not accepted as a CLI argument, written to
 reports, embedded in URLs, stored in repository Git config, or passed in Git
 process arguments. A scoped authorization header is supplied to Git through its
-child environment, and the raw token variables are removed from Git/worker
+child environment for both the initial partial fetch and any on-demand promisor
+object reads, and the raw token variables are removed from Git/worker
 environments. Reports can still reveal private repository names, routes, source
 locations, and documentation; store organization outputs as sensitive data.
 Organization progress on stderr also includes repository names, phases, and

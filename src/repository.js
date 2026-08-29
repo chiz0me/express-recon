@@ -219,10 +219,10 @@ function parseTree(output) {
     .filter(Boolean);
 }
 
-function writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadline) {
+function writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadline, gitConfig) {
   const output = git(
     gitArgs(repository, ["-C", objectRepo, "ls-tree", "-rlz", "--full-tree", commit]),
-    { timeoutMs: remaining(deadline), maxBuffer: MAX_TREE_OUTPUT },
+    { timeoutMs: remaining(deadline), maxBuffer: MAX_TREE_OUTPUT, gitConfig },
   );
   const entries = parseTree(output);
   const diagnostics = [];
@@ -284,6 +284,7 @@ function writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadlin
       timeoutMs: remaining(deadline),
       maxBuffer: limits.maxFileBytes + 1024,
       encoding: null,
+      gitConfig,
     });
     if (body.length !== entry.size) {
       diagnostics.push(
@@ -329,6 +330,7 @@ function within(root, file) {
 
 function acquireRepository(source, opts = {}) {
   const repository = normalizeRepository(source);
+  const remoteGitConfig = githubGitConfig(repository, opts.githubToken);
   const limits = scanLimits({ ...opts.config?.scan, ...opts.scan });
   const requestedRef = opts.ref || "HEAD";
   if (!validRef(requestedRef)) throw new Error(`Invalid Git ref ${JSON.stringify(requestedRef)}`);
@@ -357,15 +359,24 @@ function acquireRepository(source, opts = {}) {
       {
         timeoutMs: remaining(deadline),
         maxBuffer: 16 * 1024 * 1024,
-        gitConfig: githubGitConfig(repository, opts.githubToken),
+        gitConfig: remoteGitConfig,
       },
     );
     const commit = String(
       git(gitArgs(repository, ["-C", objectRepo, "rev-parse", "--verify", "FETCH_HEAD^{commit}"]), {
         timeoutMs: remaining(deadline),
+        gitConfig: remoteGitConfig,
       }),
     ).trim();
-    const acquisition = writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadline);
+    const acquisition = writeSnapshot(
+      objectRepo,
+      commit,
+      snapshot,
+      repository,
+      limits,
+      deadline,
+      remoteGitConfig,
+    );
     return {
       temp,
       snapshot,

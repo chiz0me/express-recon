@@ -215,6 +215,8 @@ submodules, symlink materialization, hooks, credentials, dependency installation
 or target execution. The combined `repo-scan.json` includes commit provenance,
 acquisition completeness, discovery, inventory/audit, and documentation status.
 Remote scans cannot enable runtime, hybrid, or auto-entry execution.
+Set `GH_TOKEN` (preferred) or `GITHUB_TOKEN` when the GitHub repository is
+private; authentication is scoped to `github.com` and is never persisted.
 
 Git fetch is time-bounded, but a hostile server can ignore partial-clone filters;
 the network packfile is not a hard byte-bounded security boundary. See
@@ -274,8 +276,10 @@ complete repository. `--resume` verifies the checkpoint fingerprint and every
 recorded artifact's size and SHA-256 digest, reuses only complete results, and
 retries failed, inconclusive, missing, or damaged work. The checkpoint is kept
 while aggregate coverage is incomplete and removed after a complete aggregate
-has been written. Concurrency may change for a resume; the organization, tool
-version, repository cap, filters, config, and scan scope must still match.
+has been written. Concurrency may change for a resume; the organization,
+checkpoint compatibility generation, repository cap, filters, config, and scan
+scope must still match. Explicitly compatible releases upgrade older checkpoints
+after their original fingerprint and artifact digests have been verified.
 Resume reuse is visible as `RESUME` events, and `CHECKPOINT` is emitted only
 after a completed repository's artifacts and atomically replaced checkpoint are
 durable.

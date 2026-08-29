@@ -2,12 +2,14 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
 const {
   atomicWriteJson,
+  CHECKPOINT_COMPATIBILITY_VERSION,
   checkpointEntry,
   checkpointPath,
   initialCheckpoint,
@@ -15,6 +17,32 @@ const {
   organizationCheckpointIdentity,
   withCompleted,
 } = require("../src/organization-checkpoint");
+const pkg = require("../package.json");
+
+function canonical(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonical);
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonical(value[key])]),
+  );
+}
+
+function legacyFingerprint(toolVersion, scope) {
+  return crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify(
+        canonical({
+          checkpointSchemaVersion: "1.0",
+          toolVersion,
+          ...scope,
+        }),
+      ),
+    )
+    .digest("hex");
+}
 
 function identity(overrides = {}) {
   return organizationCheckpointIdentity("acme", {
@@ -165,6 +193,38 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
     const rejected = loadCheckpoint(file, "acme", currentIdentity, root);
     assert.equal(rejected.entries.length, 0);
     assert.match(rejected.diagnostics[0], /unsafe artifact path/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("compatible legacy checkpoints are integrity-checked and upgraded", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-checkpoint-legacy-"));
+  const currentIdentity = identity();
+  const file = checkpointPath(root);
+  try {
+    const artifacts = writeArtifacts(root, "api");
+    const entry = checkpointEntry(payload("api"), artifacts, root);
+    const legacy = withCompleted(initialCheckpoint("acme", currentIdentity), entry);
+    legacy.toolVersion = "0.7.1";
+    delete legacy.compatibilityVersion;
+    legacy.fingerprint = legacyFingerprint(legacy.toolVersion, legacy.scope);
+    atomicWriteJson(file, legacy);
+
+    const loaded = loadCheckpoint(file, "acme", currentIdentity, root);
+    assert.equal(loaded.migratedFromToolVersion, "0.7.1");
+    assert.equal(loaded.checkpoint.toolVersion, pkg.version);
+    assert.equal(loaded.checkpoint.compatibilityVersion, CHECKPOINT_COMPATIBILITY_VERSION);
+    assert.equal(loaded.checkpoint.fingerprint, currentIdentity.fingerprint);
+    assert.equal(loaded.entries.length, 1);
+
+    legacy.toolVersion = "0.5.0";
+    legacy.fingerprint = legacyFingerprint(legacy.toolVersion, legacy.scope);
+    atomicWriteJson(file, legacy);
+    assert.throws(
+      () => loadCheckpoint(file, "acme", currentIdentity, root),
+      /checkpoint compatibility version/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

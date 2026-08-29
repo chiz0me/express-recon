@@ -845,10 +845,12 @@ async function runImportReview(args) {
 
 async function runScanRepository(args) {
   const config = loadConfig(args.config);
+  const githubToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || undefined;
   const result = scanRepository(args.repo, {
     ref: args.ref,
     config,
     scan: discoveryOptions(args, config),
+    githubToken,
     applicationId: args.appId,
     spec: args.spec,
     jsdoc: args.jsdoc,
@@ -936,6 +938,7 @@ async function executeScanOrganization(args, dependencies, reporter) {
     checkpoint = loaded.checkpoint;
     resumeEntries = loaded.entries;
     resumeDiagnostics.push(...loaded.diagnostics);
+    if (loaded.migratedFromToolVersion) atomicWriteJson(checkpointFile, checkpoint);
   } else if (checkpointFile) {
     atomicWriteJson(checkpointFile, checkpoint);
   }

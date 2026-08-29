@@ -166,9 +166,10 @@ directory for a compatible `--resume`.
 If `resume.checkpoint` names `organization-checkpoint.json`, coverage is still
 incomplete. An agent may propose rerunning the same command with `--resume`, but
 must preserve the organization, repository cap, filters, config, and scan scope.
-Concurrency may change. Do not describe resumed repositories as freshly scanned:
-their `commit` is the checkpointed observation, and `resumed: true` identifies
-them in the aggregate.
+Concurrency may change, and an explicitly compatible release may atomically upgrade a
+checkpoint after verifying its original fingerprint and artifact digests. Do
+not describe resumed repositories as freshly scanned: their `commit` is the
+checkpointed observation, and `resumed: true` identifies them in the aggregate.
 
 Keep repository identity above application identity: a stable app ID is scoped
 to its repository and can repeat in another repository. Never combine routes or

@@ -159,6 +159,11 @@ express-recon scan-repo --repo owner/project --ref main \
   --out .express-recon/remote
 ```
 
+Public repositories need no authentication. For a private GitHub repository,
+set `GH_TOKEN` (preferred) or `GITHUB_TOKEN`; the scoped header is used for the
+initial partial fetch and any on-demand promisor object reads without persisting
+the token in arguments, URLs, reports, or Git configuration.
+
 Supplying auth middleware, an accepted-public baseline, policies, or an OpenAPI
 security mapping through `--config` makes the embedded route report an `audit`;
 otherwise it is an `inventory`. The combined result keeps the compatibility
@@ -283,14 +288,17 @@ recreated, missing-artifact, and damaged-artifact repositories are scanned again
 A completed repository is not fetched, so its checkpointed commit remains the
 observation for that resumed run even if its default branch advanced.
 
-The checkpoint fingerprint binds the exact tool version, organization,
-`--max-repos`, archived/fork filters, configuration, and effective scan scope.
-Changing any of those fails before GitHub enumeration instead of mixing
-incompatible evidence. `--concurrency` and the current token are deliberately
-not fingerprinted: concurrency does not change evidence, and every resume is
-still restricted to repositories visible during its fresh API enumeration.
-Run without `--resume` for a new scan of current default branches or to change
-the repository cap/scope.
+The checkpoint fingerprint binds the checkpoint compatibility generation,
+organization, `--max-repos`, archived/fork filters, configuration, and effective
+scan scope. Explicitly compatible releases can resume older checkpoints after
+validating both the legacy fingerprint and every artifact digest; the checkpoint
+is then upgraded atomically. A scanner change that invalidates prior evidence
+increments the compatibility generation and rejects the checkpoint instead of
+mixing incompatible results. `--concurrency` and the current token are
+deliberately not fingerprinted: concurrency does not change evidence, and every
+resume is still restricted to repositories visible during its fresh API
+enumeration. Run without `--resume` for a new scan of current default branches
+or to change the repository cap/scope.
 
 The checkpoint remains after an interrupted or aggregate-incomplete run. It is
 deleted only after a complete `organization-inventory.json` is successfully

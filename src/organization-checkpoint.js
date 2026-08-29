@@ -8,6 +8,10 @@ const pkg = require("../package.json");
 const CHECKPOINT_FILENAME = "organization-checkpoint.json";
 const CHECKPOINT_KIND = "github-organization-scan-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = "1.0";
+// Bump this whenever previously completed repository evidence is no longer safe
+// to reuse. Add only audited pre-generation releases to the legacy allowlist.
+const CHECKPOINT_COMPATIBILITY_VERSION = "1";
+const LEGACY_COMPATIBLE_TOOL_VERSIONS = new Set(["0.6.0", "0.7.0", "0.7.1", "0.7.2"]);
 const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
 function canonical(value, seen = new Set()) {
@@ -68,6 +72,30 @@ function checkpointScan(scan) {
   return normalized;
 }
 
+function checkpointFingerprint(scope, compatibilityVersion = CHECKPOINT_COMPATIBILITY_VERSION) {
+  return sha256(
+    JSON.stringify(
+      canonical({
+        checkpointSchemaVersion: CHECKPOINT_SCHEMA_VERSION,
+        checkpointCompatibilityVersion: compatibilityVersion,
+        ...scope,
+      }),
+    ),
+  );
+}
+
+function legacyCheckpointFingerprint(scope, toolVersion) {
+  return sha256(
+    JSON.stringify(
+      canonical({
+        checkpointSchemaVersion: CHECKPOINT_SCHEMA_VERSION,
+        toolVersion,
+        ...scope,
+      }),
+    ),
+  );
+}
+
 function organizationCheckpointIdentity(organization, options) {
   const configHash = sha256(JSON.stringify(checkpointConfig(options.config)));
   const scanHash = sha256(JSON.stringify(checkpointScan(options.scan)));
@@ -80,15 +108,8 @@ function organizationCheckpointIdentity(organization, options) {
     scanHash,
   };
   return {
-    fingerprint: sha256(
-      JSON.stringify(
-        canonical({
-          checkpointSchemaVersion: CHECKPOINT_SCHEMA_VERSION,
-          toolVersion: pkg.version,
-          ...scope,
-        }),
-      ),
-    ),
+    compatibilityVersion: CHECKPOINT_COMPATIBILITY_VERSION,
+    fingerprint: checkpointFingerprint(scope),
     scope,
   };
 }
@@ -103,6 +124,7 @@ function initialCheckpoint(organization, identity) {
     kind: CHECKPOINT_KIND,
     tool: "express-recon",
     toolVersion: pkg.version,
+    compatibilityVersion: identity.compatibilityVersion,
     organization,
     fingerprint: identity.fingerprint,
     scope: identity.scope,
@@ -256,14 +278,22 @@ function validateCheckpointShape(value, organization, identity) {
       `Organization checkpoint belongs to ${value.organization}, not ${organization}`,
     );
   }
-  if (value.fingerprint !== identity.fingerprint) {
+  const current =
+    value.compatibilityVersion === CHECKPOINT_COMPATIBILITY_VERSION &&
+    value.fingerprint === identity.fingerprint;
+  const legacy =
+    value.compatibilityVersion === undefined &&
+    LEGACY_COMPATIBLE_TOOL_VERSIONS.has(value.toolVersion) &&
+    value.fingerprint === legacyCheckpointFingerprint(identity.scope, value.toolVersion);
+  if (!current && !legacy) {
     throw new Error(
-      "Organization checkpoint does not match this tool version, configuration, scan scope, or repository limit",
+      "Organization checkpoint does not match this checkpoint compatibility version, configuration, scan scope, or repository limit",
     );
   }
   if (!Array.isArray(value.completed)) {
     throw new Error("Organization checkpoint completed must be an array");
   }
+  return { legacy };
 }
 
 function resumableEntries(checkpoint, outDir) {
@@ -325,14 +355,28 @@ function resumableEntries(checkpoint, outDir) {
 }
 
 function loadCheckpoint(file, organization, identity, outDir) {
-  const checkpoint = readCheckpointFile(file);
-  validateCheckpointShape(checkpoint, organization, identity);
+  const source = readCheckpointFile(file);
+  const compatibility = validateCheckpointShape(source, organization, identity);
+  const checkpoint = compatibility.legacy
+    ? {
+        ...source,
+        toolVersion: pkg.version,
+        compatibilityVersion: identity.compatibilityVersion,
+        fingerprint: identity.fingerprint,
+        scope: identity.scope,
+      }
+    : source;
   const resume = resumableEntries(checkpoint, outDir);
-  return { checkpoint, ...resume };
+  return {
+    checkpoint,
+    migratedFromToolVersion: compatibility.legacy ? source.toolVersion : null,
+    ...resume,
+  };
 }
 
 module.exports = {
   CHECKPOINT_FILENAME,
+  CHECKPOINT_COMPATIBILITY_VERSION,
   atomicWriteJson,
   checkpointEntry,
   checkpointPath,

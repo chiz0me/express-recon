@@ -148,6 +148,84 @@ test("repository snapshots are removed after successful and failed scans", () =>
   });
 });
 
+test("partial-clone materialization retains scoped GitHub authentication", () => {
+  if (process.platform === "win32") return;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-git-auth-"));
+  const bin = path.join(root, "bin");
+  const log = path.join(root, "git.jsonl");
+  const fakeGit = path.join(bin, "git");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    fakeGit,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const count = Number(process.env.GIT_CONFIG_COUNT || 0);
+const config = Array.from({ length: count }, (_, index) => ({
+  key: process.env[\`GIT_CONFIG_KEY_\${index}\`],
+  value: process.env[\`GIT_CONFIG_VALUE_\${index}\`],
+}));
+fs.appendFileSync(
+  process.env.EXPRESS_RECON_TEST_GIT_LOG,
+  JSON.stringify({
+    args,
+    config,
+    hasRawTokenVariables: Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN),
+  }) + "\\n",
+);
+if (args[0] === "init") fs.mkdirSync(args.at(-1), { recursive: true });
+if (args.includes("rev-parse")) process.stdout.write("${"a".repeat(40)}\\n");
+if (args.includes("ls-tree")) {
+  process.stdout.write("100644 blob ${"b".repeat(40)} 3\\tapp.js\\0");
+}
+if (args.includes("cat-file")) process.stdout.write("abc");
+`,
+    { mode: 0o755 },
+  );
+  const output = path.join(root, "report");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, "scan-repo", "--repo", "acme/private-api", "--out", output],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}${path.delimiter}${process.env.PATH || ""}`,
+          EXPRESS_RECON_TEST_GIT_LOG: log,
+          GH_TOKEN: "token-for-test",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    const report = JSON.parse(fs.readFileSync(path.join(output, "repo-scan.json"), "utf8"));
+    assert.equal(report.repository.acquisition.complete, true);
+    const calls = fs
+      .readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const call = (command) => calls.find((item) => item.args.includes(command));
+    for (const command of ["fetch", "rev-parse", "ls-tree", "cat-file"]) {
+      const invocation = call(command);
+      assert.ok(invocation, command);
+      assert.deepEqual(
+        invocation.config.map((item) => item.key),
+        ["http.https://github.com/.extraHeader"],
+      );
+      const encoded = invocation.config[0].value.replace(/^Authorization: Basic /, "");
+      assert.equal(Buffer.from(encoded, "base64").toString(), "x-access-token:token-for-test");
+    }
+    assert.deepEqual(call("init").config, []);
+    assert.deepEqual(call("remote").config, []);
+    assert.ok(calls.every((item) => item.hasRawTokenVariables === false));
+    assert.doesNotMatch(JSON.stringify(calls.map((item) => item.args)), /token-for-test/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("scan-repo runs a deterministic audit when auth configuration is supplied", () => {
   withRepository((root) => {
     const result = scanRepository(root, {
