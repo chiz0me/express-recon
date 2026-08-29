@@ -13,6 +13,7 @@ npm-debug.log*
 coverage/
 .tmp-*/
 recon-out/
+.express-recon/
 
 # Editor / OS
 .DS_Store

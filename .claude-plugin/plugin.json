@@ -3,7 +3,7 @@
   "name": "express-recon",
   "displayName": "Express Recon",
   "version": "0.5.0",
-  "description": "Inventory & audit harness for Express 4/5 route surfaces. Enumerate routes and middleware chains, flag unauthenticated endpoints.",
+  "description": "Offline-first Express route and GitHub organization inventory, auth audit, OpenAPI reconciliation, and advisory middleware review.",
   "author": {
     "name": "Naveen Yagati"
   },
@@ -12,11 +12,15 @@
   "license": "MIT",
   "keywords": [
     "express",
+    "github",
     "security",
     "audit",
     "routes",
     "middleware",
     "authentication",
-    "static-analysis"
+    "static-analysis",
+    "offline",
+    "openapi",
+    "swagger"
   ]
 }

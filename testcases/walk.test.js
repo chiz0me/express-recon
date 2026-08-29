@@ -153,6 +153,15 @@ test("array route paths emit one route per path instead of crashing", () => {
   assert.deepEqual(keys, ["GET /a", "GET /b"]);
 });
 
+test("regexp route paths remain visible as partial dynamic routes", () => {
+  const app = express();
+  app.get(/^\/users\/(\d+)$/, (_req, res) => res.send("ok"));
+  const { routes } = inventory({ mode: "runtime", app });
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].path, "/<dynamic>");
+  assert.equal(routes[0].pathConfidence, "partial");
+});
+
 test("an anonymous app-level guard downgrades later routes to review, not public", () => {
   const app = express();
   app.get("/before", (_req, res) => res.send("ok"));

@@ -26,11 +26,14 @@ test("audit report carries a versioned contract with summary + findings", () => 
     command: "audit",
     mode: "static",
   });
-  assert.equal(report.schemaVersion, "1.3");
+  assert.equal(report.schemaVersion, "2.0");
   assert.equal(report.tool, "express-recon");
+  assert.equal(report.toolVersion, "0.5.0");
+  assert.ok(report.applications.length > 0);
   assert.equal(report.summary.routes, report.routes.length);
   assert.equal(report.scanCoverage.complete, true);
   assert.equal(report.scanCoverage.discovered, report.scanCoverage.analyzed);
+  assert.match(report.scanCoverage.scope.fingerprint, /^[a-f0-9]{64}$/);
   const publicFinding = report.findings.find(
     (f) => f.id === "public-route" && f.path === "/health",
   );
@@ -72,17 +75,22 @@ test("suggest-auth ranks likely guards first", () => {
 
 test("schema declares the required top-level fields", () => {
   assert.deepEqual(REPORT_SCHEMA.required.sort(), [
+    "applications",
     "command",
     "globalMiddleware",
     "mode",
     "routes",
     "schemaVersion",
     "tool",
+    "toolVersion",
   ]);
   assert.deepEqual(REPORT_SCHEMA.properties.scanCoverage.required, [
     "discovered",
     "analyzed",
     "failed",
+    "skipped",
+    "limited",
+    "totalBytes",
     "complete",
   ]);
 });
@@ -106,10 +114,39 @@ test("generated audit and inventory reports satisfy the published JSON Schema", 
     ),
     { command: "audit", mode: "static" },
   );
-  auditReport.delta = compareReports(structuredClone(auditReport), auditReport);
-  assert.equal(validate(auditReport), true, JSON.stringify(validate.errors));
+  const exceptionReport = buildReport(
+    audit(
+      { mode: "static", src: FIXTURE },
+      {
+        policies: [
+          {
+            id: "temporary-health",
+            match: { paths: ["/health"] },
+            require: { auth: true },
+            exceptions: [
+              {
+                id: "migration",
+                reason: "Migration window",
+                expires: "2099-01-01",
+                match: { paths: ["/health"] },
+              },
+            ],
+          },
+        ],
+      },
+    ),
+    { command: "audit", mode: "static" },
+  );
+  const changedReport = structuredClone(auditReport);
+  const provenRoute = changedReport.routes.find((route) => route.authStatus === "proven");
+  provenRoute.authStatus = "public";
+  changedReport.delta = compareReports(auditReport, changedReport);
+  assert.ok(changedReport.delta.authRegressions.length > 0);
+  assert.ok(exceptionReport.policyExceptions[0].applicationId);
+  assert.equal(validate(changedReport), true, JSON.stringify(validate.errors));
   assert.equal(validate(inventoryReport), true, JSON.stringify(validate.errors));
   assert.equal(validate(policyReport), true, JSON.stringify(validate.errors));
+  assert.equal(validate(exceptionReport), true, JSON.stringify(validate.errors));
 });
 
 test("schema rejects missing audit fields, inventory judgments, and unknown report fields", () => {

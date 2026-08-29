@@ -1,0 +1,8 @@
+{
+  "name": "discovery-root",
+  "version": "1.0.0",
+  "main": "./src/public-app.js",
+  "dependencies": {
+    "express": "^5.0.0"
+  }
+}

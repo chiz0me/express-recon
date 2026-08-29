@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="64" viewBox="0 0 300 64" role="img" aria-label="express-recon">
+  <style>
+    .ink { stroke: #1F2328; fill: none; }
+    .ink-solid { fill: #1F2328; }
+    .word { fill: #1F2328; font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-size: 27px; letter-spacing: -0.4px; }
+    .word-muted { fill: #6A737D; }
+    @media (prefers-color-scheme: dark) {
+      .ink { stroke: #E6EDF3; }
+      .ink-solid { fill: #E6EDF3; }
+      .word { fill: #E6EDF3; }
+      .word-muted { fill: #9198A1; }
+    }
+  </style>
+  <g>
+    <path class="ink" d="M18 50 L44.5 16" stroke-width="6.5" stroke-linecap="round"/>
+    <path class="ink" d="M27 38 L14 38" stroke-width="4.5" stroke-linecap="round"/>
+    <circle class="ink-solid" cx="10.5" cy="38" r="3.5"/>
+    <path class="ink" d="M37.5 25 L49 25" stroke-width="4.5" stroke-linecap="round"/>
+    <circle class="ink-solid" cx="52.5" cy="25" r="3.5"/>
+    <circle cx="48" cy="11" r="5.5" fill="none" stroke="#E24B4A" stroke-width="4"/>
+  </g>
+  <text class="word" x="76" y="42">
+    <tspan class="word-muted" font-weight="400">express-</tspan><tspan font-weight="500">recon</tspan>
+  </text>
+</svg>

@@ -74,10 +74,27 @@ const io = {
   required: ["request", "responses", "statusCodes", "handlerResolved"],
 };
 
+const routeObservation = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    path: { type: "string" },
+    pathConfidence: { enum: ["full", "partial"] },
+    source,
+    middlewares: { type: "array", items: descriptor },
+    authStatus: { enum: ["proven", "public", "unknown"] },
+    tags: { type: "array", items: { type: "string" } },
+    roles: { type: "array", items: { type: "string" } },
+    scopes: { type: "array", items: { type: "string" } },
+  },
+  required: ["path", "pathConfidence", "source", "middlewares"],
+};
+
 const route = {
   type: "object",
   additionalProperties: false,
   properties: {
+    applicationId: { type: ["string", "null"] },
     method: { type: "string", description: "HTTP verb, or 'ALL' for router.all() routes" },
     path: {
       type: "string",
@@ -119,8 +136,36 @@ const route = {
       description: "audit only: public but acknowledged via the acceptedPublic baseline",
     },
     presence: { enum: ["both", "static-only", "runtime-only"], description: "hybrid only" },
+    observations: {
+      type: "object",
+      additionalProperties: false,
+      description:
+        "hybrid only: scanner-specific evidence retained even when runtime is authoritative",
+      properties: {
+        static: { oneOf: [{ type: "null" }, routeObservation] },
+        runtime: { oneOf: [{ type: "null" }, routeObservation] },
+        conflicts: {
+          type: "array",
+          items: { enum: ["middleware-identity", "auth-classification", "path"] },
+        },
+      },
+      required: ["static", "runtime", "conflicts"],
+    },
   },
-  required: ["method", "path", "middlewares", "pathConfidence"],
+  required: ["applicationId", "method", "path", "middlewares", "pathConfidence"],
+};
+
+const application = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    source,
+    routeCount: { type: "integer", minimum: 0 },
+    globalMiddleware: { type: "array", items: descriptor },
+  },
+  required: ["id", "name", "source", "routeCount", "globalMiddleware"],
 };
 
 const finding = {
@@ -146,6 +191,10 @@ const finding = {
     },
     severity: { enum: ["high", "medium", "low"] },
     confidence: { enum: ["high", "medium", "low"] },
+    applicationId: {
+      type: ["string", "null"],
+      description: "Express application identity; null for legacy/global evidence",
+    },
     method: { type: "string" },
     path: { type: "string" },
     source,
@@ -170,7 +219,16 @@ const finding = {
       description: "Structured evidence for a configurable policy violation",
     },
   },
-  required: ["id", "ruleId", "fingerprint", "severity", "confidence", "detail", "recommendation"],
+  required: [
+    "id",
+    "ruleId",
+    "fingerprint",
+    "severity",
+    "confidence",
+    "applicationId",
+    "detail",
+    "recommendation",
+  ],
 };
 
 const REPORT_SCHEMA = {
@@ -181,6 +239,8 @@ const REPORT_SCHEMA = {
   properties: {
     schemaVersion: { const: SCHEMA_VERSION },
     tool: { const: "express-recon" },
+    toolVersion: { type: "string" },
+    configHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
     command: { enum: ["inventory", "audit"] },
     mode: { enum: ["static", "runtime", "hybrid"] },
     target: {
@@ -189,6 +249,7 @@ const REPORT_SCHEMA = {
       description: "target package identity, when a package.json was found",
       properties: { name: { type: "string" }, version: { type: "string" } },
     },
+    applications: { type: "array", items: application },
     routes: { type: "array", items: route },
     globalMiddleware: { type: "array", items: descriptor },
     summary: {
@@ -232,12 +293,21 @@ const REPORT_SCHEMA = {
         properties: {
           policyId: { type: "string" },
           exceptionId: { type: "string" },
+          applicationId: { type: ["string", "null"] },
           method: { type: "string" },
           path: { type: "string" },
           reason: { type: "string" },
           expires: { type: "string", format: "date" },
         },
-        required: ["policyId", "exceptionId", "method", "path", "reason", "expires"],
+        required: [
+          "policyId",
+          "exceptionId",
+          "applicationId",
+          "method",
+          "path",
+          "reason",
+          "expires",
+        ],
       },
     },
     delta: {
@@ -284,6 +354,7 @@ const REPORT_SCHEMA = {
             type: "object",
             additionalProperties: false,
             properties: {
+              applicationId: { type: ["string", "null"] },
               method: { type: "string" },
               path: { type: "string" },
               from: { type: "string" },
@@ -292,7 +363,16 @@ const REPORT_SCHEMA = {
               explanation: { type: "string" },
               changes: { type: "object" },
             },
-            required: ["method", "path", "from", "to", "source", "explanation", "changes"],
+            required: [
+              "applicationId",
+              "method",
+              "path",
+              "from",
+              "to",
+              "source",
+              "explanation",
+              "changes",
+            ],
           },
         },
         authImprovements: {
@@ -334,12 +414,93 @@ const REPORT_SCHEMA = {
         discovered: { type: "integer", minimum: 0 },
         analyzed: { type: "integer", minimum: 0 },
         failed: { type: "integer", minimum: 0 },
+        skipped: { type: "integer", minimum: 0 },
+        limited: { type: "boolean" },
+        totalBytes: { type: "integer", minimum: 0 },
         complete: { type: "boolean" },
+        scope: {
+          type: "object",
+          additionalProperties: false,
+          description:
+            "Portable evidence of the effective include/exclude, test, ignore-file, and built-in scope",
+          properties: {
+            include: { type: "array", items: { type: "string" } },
+            exclude: { type: "array", items: { type: "string" } },
+            includeTests: { type: "boolean" },
+            ignoreFile: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                enabled: { type: "boolean" },
+                path: { type: ["string", "null"] },
+                external: { type: "boolean" },
+                found: { type: "boolean" },
+                rules: { type: "integer", minimum: 0 },
+                sha256: {
+                  oneOf: [{ type: "null" }, { type: "string", pattern: "^[a-f0-9]{64}$" }],
+                },
+              },
+              required: ["enabled", "path", "external", "found", "rules", "sha256"],
+            },
+            builtIn: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                excludedDirectories: {
+                  type: "array",
+                  uniqueItems: true,
+                  items: { type: "string" },
+                },
+                hiddenDirectoriesExcluded: { type: "boolean" },
+              },
+              required: ["excludedDirectories", "hiddenDirectoriesExcluded"],
+            },
+            fingerprint: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          },
+          required: ["include", "exclude", "includeTests", "ignoreFile", "builtIn", "fingerprint"],
+        },
       },
-      required: ["discovered", "analyzed", "failed", "complete"],
+      required: [
+        "discovered",
+        "analyzed",
+        "failed",
+        "skipped",
+        "limited",
+        "totalBytes",
+        "complete",
+      ],
+    },
+    openapi: {
+      type: "object",
+      additionalProperties: false,
+      description: "Explicit mapping from audit tags to OpenAPI security schemes",
+      properties: {
+        securitySchemes: {
+          type: "object",
+          additionalProperties: { type: "object" },
+        },
+        securityByTag: {
+          type: "object",
+          additionalProperties: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string" },
+          },
+        },
+      },
     },
   },
-  required: ["schemaVersion", "tool", "command", "mode", "routes", "globalMiddleware"],
+  required: [
+    "schemaVersion",
+    "tool",
+    "toolVersion",
+    "command",
+    "mode",
+    "applications",
+    "routes",
+    "globalMiddleware",
+  ],
   allOf: [
     {
       if: {

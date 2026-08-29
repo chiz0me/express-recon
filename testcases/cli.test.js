@@ -107,6 +107,7 @@ test("CLI rejects missing option values, unknown formats, and duplicate scalar o
     ["audit", "--src", FIXTURE, "--format", "json", "--format", "md"],
     ["audit", "--src", FIXTURE, "--fail-on", "policy:"],
     ["audit", "--src", FIXTURE, "--fail-on", "new"],
+    ["inventory", "--src", FIXTURE, "--ignore-file", "scope.ignore", "--no-ignore-file"],
   ]) {
     const result = spawnSync("node", [CLI, ...args], { encoding: "utf8" });
     assert.equal(result.status, 1);
@@ -121,7 +122,7 @@ test("CLI rejects options that do not apply to the selected command", () => {
     { encoding: "utf8" },
   );
   assert.equal(inventoryGate.status, 1);
-  assert.match(inventoryGate.stderr, /only by the audit command/);
+  assert.match(inventoryGate.stderr, /does not accept --fail-on/);
 
   const schemaOutput = spawnSync("node", [CLI, "schema", "--out", "ignored"], {
     encoding: "utf8",

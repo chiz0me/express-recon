@@ -1,0 +1,26 @@
+openapi: 3.1.0
+info:
+  title: Discovery fixture
+  version: 1.0.0
+servers:
+  - url: https://api.example.test
+components:
+  schemas:
+    Health:
+      type: object
+      properties:
+        app:
+          type: string
+paths:
+  /health:
+    get:
+      summary: Authored health
+      responses:
+        "200":
+          description: Authored response
+  /documented-only:
+    get:
+      summary: Documented but not observed
+      responses:
+        "200":
+          description: OK

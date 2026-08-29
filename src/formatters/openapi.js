@@ -7,7 +7,7 @@ const UNREFINED_NOTE =
 
 // router.all() answers every verb; expand it across the concrete methods so the
 // spec stays valid (OpenAPI has no "all" operation key).
-const ALL_VERBS = ["get", "post", "put", "patch", "delete"];
+const ALL_VERBS = ["get", "post", "put", "patch", "delete", "head", "options", "trace"];
 const BODY_METHODS = new Set(["post", "put", "patch", "delete"]);
 
 /**
@@ -36,7 +36,8 @@ function toOpenApiPath(exprPath) {
     if (seg.includes("*")) return `{${unique("wildcard")}}`;
     return seg;
   });
-  const path = segments.join("/") || "/";
+  const joined = segments.join("/") || "/";
+  const path = joined.startsWith("/") ? joined : `/${joined}`;
   return { path, params: [...used] };
 }
 
@@ -53,14 +54,8 @@ function sanitizeOperationId(method, templatedPath) {
   return base.replace(/^_+|_+$/g, "") || "root";
 }
 
-/** securityScheme component keys must be `[A-Za-z0-9._-]`; tags may hold ":" etc. */
-function sanitizeSchemeName(tag) {
-  return tag.replace(/[^A-Za-z0-9._-]+/g, "_");
-}
-
 function placeholderObjectSchema(keys) {
-  const properties = {};
-  for (const k of keys) properties[k] = {};
+  const properties = Object.fromEntries(keys.map((key) => [key, {}]));
   return { type: "object", properties, "x-express-recon-unrefined": true };
 }
 
@@ -113,43 +108,55 @@ function buildResponses(io) {
 }
 
 /**
- * Per-operation `security`: proven routes reference a bearer scheme per auth tag
- * (registered in `schemes`); public routes get an explicit `[]` (no auth); an
- * `unknown` (opaque) route omits `security` and is flagged for review. Inventory
- * routes carry no `authStatus`, so `security` is omitted.
+ * Per-operation `security`: public routes get an explicit `[]`; proven routes
+ * reference only schemes explicitly mapped through report.openapi.securityByTag.
+ * Audit tags do not imply a protocol (a tag may mean a cookie session, HMAC,
+ * mTLS, API key, or bearer token), so inventing a bearer scheme would publish a
+ * materially incorrect contract. Multiple mapped schemes are placed in one
+ * Security Requirement Object because chained Express guards are conjunctive.
  *
- * @returns {object[]|undefined}
+ * @returns {{security: object[]|undefined, unmappedTags: string[]}}
  */
-function buildSecurity(route, schemes) {
-  if (route.authStatus === "public") return [];
+function buildSecurity(route, config, usedSchemes) {
+  if (route.authStatus === "public") return { security: [], unmappedTags: [] };
   if (route.authStatus === "proven") {
-    const requirements = [];
+    const requirementEntries = new Map();
+    const unmappedTags = [];
     for (const tag of route.tags || []) {
-      const name = sanitizeSchemeName(tag);
-      if (!schemes.has(name))
-        schemes.set(name, {
-          type: "http",
-          scheme: "bearer",
-          description: `AI-unrefined; derived from middleware auth tag '${tag}'`,
-        });
-      requirements.push({ [name]: [] });
+      const names = config?.securityByTag?.[tag];
+      if (!names) {
+        unmappedTags.push(tag);
+        continue;
+      }
+      for (const name of names) {
+        requirementEntries.set(name, []);
+        usedSchemes.add(name);
+      }
     }
-    return requirements;
+    const requirement = Object.fromEntries(requirementEntries);
+    return {
+      security: requirementEntries.size ? [requirement] : undefined,
+      unmappedTags,
+    };
   }
-  return undefined;
+  return { security: undefined, unmappedTags: [] };
 }
 
-function buildOperation(route, verb, opId, tag, isAudit, pathParams, schemes) {
+function buildOperation(route, verb, opId, tag, isAudit, pathParams, openapi, usedSchemes) {
   const op = { operationId: opId, tags: [tag], responses: buildResponses(route.io) };
   const params = buildParameters(pathParams, route.io);
   if (params.length) op.parameters = params;
   const body = buildRequestBody(verb, route.io);
   if (body) op.requestBody = body;
+  let unmappedAuthTags = [];
   if (isAudit) {
-    const security = buildSecurity(route, schemes);
+    const result = buildSecurity(route, openapi, usedSchemes);
+    const { security } = result;
+    unmappedAuthTags = result.unmappedTags;
     if (security !== undefined) op.security = security;
   }
   op["x-express-recon"] = {
+    applicationId: route.applicationId ?? null,
     source: route.source || null,
     authStatus: route.authStatus ?? null,
     authTags: route.tags || [],
@@ -159,12 +166,23 @@ function buildOperation(route, verb, opId, tag, isAudit, pathParams, schemes) {
     pathConfidence: route.pathConfidence,
     handlerResolved: route.io ? route.io.handlerResolved : null,
     handlerName: route.io ? (route.io.handlerName ?? null) : null,
+    handlerSource: route.io ? (route.io.handlerSource ?? null) : null,
     method: route.method,
+    ...(unmappedAuthTags.length ? { unmappedAuthTags } : {}),
+    ...(route.observations ? { observations: route.observations } : {}),
   };
   return op;
 }
 
 function compareRoutes(a, b) {
+  if (a.path === b.path && a.method === b.method) {
+    const af = a.source?.file || "";
+    const bf = b.source?.file || "";
+    if (af === bf) return (a.source?.line || 0) - (b.source?.line || 0);
+    // Code-point ordering is stable across locales/CI hosts; localeCompare can
+    // choose a different duplicate operation on different machines.
+    return af < bf ? -1 : 1;
+  }
   if (a.path === b.path) return a.method.localeCompare(b.method);
   return a.path.localeCompare(b.path);
 }
@@ -188,29 +206,64 @@ function buildInfo(report) {
  * @param {object} report  a buildReport() result
  * @returns {string} pretty-printed OpenAPI 3.1 JSON
  */
-function format(report) {
+function build(report) {
   const isAudit = report.command === "audit";
-  const schemes = new Map();
+  const usedSchemes = new Set();
   const opIds = new Set();
   const paths = {};
+  const duplicateOperations = [];
 
   for (const route of report.routes.slice().sort(compareRoutes)) {
     const { path: templated, params: pathParams } = toOpenApiPath(route.path);
     const tag = firstSegmentTag(templated);
     const verbs = route.method === "ALL" ? ALL_VERBS : [route.method.toLowerCase()];
-    const item = paths[templated] || (paths[templated] = {});
+    let item = Object.hasOwn(paths, templated) ? paths[templated] : null;
+    if (!item) {
+      item = {};
+      Object.defineProperty(paths, templated, {
+        value: item,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
     for (const verb of verbs) {
-      if (item[verb]) continue;
+      if (item[verb]) {
+        duplicateOperations.push({
+          keptApplicationId: item[verb]["x-express-recon"].applicationId,
+          droppedApplicationId: route.applicationId ?? null,
+          method: verb.toUpperCase(),
+          path: templated,
+          keptSource: item[verb]["x-express-recon"].source,
+          droppedSource: route.source || null,
+        });
+        continue;
+      }
       let opId = sanitizeOperationId(verb, templated);
       let n = 2;
       while (opIds.has(opId)) opId = `${sanitizeOperationId(verb, templated)}_${n++}`;
       opIds.add(opId);
-      item[verb] = buildOperation(route, verb, opId, tag, isAudit, pathParams, schemes);
+      item[verb] = buildOperation(
+        route,
+        verb,
+        opId,
+        tag,
+        isAudit,
+        pathParams,
+        report.openapi,
+        usedSchemes,
+      );
     }
   }
 
   const doc = { openapi: "3.1.0", info: buildInfo(report), paths };
-  if (schemes.size > 0) doc.components = { securitySchemes: Object.fromEntries(schemes) };
+  if (usedSchemes.size > 0) {
+    doc.components = {
+      securitySchemes: Object.fromEntries(
+        [...usedSchemes].sort().map((name) => [name, report.openapi.securitySchemes[name]]),
+      ),
+    };
+  }
   doc["x-express-recon"] = {
     generated: true,
     tool: "express-recon",
@@ -218,8 +271,13 @@ function format(report) {
     command: report.command,
     mode: report.mode,
     schemasArePlaceholders: true,
+    ...(duplicateOperations.length ? { duplicateOperations } : {}),
   };
-  return JSON.stringify(doc, null, 2);
+  return doc;
 }
 
-module.exports = { format };
+function format(report) {
+  return JSON.stringify(build(report), null, 2);
+}
+
+module.exports = { build, format };

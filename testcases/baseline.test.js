@@ -8,6 +8,7 @@ const { execFileSync } = require("node:child_process");
 const { audit, buildReport } = require("../src/index");
 
 const FIXTURE = path.join(__dirname, "fixtures", "static-app");
+const MULTI_APP_FIXTURE = path.join(__dirname, "fixtures", "discovery-app");
 const CLI = path.join(__dirname, "..", "src", "cli.js");
 
 const AUTH = { requireAuth: "authenticated", "passport.authenticate": "session" };
@@ -55,6 +56,52 @@ test("no acceptedPublic means no accepted tags and no stale findings", () => {
   assert.equal(report.summary.accepted, 0);
   assert.ok(!report.routes.some((r) => r.accepted));
   assert.ok(!report.findings.some((f) => f.id === "stale-baseline"));
+});
+
+test("structured public baselines target one application without suppressing its peer", () => {
+  const applicationId = "app:src/public-app.js#app";
+  const report = buildReport(
+    audit(
+      { mode: "static", src: MULTI_APP_FIXTURE },
+      {
+        acceptedPublic: [{ applicationId, method: "GET", path: "/health" }],
+      },
+    ),
+    { command: "audit", mode: "static" },
+  );
+  const health = report.routes.filter((route) => route.path === "/health");
+  assert.equal(health.length, 2);
+  assert.equal(health.find((route) => route.applicationId === applicationId).accepted, true);
+  const remaining = report.findings.filter(
+    (finding) => finding.id === "public-route" && finding.path === "/health",
+  );
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].applicationId, "app:services/admin/app.js#admin");
+});
+
+test("legacy public baseline strings intentionally apply across applications", () => {
+  const report = buildReport(
+    audit({ mode: "static", src: MULTI_APP_FIXTURE }, { acceptedPublic: ["GET /health"] }),
+    { command: "audit", mode: "static" },
+  );
+  const health = report.routes.filter((route) => route.path === "/health");
+  assert.equal(health.length, 2);
+  assert.ok(health.every((route) => route.accepted));
+  assert.ok(
+    !report.findings.some((finding) => finding.id === "public-route" && finding.path === "/health"),
+  );
+});
+
+test("finding fingerprints distinguish the same route in separate applications", () => {
+  const report = buildReport(audit({ mode: "static", src: MULTI_APP_FIXTURE }, {}), {
+    command: "audit",
+    mode: "static",
+  });
+  const health = report.findings.filter(
+    (finding) => finding.id === "public-route" && finding.path === "/health",
+  );
+  assert.equal(health.length, 2);
+  assert.equal(new Set(health.map((finding) => finding.fingerprint)).size, 2);
 });
 
 test("--fail-on public passes once every public route is accepted", () => {

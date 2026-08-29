@@ -8,18 +8,31 @@ const { audit, buildReport, formatters } = require("../src/index");
 const { loadPackageInfo } = require("../src/static/resolve");
 
 const FIXTURE = path.join(__dirname, "fixtures", "openapi-app");
+const CONFIG = {
+  authMiddleware: { requireAuth: "authenticated" },
+  openapi: {
+    securitySchemes: {
+      bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+      sessionCookie: { type: "apiKey", in: "cookie", name: "session" },
+    },
+    securityByTag: {
+      authenticated: ["bearerAuth"],
+      session: ["sessionCookie"],
+    },
+  },
+};
 
-function spec() {
-  const reg = audit(
-    { mode: "static", src: FIXTURE },
-    { authMiddleware: { requireAuth: "authenticated" } },
-  );
-  const report = buildReport(reg, {
+function report() {
+  const reg = audit({ mode: "static", src: FIXTURE }, CONFIG);
+  return buildReport(reg, {
     command: "audit",
     mode: "static",
     target: loadPackageInfo(FIXTURE),
   });
-  return JSON.parse(formatters.openapi.format(report));
+}
+
+function spec() {
+  return JSON.parse(formatters.openapi.format(report()));
 }
 
 test("emits a valid OpenAPI 3.1 envelope with target info", () => {
@@ -61,12 +74,63 @@ test("maps response statuses and always adds a default", () => {
   assert.ok(responses.default);
 });
 
-test("derives security schemes and per-operation security from auth status", () => {
+test("emits only explicitly mapped security schemes", () => {
   const doc = spec();
-  assert.ok(doc.components.securitySchemes.authenticated);
-  assert.deepEqual(doc.paths["/items"].post.security, [{ authenticated: [] }]);
+  assert.deepEqual(doc.components.securitySchemes.bearerAuth, {
+    type: "http",
+    scheme: "bearer",
+    bearerFormat: "JWT",
+  });
+  assert.deepEqual(doc.paths["/items"].post.security, [{ bearerAuth: [] }]);
   // a public route gets an explicit empty security requirement
   assert.deepEqual(doc.paths["/items"].get.security, []);
+});
+
+test("unmapped auth tags stay as audit evidence instead of becoming invented bearer schemes", () => {
+  const value = report();
+  delete value.openapi;
+  const doc = JSON.parse(formatters.openapi.format(value));
+  assert.equal(doc.components, undefined);
+  assert.equal(doc.paths["/items"].post.security, undefined);
+  assert.deepEqual(doc.paths["/items"].post["x-express-recon"].unmappedAuthTags, ["authenticated"]);
+});
+
+test("multiple mapped guards are conjunctive in one security requirement", () => {
+  const value = report();
+  const route = value.routes.find((item) => item.method === "POST" && item.path === "/items");
+  route.tags.push("session");
+  const doc = JSON.parse(formatters.openapi.format(value));
+  assert.deepEqual(doc.paths["/items"].post.security, [{ bearerAuth: [], sessionCookie: [] }]);
+});
+
+test("prototype-like schema fields and security schemes remain ordinary data", () => {
+  const value = report();
+  const route = value.routes.find((item) => item.method === "POST" && item.path === "/items");
+  route.io.request.body = ["__proto__"];
+  value.openapi = {
+    securitySchemes: Object.fromEntries([
+      ["__proto__", { type: "apiKey", in: "header", name: "x-auth" }],
+    ]),
+    securityByTag: { authenticated: ["__proto__"] },
+  };
+  const doc = formatters.openapi.build(value);
+  const properties =
+    doc.paths["/items"].post.requestBody.content["application/json"].schema.properties;
+  const requirement = doc.paths["/items"].post.security[0];
+  assert.equal(Object.hasOwn(properties, "__proto__"), true);
+  assert.deepEqual(properties.__proto__, {});
+  assert.equal(Object.hasOwn(requirement, "__proto__"), true);
+  assert.deepEqual(requirement.__proto__, []);
+  assert.equal(Object.hasOwn(doc.components.securitySchemes, "__proto__"), true);
+});
+
+test("non-slash catch-all paths become valid OpenAPI path keys", () => {
+  const value = report();
+  const existing = value.routes.find((item) => item.method === "GET" && item.path === "/items");
+  value.routes = [{ ...structuredClone(existing), path: "*" }];
+  const doc = formatters.openapi.build(value);
+  assert.ok(doc.paths["/{wildcard}"].get);
+  assert.equal(Object.hasOwn(doc.paths, "{wildcard}"), false);
 });
 
 test("carries x-express-recon traceback metadata per operation", () => {
@@ -75,7 +139,10 @@ test("carries x-express-recon traceback metadata per operation", () => {
   assert.ok(ext.source.file.endsWith("app.js"));
   assert.equal(ext.authStatus, "public");
   assert.equal(ext.handlerResolved, true);
+  assert.ok(ext.handlerSource.file.endsWith("app.js"));
+  assert.equal(typeof ext.handlerSource.line, "number");
   assert.equal(ext.method, "GET");
+  assert.match(ext.applicationId, /^app:/);
 });
 
 test("surfaces the handler name for controller-backed operations", () => {
@@ -91,10 +158,30 @@ test("surfaces the handler name for controller-backed operations", () => {
 test("expands router.all() across concrete verbs, flagged as ALL", () => {
   const doc = spec();
   const wild = doc.paths["/wild"];
-  for (const verb of ["get", "post", "put", "patch", "delete"]) {
+  for (const verb of ["get", "post", "put", "patch", "delete", "head", "options", "trace"]) {
     assert.ok(wild[verb], `expected ${verb} on /wild`);
     assert.equal(wild[verb]["x-express-recon"].method, "ALL");
   }
+});
+
+test("duplicate operations are reported instead of disappearing silently", () => {
+  const value = report();
+  const existing = value.routes.find((item) => item.method === "GET" && item.path === "/items");
+  value.routes.push({
+    ...structuredClone(existing),
+    source: { file: "/tmp/duplicate.js", line: 9 },
+  });
+  const doc = JSON.parse(formatters.openapi.format(value));
+  assert.deepEqual(doc["x-express-recon"].duplicateOperations, [
+    {
+      keptApplicationId: existing.applicationId,
+      droppedApplicationId: existing.applicationId,
+      method: "GET",
+      path: "/items",
+      keptSource: existing.source,
+      droppedSource: { file: "/tmp/duplicate.js", line: 9 },
+    },
+  ]);
 });
 
 test("operationIds are unique across the document", () => {

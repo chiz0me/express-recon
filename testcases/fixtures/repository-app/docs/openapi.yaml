@@ -1,0 +1,11 @@
+openapi: 3.1.0
+info:
+  title: Repository fixture
+  version: 1.2.3
+paths:
+  /health:
+    get:
+      summary: Authored repository health
+      responses:
+        "200":
+          description: OK

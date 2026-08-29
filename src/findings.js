@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const { inconsistentPaths } = require("./classify");
 
-function fingerprintFinding(finding) {
+function fingerprintFinding(finding, options = {}) {
   const ruleIdentity =
     finding.id === "policy-violation"
       ? finding.ruleId || ""
@@ -14,14 +14,14 @@ function fingerprintFinding(finding) {
     finding.id === "stale-baseline"
       ? finding.detail?.match(/baseline entry "([^"]+)"/)?.[1] || ""
       : "";
-  const identity = [
-    finding.id,
-    ruleIdentity,
+  const identity = [finding.id, ruleIdentity];
+  if (options.applicationScoped !== false) identity.push(finding.applicationId || "");
+  identity.push(
     finding.method || "",
     finding.path || "",
     finding.baselineEntry || legacyBaselineEntry,
-  ].join("\0");
-  const digest = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 16);
+  );
+  const digest = crypto.createHash("sha256").update(identity.join("\0")).digest("hex").slice(0, 16);
   return { ...finding, fingerprint: `finding_${digest}` };
 }
 
@@ -33,6 +33,7 @@ function publicFindings(routes) {
       ruleId: "public-route",
       severity: "high",
       confidence: r.pathConfidence === "partial" ? "medium" : "high",
+      applicationId: r.applicationId ?? null,
       method: r.method,
       path: r.path,
       source: r.source || null,
@@ -49,20 +50,33 @@ function publicFindings(routes) {
  */
 function staleBaselineFindings(routes, acceptedPublic) {
   if (!acceptedPublic || acceptedPublic.length === 0) return [];
-  const activePublic = new Set(
-    routes.filter((r) => r.authStatus === "public").map((r) => `${r.method} ${r.path}`),
-  );
+  const publicRoutes = routes.filter((route) => route.authStatus === "public");
+  const labelFor = (entry) =>
+    typeof entry === "string" ? entry : `${entry.applicationId} ${entry.method} ${entry.path}`;
+  const matches = (entry) =>
+    publicRoutes.some((route) => {
+      if (typeof entry === "string") return entry === `${route.method} ${route.path}`;
+      return (
+        entry.applicationId === route.applicationId &&
+        entry.method === route.method &&
+        entry.path === route.path
+      );
+    });
   return acceptedPublic
-    .filter((k) => !activePublic.has(k))
-    .map((k) => ({
-      id: "stale-baseline",
-      ruleId: "stale-baseline",
-      severity: "low",
-      confidence: "high",
-      baselineEntry: k,
-      detail: `Accepted-public baseline entry "${k}" no longer matches a public route (removed or now guarded); remove it from acceptedPublic.`,
-      recommendation: `Remove "${k}" from acceptedPublic.`,
-    }));
+    .filter((entry) => !matches(entry))
+    .map((entry) => {
+      const label = labelFor(entry);
+      return {
+        id: "stale-baseline",
+        ruleId: "stale-baseline",
+        severity: "low",
+        confidence: "high",
+        applicationId: typeof entry === "string" ? null : entry.applicationId,
+        baselineEntry: label,
+        detail: `Accepted-public baseline entry "${label}" no longer matches a public route (removed or now guarded); remove it from acceptedPublic.`,
+        recommendation: `Remove "${label}" from acceptedPublic.`,
+      };
+    });
 }
 
 function reviewFindings(routes) {
@@ -73,6 +87,7 @@ function reviewFindings(routes) {
       ruleId: "opaque-middleware",
       severity: "medium",
       confidence: r.pathConfidence === "partial" ? "low" : "medium",
+      applicationId: r.applicationId ?? null,
       method: r.method,
       path: r.path,
       source: r.source || null,
@@ -88,6 +103,7 @@ function gapFindings(routes) {
     ruleId: "per-verb-gap",
     severity: "high",
     confidence: "high",
+    applicationId: g.applicationId,
     path: g.path,
     methods: g.methods,
     detail: "Auth status differs across HTTP methods on the same path.",
@@ -100,7 +116,7 @@ function gapFindings(routes) {
  * a `severity`, and a location, so an agent or CI step can act on it directly.
  *
  * @param {object[]} routes  classified routes (must have `authStatus`)
- * @param {string[]} [acceptedPublic]  reviewed baseline of intentionally-open routes
+ * @param {(string|{applicationId:string,method:string,path:string})[]} [acceptedPublic] reviewed baseline of intentionally-open routes
  * @param {object[]} [policyFindings]  findings from configurable route policies
  * @returns {object[]}
  */

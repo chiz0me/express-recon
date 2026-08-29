@@ -35,6 +35,9 @@ shape.
 - `prepublishOnly` and the publish workflow run `scripts/check-version.js`,
   which fails if `package.json`, `plugin.json`, and the release tag disagree —
   a mismatched release can't publish.
+- The publish workflow reruns lint, formatting, coverage, documentation,
+  production dependency audit, and a package dry run before an OIDC/provenance
+  publish.
 - Check manually any time with `npm run check:version`.
 
 ## After publishing

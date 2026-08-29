@@ -78,7 +78,14 @@ function runtimeLimits(boot = {}) {
 function childEnvironment(boot) {
   const inherited = boot.inheritEnv === true ? process.env : {};
   const env = { ...inherited, EXPRESS_RECON_DRY: "1" };
-  for (const [key, value] of Object.entries(boot.env || {})) env[key] = String(value);
+  for (const [key, value] of Object.entries(boot.env || {})) {
+    Object.defineProperty(env, key, {
+      value: String(value),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
   return env;
 }
 

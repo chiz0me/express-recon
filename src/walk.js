@@ -161,7 +161,13 @@ function walkRouter(router, basePath, inherited, partial) {
       for (const method of methodsFor(layer.route)) {
         const localMw = routeMiddlewares(layer.route, method);
         for (const path of paths) {
-          const full = joinPath(basePath, path);
+          // Express also accepts RegExp route paths. They cannot be represented
+          // as a concrete inventory/OpenAPI path, but they must not crash the
+          // runtime walker. Keep the route visible as a partial dynamic path;
+          // instrumentation/source evidence still points reviewers to the
+          // original registration.
+          const dynamicPath = typeof path !== "string";
+          const full = joinPath(basePath, dynamicPath ? "<dynamic>" : path);
           const chain = globals
             .filter((g) => g.scopes === null || g.scopes.some((s) => scopedTo(full, s)))
             .map((g) => g.mw);
@@ -170,7 +176,7 @@ function walkRouter(router, basePath, inherited, partial) {
             path: full,
             middlewares: chain.concat(localMw),
             source: routeSource(layer.route, method),
-            pathConfidence: partial ? "partial" : "full",
+            pathConfidence: partial || dynamicPath ? "partial" : "full",
           });
         }
       }
@@ -208,7 +214,22 @@ function walkRouter(router, basePath, inherited, partial) {
 function walk(app) {
   const router = getRootRouter(app);
   const { routes, globals } = walkRouter(router, "", [], false);
-  return { routes, globalMiddleware: globals.map((g) => g.mw) };
+  const applicationId = "runtime:default";
+  for (const route of routes) route.applicationId = applicationId;
+  const globalMiddleware = globals.map((g) => g.mw);
+  return {
+    routes,
+    globalMiddleware,
+    applications: [
+      {
+        id: applicationId,
+        name: "runtime application",
+        source: null,
+        routeCount: routes.length,
+        globalMiddleware,
+      },
+    ],
+  };
 }
 
 module.exports = { walk, extractMountPath, joinPath, scopedTo };

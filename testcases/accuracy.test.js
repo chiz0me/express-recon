@@ -153,6 +153,9 @@ test("hybrid reconcile merges a partial static route with its runtime twin by su
   assert.equal(routes[0].path, "/api/users/:id");
   assert.equal(routes[0].presence, "both");
   assert.deepEqual(routes[0].source, { file: "r.js", line: 3 });
+  assert.equal(routes[0].observations.static.path, "/users/:id");
+  assert.equal(routes[0].observations.runtime.path, "/api/users/:id");
+  assert.deepEqual(routes[0].observations.conflicts, ["path"]);
 });
 
 test("hybrid reconcile pairs routes by registration source when suffixes are ambiguous", () => {
@@ -217,6 +220,129 @@ test("hybrid exact matches use runtime middleware and auth classification", () =
   assert.deepEqual(routes[0].middlewares, runtimeView.middlewares);
   assert.deepEqual(routes[0].source, staticView.source);
   assert.deepEqual(routes[0].io, staticView.io);
+  assert.deepEqual(routes[0].observations.static.middlewares, staticView.middlewares);
+  assert.deepEqual(routes[0].observations.runtime.middlewares, runtimeView.middlewares);
+  assert.deepEqual(routes[0].observations.conflicts, [
+    "middleware-identity",
+    "auth-classification",
+  ]);
+});
+
+test("hybrid exact matching never assigns a booted route to the wrong application", () => {
+  const admin = staticRoute("/health", {
+    applicationId: "app:admin#app",
+    pathConfidence: "full",
+    source: { file: "admin.js", line: 3 },
+  });
+  const publicApp = staticRoute("/health", {
+    applicationId: "app:public#app",
+    pathConfidence: "full",
+    source: { file: "public.js", line: 3 },
+    authStatus: "public",
+    accepted: true,
+  });
+  const runtime = runtimeRoute("/health", { file: "public.js", line: 3 });
+  runtime.applicationId = "runtime:default";
+  runtime.authStatus = "public";
+
+  const { routes } = reconcile(
+    { routes: [admin, publicApp], globalMiddleware: [] },
+    { routes: [runtime], globalMiddleware: [] },
+  );
+  const adminResult = routes.find((route) => route.applicationId === "app:admin#app");
+  const publicResult = routes.find((route) => route.applicationId === "app:public#app");
+  assert.equal(adminResult.presence, "static-only");
+  assert.equal(publicResult.presence, "both");
+  assert.equal(publicResult.accepted, true);
+});
+
+test("hybrid app identity wins when multiple apps mount the same source registration", () => {
+  const sharedSource = { file: "routes/shared.js", line: 8 };
+  const admin = staticRoute("/health", {
+    applicationId: "app:admin#app",
+    pathConfidence: "full",
+    source: sharedSource,
+  });
+  const publicApp = staticRoute("/health", {
+    applicationId: "app:public#app",
+    pathConfidence: "full",
+    source: sharedSource,
+  });
+  const runtime = runtimeRoute("/health", sharedSource);
+  runtime.applicationId = "app:public#app";
+
+  const { routes } = reconcile(
+    { routes: [admin, publicApp], globalMiddleware: [] },
+    { routes: [runtime], globalMiddleware: [] },
+  );
+  assert.equal(
+    routes.find((route) => route.applicationId === "app:admin#app").presence,
+    "static-only",
+  );
+  assert.equal(routes.find((route) => route.applicationId === "app:public#app").presence, "both");
+});
+
+test("hybrid keeps shared-source runtime evidence separate without an app identity", () => {
+  const sharedSource = { file: "routes/shared.js", line: 8 };
+  const staticRoutes = ["admin", "public"].map((name) =>
+    staticRoute("/health", {
+      applicationId: `app:${name}#app`,
+      pathConfidence: "full",
+      source: sharedSource,
+    }),
+  );
+  const runtime = runtimeRoute("/health", sharedSource);
+  runtime.applicationId = "runtime:default";
+
+  const { routes } = reconcile(
+    { routes: staticRoutes, globalMiddleware: [] },
+    { routes: [runtime], globalMiddleware: [] },
+  );
+  assert.deepEqual(routes.map((route) => route.presence).sort(), [
+    "runtime-only",
+    "static-only",
+    "static-only",
+  ]);
+});
+
+test("hybrid keeps an unsourced duplicate runtime route separate when app identity is ambiguous", () => {
+  const staticRoutes = [
+    staticRoute("/health", { applicationId: "app:admin#app", pathConfidence: "full" }),
+    staticRoute("/health", { applicationId: "app:public#app", pathConfidence: "full" }),
+  ];
+  const runtime = runtimeRoute("/health");
+  runtime.applicationId = "runtime:default";
+  const { routes } = reconcile(
+    { routes: staticRoutes, globalMiddleware: [] },
+    { routes: [runtime], globalMiddleware: [] },
+  );
+  assert.deepEqual(routes.map((route) => route.presence).sort(), [
+    "runtime-only",
+    "static-only",
+    "static-only",
+  ]);
+});
+
+test("hybrid suffix matching does not cross applications with the same partial route", () => {
+  const admin = staticRoute("<dynamic>/health", {
+    applicationId: "app:admin#app",
+    source: { file: "admin.js", line: 3 },
+  });
+  const publicApp = staticRoute("<dynamic>/health", {
+    applicationId: "app:public#app",
+    source: { file: "public.js", line: 3 },
+  });
+  const runtime = runtimeRoute("/api/health", { file: "public.js", line: 3 });
+  runtime.applicationId = "runtime:default";
+  const { routes } = reconcile(
+    { routes: [admin, publicApp], globalMiddleware: [] },
+    { routes: [runtime], globalMiddleware: [] },
+  );
+  assert.equal(
+    routes.find((route) => route.applicationId === "app:admin#app").presence,
+    "static-only",
+  );
+  assert.equal(routes.find((route) => route.applicationId === "app:public#app").presence, "both");
 });
 
 test("test files are excluded from scans by default", () => {

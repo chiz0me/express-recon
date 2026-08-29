@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 64 64" role="img" aria-label="express-recon">
+  <style>
+    .tile { fill: #1F2328; }
+    .glyph { stroke: #FFFFFF; fill: none; }
+    .glyph-solid { fill: #FFFFFF; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #E6EDF3; }
+      .glyph { stroke: #12161A; }
+      .glyph-solid { fill: #12161A; }
+    }
+  </style>
+  <rect class="tile" x="0" y="0" width="64" height="64" rx="15"/>
+  <path class="glyph" d="M20 46 L36 22" stroke-width="5.5" stroke-linecap="round"/>
+  <circle class="glyph-solid" cx="44" cy="33" r="2.5" opacity="0.5"/>
+  <circle class="glyph-solid" cx="44" cy="42" r="2.5" opacity="0.5"/>
+  <circle cx="40" cy="17" r="5" fill="none" stroke="#E24B4A" stroke-width="3.5"/>
+</svg>

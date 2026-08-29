@@ -9,6 +9,7 @@ const CLI = path.join(__dirname, "..", "src", "cli.js");
 const DIR = path.join(__dirname, "fixtures", "boot-app");
 const APP = path.join(DIR, "app.js");
 const CONFIG = path.join(DIR, "boot.config.js");
+const MULTI_APP = path.join(__dirname, "fixtures", "discovery-app");
 
 function run(args, expectCode = 0) {
   const res = spawnSync("node", [CLI, ...args], { encoding: "utf8", timeout: 30000 });
@@ -100,6 +101,31 @@ test("hybrid mode reconciles static and worker runtime", () => {
   assert.equal(health.presence, "both");
   assert.ok(report.diagnostics.some((d) => d.startsWith("boot:")));
   assert.ok(res.stderr.includes("express-recon [warn]: boot:"));
+});
+
+test("hybrid app selection preserves identity in a multi-app repository", () => {
+  const applicationId = "app:src/public-app.js#app";
+  const res = run([
+    "inventory",
+    "--mode",
+    "hybrid",
+    "--src",
+    MULTI_APP,
+    "--app",
+    path.join(MULTI_APP, "src", "public-app.js"),
+    "--app-id",
+    applicationId,
+    "--format",
+    "json",
+  ]);
+  const report = JSON.parse(res.stdout);
+  const health = report.routes.filter((route) => route.path === "/health");
+  assert.equal(health.length, 2);
+  assert.equal(health.find((route) => route.applicationId === applicationId).presence, "both");
+  assert.equal(
+    health.find((route) => route.applicationId === "app:services/admin/app.js#admin").presence,
+    "static-only",
+  );
 });
 
 test("routes registered inside connect().then are captured", () => {

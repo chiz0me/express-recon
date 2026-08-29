@@ -153,10 +153,22 @@ function routeKey(route) {
   return `${route.method} ${route.path}`;
 }
 
+function acceptedRoute(route, acceptedPublic) {
+  const key = routeKey(route);
+  return acceptedPublic.some((entry) => {
+    if (typeof entry === "string") return entry === key;
+    return (
+      entry.applicationId === route.applicationId &&
+      entry.method === route.method &&
+      entry.path === route.path
+    );
+  });
+}
+
 function tagRoute(route, authMiddleware, authWrappers, acceptedPublic) {
   const classification = authStatusFor(route.middlewares, authMiddleware, true, authWrappers);
   const { authStatus } = classification;
-  const accepted = authStatus === "public" && acceptedPublic.has(routeKey(route));
+  const accepted = authStatus === "public" && acceptedRoute(route, acceptedPublic);
   const classified = { ...route, ...classification };
   return accepted ? { ...classified, accepted: true } : classified;
 }
@@ -166,22 +178,27 @@ function tagRoute(route, authMiddleware, authWrappers, acceptedPublic) {
  * `options.authMiddleware`. Routes whose `METHOD /path` key is in
  * `options.acceptedPublic` — a reviewed baseline of intentionally-open
  * endpoints — are additionally tagged `accepted`, which suppresses their
- * `public-route` finding and `--fail-on public` match.
+ * `public-route` finding and `--fail-on public` match. Legacy string entries
+ * apply across applications; structured entries target one application ID.
  *
  * @param {{routes: object[], globalMiddleware: object[]}} registry
- * @param {{authMiddleware?: Record<string,string|object>, authWrappers?: string[], acceptedPublic?: string[]}} options
+ * @param {{authMiddleware?: Record<string,string|object>, authWrappers?: string[], acceptedPublic?: (string|{applicationId:string,method:string,path:string})[]}} options
  */
 function classify(registry, options) {
   const authMiddleware = (options && options.authMiddleware) || {};
   const authWrappers = (options && options.authWrappers) || [];
   validateAuthMiddleware(authMiddleware);
   validateAuthWrappers(authWrappers);
-  const acceptedPublic = new Set((options && options.acceptedPublic) || []);
+  const acceptedPublic = (options && options.acceptedPublic) || [];
   return {
     routes: registry.routes.map((r) => tagRoute(r, authMiddleware, authWrappers, acceptedPublic)),
     globalMiddleware: registry.globalMiddleware,
+    applications: registry.applications || [],
     diagnostics: registry.diagnostics || [],
-    acceptedPublic: [...acceptedPublic],
+    acceptedPublic: acceptedPublic.map((entry) =>
+      typeof entry === "string" ? entry : { ...entry },
+    ),
+    ...(options && options.openapi ? { openapi: options.openapi } : {}),
     ...(registry.scanCoverage ? { scanCoverage: registry.scanCoverage } : {}),
   };
 }
@@ -197,17 +214,34 @@ function classify(registry, options) {
 function inconsistentPaths(routes) {
   const byPath = new Map();
   for (const route of routes) {
-    const acc = byPath.get(route.path) || [];
-    acc.push({ method: route.method, authStatus: route.authStatus, source: route.source || null });
-    byPath.set(route.path, acc);
+    const key = `${route.applicationId || ""}\0${route.path}`;
+    const acc = byPath.get(key) || {
+      applicationId: route.applicationId ?? null,
+      path: route.path,
+      methods: [],
+    };
+    acc.methods.push({
+      method: route.method,
+      authStatus: route.authStatus,
+      source: route.source || null,
+    });
+    byPath.set(key, acc);
   }
   const result = [];
-  for (const [path, methods] of byPath) {
+  for (const { applicationId, path, methods } of byPath.values()) {
     if (new Set(methods.map((m) => m.authStatus)).size > 1) {
-      result.push({ path, methods: methods.sort((a, b) => a.method.localeCompare(b.method)) });
+      result.push({
+        applicationId,
+        path,
+        methods: methods.sort((a, b) => a.method.localeCompare(b.method)),
+      });
     }
   }
-  return result.sort((a, b) => a.path.localeCompare(b.path));
+  return result.sort((a, b) => {
+    const left = `${a.applicationId || ""}\0${a.path}`;
+    const right = `${b.applicationId || ""}\0${b.path}`;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
 }
 
 module.exports = {

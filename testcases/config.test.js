@@ -42,7 +42,57 @@ test("configuration rejects unknown fields and malformed scan/baseline values", 
   assert.throws(() => validateConfig({ scan: { includes: ["src/**"] } }), /unknown field/);
   assert.throws(() => validateConfig({ scan: { include: "src/**" } }), /array/);
   assert.throws(() => validateConfig({ acceptedPublic: ["get /health"] }), /METHOD \/path/);
+  assert.throws(() => validateConfig({ acceptedPublic: ["GET /health "] }), /METHOD \/path/);
+  assert.throws(
+    () => validateConfig({ acceptedPublic: ["GET /health\nPOST /admin"] }),
+    /METHOD \/path/,
+  );
+  assert.throws(() => validateConfig({ scan: { maxFiles: 0 } }), /scan.maxFiles/);
+  assert.throws(() => validateConfig({ scan: { maxFileBytes: 100 } }), /scan.maxFileBytes/);
+  assert.throws(() => validateConfig({ scan: { maxTotalBytes: 100 } }), /scan.maxTotalBytes/);
+  assert.throws(() => validateConfig({ scan: { timeoutMs: 99 } }), /scan.timeoutMs/);
   assert.doesNotThrow(() => validateConfig({ acceptedPublic: ["GET /"] }));
+  assert.doesNotThrow(() =>
+    validateConfig({
+      acceptedPublic: [
+        {
+          applicationId: "app:src/app.js#app",
+          method: "GET",
+          path: "/health",
+        },
+      ],
+    }),
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        acceptedPublic: [{ applicationId: "app:x#app", method: "get", path: "/health" }],
+      }),
+    /uppercase HTTP method/,
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        acceptedPublic: [{ applicationId: " app:x#app", method: "GET", path: "/health" }],
+      }),
+    /applicationId/,
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        acceptedPublic: [{ applicationId: "app:x#app", method: "GET", path: "/health " }],
+      }),
+    /path/,
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        acceptedPublic: [
+          { applicationId: "app:x#app", method: "GET", path: "/health", typo: true },
+        ],
+      }),
+    /unknown field/,
+  );
 });
 
 test("configuration validates boot limits even for static scans", () => {
@@ -50,6 +100,41 @@ test("configuration validates boot limits even for static scans", () => {
   assert.throws(
     () => validateConfig({ boot: { timeoutMs: 100, settleMs: 100 } }),
     /settleMs must be less/,
+  );
+});
+
+test("OpenAPI security mappings require explicit, defined schemes", () => {
+  const valid = {
+    openapi: {
+      securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
+      securityByTag: { authenticated: ["bearerAuth"] },
+    },
+  };
+  assert.doesNotThrow(() => validateConfig(valid));
+  assert.throws(
+    () =>
+      validateConfig({
+        openapi: {
+          securitySchemes: {},
+          securityByTag: { authenticated: ["missing"] },
+        },
+      }),
+    /undefined security scheme/,
+  );
+  assert.throws(
+    () =>
+      validateConfig({
+        openapi: { securitySchemes: { "bad:name": { type: "http" } } },
+      }),
+    /invalid component name/,
+  );
+  assert.throws(
+    () =>
+      audit(
+        { mode: "static", src: FIXTURE },
+        { openapi: { securityByTag: { authenticated: ["missing"] } } },
+      ),
+    /undefined security scheme/,
   );
 });
 

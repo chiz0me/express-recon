@@ -148,8 +148,10 @@ function collectBindings(program) {
   const routers = new Map();
   walk(program, (node) => {
     if (node.type !== "VariableDeclarator" || node.id.type !== "Identifier" || !node.init) return;
-    if (isAppInit(node.init)) routers.set(node.id.name, { kind: "app" });
-    else if (isRouterInit(node.init)) routers.set(node.id.name, { kind: "router" });
+    if (isAppInit(node.init)) routers.set(node.id.name, { kind: "app", start: node.start });
+    else if (isRouterInit(node.init)) {
+      routers.set(node.id.name, { kind: "router", start: node.start });
+    }
   });
 
   return { requires: bindings, routers, factoryNames };

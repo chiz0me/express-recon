@@ -44,6 +44,25 @@ test("compareReports detects route changes and auth regressions", () => {
   assert.match(delta.authRegressions[0].explanation, /configuration|middleware/i);
 });
 
+test("schema 2 comparisons keep identical routes in separate applications independent", () => {
+  const adminBefore = route("GET", "/health", "proven");
+  adminBefore.applicationId = "app:admin#app";
+  const publicBefore = route("GET", "/health", "public");
+  publicBefore.applicationId = "app:public#app";
+  const adminAfter = route("GET", "/health", "public");
+  adminAfter.applicationId = "app:admin#app";
+  const publicAfter = route("GET", "/health", "public");
+  publicAfter.applicationId = "app:public#app";
+
+  const baseline = { ...report([adminBefore, publicBefore]), schemaVersion: "2.0" };
+  const current = { ...report([adminAfter, publicAfter]), schemaVersion: "2.0" };
+  const delta = compareReports(baseline, current);
+  assert.equal(delta.summary.addedRoutes, 0);
+  assert.equal(delta.summary.removedRoutes, 0);
+  assert.equal(delta.summary.authRegressions, 1);
+  assert.equal(delta.authRegressions[0].applicationId, "app:admin#app");
+});
+
 test("auth regressions explain removed middleware and grants", () => {
   const before = route("GET", "/admin", "proven");
   before.middlewares = [{ name: "requireAuth", kind: "identifier", raw: "requireAuth" }];
@@ -109,7 +128,9 @@ test("schema 1.1 findings without fingerprint fields remain baseline-stable", ()
   });
   const legacy = structuredClone(current);
   legacy.schemaVersion = "1.1";
+  for (const route of legacy.routes) delete route.applicationId;
   for (const finding of legacy.findings) {
+    delete finding.applicationId;
     delete finding.fingerprint;
     delete finding.ruleId;
     delete finding.confidence;
@@ -161,6 +182,14 @@ test("--baseline adds delta output and supports new/regression gates", () => {
 
 test("compareReports rejects malformed baselines clearly", () => {
   assert.throws(() => compareReports({}, report([])), /baseline must be an express-recon report/);
+});
+
+test("compareReports rejects different static scan scopes", () => {
+  const baseline = report([]);
+  const current = report([]);
+  baseline.scanCoverage = { scope: { fingerprint: "a".repeat(64) } };
+  current.scanCoverage = { scope: { fingerprint: "b".repeat(64) } };
+  assert.throws(() => compareReports(baseline, current), /scan scopes differ/);
 });
 
 test("--fail-on new requires a baseline", () => {

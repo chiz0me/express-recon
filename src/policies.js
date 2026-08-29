@@ -44,7 +44,16 @@ function normalizeMatch(match, label, { requireSelector = false } = {}) {
   if (!plainObject(value)) throw new Error(`${label} must be an object`);
   assertKnownKeys(
     value,
-    new Set(["methods", "paths", "excludePaths", "authStatuses", "tags", "roles", "scopes"]),
+    new Set([
+      "applicationIds",
+      "methods",
+      "paths",
+      "excludePaths",
+      "authStatuses",
+      "tags",
+      "roles",
+      "scopes",
+    ]),
     label,
   );
   const methods = stringArray(value.methods, `${label}.methods`, { nonEmpty: true });
@@ -66,6 +75,9 @@ function normalizeMatch(match, label, { requireSelector = false } = {}) {
     }
   }
   const normalized = {
+    applicationIds: stringArray(value.applicationIds, `${label}.applicationIds`, {
+      nonEmpty: true,
+    }),
     methods: methods && methods.map((method) => method.toUpperCase()),
     paths: stringArray(value.paths, `${label}.paths`, { nonEmpty: true }),
     excludePaths: stringArray(value.excludePaths, `${label}.excludePaths`, { nonEmpty: true }),
@@ -76,7 +88,7 @@ function normalizeMatch(match, label, { requireSelector = false } = {}) {
   };
   if (requireSelector && !Object.values(normalized).some(Boolean)) {
     throw new Error(
-      `${label} must select at least one method, path, auth status, tag, role, or scope`,
+      `${label} must select at least one application, method, path, auth status, tag, role, or scope`,
     );
   }
   return normalized;
@@ -258,6 +270,7 @@ function overlaps(actual, required) {
 }
 
 function routeMatches(route, match) {
+  if (match.applicationIds && !match.applicationIds.includes(route.applicationId)) return false;
   if (match.methods && !match.methods.includes(route.method)) return false;
   if (match.paths && !matchesAnyPath(route.path, match.paths)) return false;
   if (match.excludePaths && matchesAnyPath(route.path, match.excludePaths)) return false;
@@ -464,6 +477,7 @@ function evaluatePolicies(registry, policies, options = {}) {
         policyExceptions.push({
           policyId: policy.id,
           exceptionId: activeException.id,
+          applicationId: route.applicationId ?? null,
           method: route.method,
           path: route.path,
           reason: activeException.reason,
@@ -487,6 +501,7 @@ function evaluatePolicies(registry, policies, options = {}) {
           ruleId: policy.id,
           severity: policy.severity,
           confidence: confidenceFor(route),
+          applicationId: route.applicationId ?? null,
           method: route.method,
           path: route.path,
           source: route.source || null,

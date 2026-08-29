@@ -64,6 +64,28 @@ test("path globs, exclusions, and middleware requirements compose", () => {
   assert.equal(registry.policyFindings.length, 0);
 });
 
+test("application selectors scope policies when apps share the same route path", () => {
+  const registry = evaluatePolicies(
+    {
+      routes: [
+        route({ applicationId: "app:admin#app", path: "/health" }),
+        route({ applicationId: "app:public#app", path: "/health" }),
+      ],
+      globalMiddleware: [],
+    },
+    [
+      {
+        id: "admin-health-auth",
+        match: { applicationIds: ["app:admin#app"], paths: ["/health"] },
+        require: { auth: true },
+      },
+    ],
+  );
+  assert.equal(registry.policyFindings.length, 1);
+  assert.equal(registry.policyFindings[0].applicationId, "app:admin#app");
+  assert.deepEqual(registry.policies[0].match.applicationIds, ["app:admin#app"]);
+});
+
 test("wrapped middleware names satisfy policy requirements", () => {
   const registry = evaluatePolicies(
     {
@@ -213,7 +235,7 @@ test("audit reports policy violations with stable fingerprints", () => {
   assert.ok(a);
   assert.equal(a.fingerprint, b.fingerprint);
   assert.equal(first.summary.policyViolations, 1);
-  assert.equal(first.schemaVersion, "1.3");
+  assert.equal(first.schemaVersion, "2.0");
 });
 
 test("--fail-on policy and policy:<id> gate configured violations", () => {

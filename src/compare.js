@@ -10,15 +10,28 @@ function assertReport(report, label) {
   }
 }
 
-function routeKey(route) {
-  return `${route.method} ${route.path}`;
+function assertComparableScope(baseline, current) {
+  const before = baseline.scanCoverage?.scope?.fingerprint;
+  const after = current.scanCoverage?.scope?.fingerprint;
+  if (before && after && before !== after) {
+    throw new Error(
+      "baseline and current scan scopes differ; scan both revisions with the same " +
+        "--include, --exclude, --ignore-file, and --include-tests policy",
+    );
+  }
+}
+
+function routeKey(route, applicationScoped) {
+  return applicationScoped
+    ? `${route.applicationId || ""}\0${route.method} ${route.path}`
+    : `${route.method} ${route.path}`;
 }
 
 /** Collapse duplicate route keys to the least-safe auth view for comparison. */
-function routeMap(routes) {
+function routeMap(routes, applicationScoped) {
   const map = new Map();
   for (const route of routes) {
-    const key = routeKey(route);
+    const key = routeKey(route, applicationScoped);
     const existing = map.get(key);
     const risk = AUTH_RISK[route.authStatus] ?? -1;
     const existingRisk = existing ? (AUTH_RISK[existing.authStatus] ?? -1) : -2;
@@ -29,6 +42,7 @@ function routeMap(routes) {
 
 function routeSummary(route) {
   return {
+    applicationId: route.applicationId ?? null,
     method: route.method,
     path: route.path,
     ...(route.authStatus ? { authStatus: route.authStatus } : {}),
@@ -110,9 +124,9 @@ function authenticationCause(previous, current) {
   return { changes, explanation };
 }
 
-function compareRoutes(baseline, current) {
-  const before = routeMap(baseline.routes);
-  const after = routeMap(current.routes);
+function compareRoutes(baseline, current, applicationScoped) {
+  const before = routeMap(baseline.routes, applicationScoped);
+  const after = routeMap(current.routes, applicationScoped);
   const addedRoutes = [];
   const removedRoutes = [];
   const authRegressions = [];
@@ -128,6 +142,7 @@ function compareRoutes(baseline, current) {
     const toRisk = AUTH_RISK[route.authStatus];
     if (fromRisk === undefined || toRisk === undefined || fromRisk === toRisk) continue;
     const change = {
+      applicationId: route.applicationId ?? null,
       method: route.method,
       path: route.path,
       from: previous.authStatus,
@@ -142,29 +157,47 @@ function compareRoutes(baseline, current) {
     if (!after.has(key)) removedRoutes.push(routeSummary(route));
   }
 
-  const byRoute = (a, b) =>
-    a.path === b.path ? a.method.localeCompare(b.method) : a.path.localeCompare(b.path);
+  const byRoute = (a, b) => {
+    const byApplication = (a.applicationId || "").localeCompare(b.applicationId || "");
+    if (byApplication) return byApplication;
+    return a.path === b.path ? a.method.localeCompare(b.method) : a.path.localeCompare(b.path);
+  };
   for (const list of [addedRoutes, removedRoutes, authRegressions, authImprovements]) {
     list.sort(byRoute);
   }
   return { addedRoutes, removedRoutes, authRegressions, authImprovements };
 }
 
-function findingFingerprint(finding) {
-  return finding.fingerprint || fingerprintFinding(finding).fingerprint;
+function findingFingerprint(finding, applicationScoped) {
+  // Recompute semantic identity so schema 1.x baselines remain comparable even
+  // though version 2 adds application identity to emitted fingerprints.
+  return fingerprintFinding(finding, { applicationScoped }).fingerprint;
 }
 
-function compareFindings(baseline, current) {
-  const before = new Set((baseline.findings || []).map(findingFingerprint));
-  const after = new Set((current.findings || []).map(findingFingerprint));
+function compareFindings(baseline, current, applicationScoped) {
+  const before = new Set(
+    (baseline.findings || []).map((finding) => findingFingerprint(finding, applicationScoped)),
+  );
+  const after = new Set(
+    (current.findings || []).map((finding) => findingFingerprint(finding, applicationScoped)),
+  );
   return {
     newFindings: (current.findings || []).filter(
-      (finding) => !before.has(findingFingerprint(finding)),
+      (finding) => !before.has(findingFingerprint(finding, applicationScoped)),
     ),
     resolvedFindings: (baseline.findings || []).filter(
-      (finding) => !after.has(findingFingerprint(finding)),
+      (finding) => !after.has(findingFingerprint(finding, applicationScoped)),
     ),
   };
+}
+
+function supportsApplicationIdentity(report) {
+  const major = Number.parseInt(String(report.schemaVersion || "").split(".")[0], 10);
+  return (
+    major >= 2 ||
+    report.routes.some((route) => typeof route.applicationId === "string") ||
+    (report.findings || []).some((finding) => typeof finding.applicationId === "string")
+  );
 }
 
 /**
@@ -175,8 +208,12 @@ function compareFindings(baseline, current) {
 function compareReports(baseline, current) {
   assertReport(baseline, "baseline");
   assertReport(current, "current report");
-  const routes = compareRoutes(baseline, current);
-  const findings = compareFindings(baseline, current);
+  assertComparableScope(baseline, current);
+  // The baseline controls compatibility: schema 1.x had no application IDs, so
+  // retain its historical method/path semantics when comparing a version 2 run.
+  const applicationScoped = supportsApplicationIdentity(baseline);
+  const routes = compareRoutes(baseline, current, applicationScoped);
+  const findings = compareFindings(baseline, current, applicationScoped);
   return {
     baseline: {
       schemaVersion: baseline.schemaVersion || null,

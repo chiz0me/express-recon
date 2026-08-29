@@ -1,10 +1,11 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { analyzeFile } = require("./analyze-file");
 const { extractIoHints } = require("./io-hints");
-const { loadTsconfig, loadImports, createResolver, EXTENSIONS } = require("./resolve");
+const { createScopedResolver, EXTENSIONS } = require("./resolve");
 const { joinPath, scopedTo } = require("../walk");
 
 const SOURCE_EXT = new Set(EXTENSIONS);
@@ -20,6 +21,39 @@ const TEST_DIRS = new Set([
 ]);
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 const DEFAULT_IGNORE_FILE = ".express-reconignore";
+const DEFAULT_MAX_FILES = 50_000;
+const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+function boundedInteger(value, label, fallback, minimum, maximum) {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+function scanLimits(opts = {}) {
+  return {
+    maxFiles: boundedInteger(opts.maxFiles, "scan.maxFiles", DEFAULT_MAX_FILES, 1, 1_000_000),
+    maxFileBytes: boundedInteger(
+      opts.maxFileBytes,
+      "scan.maxFileBytes",
+      DEFAULT_MAX_FILE_BYTES,
+      1024,
+      100 * 1024 * 1024,
+    ),
+    maxTotalBytes: boundedInteger(
+      opts.maxTotalBytes,
+      "scan.maxTotalBytes",
+      DEFAULT_MAX_TOTAL_BYTES,
+      1024,
+      5 * 1024 * 1024 * 1024,
+    ),
+    timeoutMs: boundedInteger(opts.timeoutMs, "scan.timeoutMs", DEFAULT_TIMEOUT_MS, 100, 600_000),
+  };
+}
 
 function stringPatterns(value, label) {
   if (value === undefined) return [];
@@ -38,9 +72,17 @@ function escapeRegex(char) {
  * `**` crosses directories; a double-star path segment may match zero or more
  * directories.
  */
+function normalizeGlob(pattern) {
+  return pattern.replaceAll("\\", "/").replace(/^\.?\//, "");
+}
+
+function canonicalGlob(pattern) {
+  const normalized = normalizeGlob(pattern);
+  return normalized.endsWith("/") ? `${normalized}**` : normalized;
+}
+
 function pathGlob(pattern) {
-  let normalized = pattern.replaceAll("\\", "/").replace(/^\.?\//, "");
-  if (normalized.endsWith("/")) normalized += "**";
+  const normalized = canonicalGlob(pattern);
   let source = "^";
   for (let i = 0; i < normalized.length; i++) {
     if (normalized[i] === "*" && normalized[i + 1] === "*") {
@@ -62,42 +104,122 @@ function pathGlob(pattern) {
   return new RegExp(`${source}$`);
 }
 
+function portableIgnorePath(root, file) {
+  const relative = path.relative(root, file);
+  const external =
+    path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`);
+  return {
+    path: external
+      ? `<external>/${path.basename(file)}`
+      : (relative || path.basename(file)).split(path.sep).join("/"),
+    external,
+  };
+}
+
 function readIgnoreRules(root, ignoreFile) {
-  if (ignoreFile === false) return [];
+  if (ignoreFile === false) {
+    return {
+      rules: [],
+      semanticRules: [],
+      evidence: {
+        enabled: false,
+        path: null,
+        external: false,
+        found: false,
+        rules: 0,
+        sha256: null,
+      },
+    };
+  }
   if (ignoreFile !== undefined && typeof ignoreFile !== "string") {
     throw new Error("scan.ignoreFile must be a path string or false");
   }
   const file = path.resolve(root, ignoreFile || DEFAULT_IGNORE_FILE);
+  const location = portableIgnorePath(root, file);
+  const evidence = {
+    enabled: true,
+    ...location,
+    found: false,
+    rules: 0,
+    sha256: null,
+  };
   let text;
   try {
     text = fs.readFileSync(file, "utf8");
   } catch (err) {
-    if (err.code === "ENOENT" && ignoreFile === undefined) return [];
+    if (err.code === "ENOENT" && ignoreFile === undefined) {
+      return { rules: [], semanticRules: [], evidence };
+    }
     throw new Error(`Could not read scan ignore file ${file}: ${err.message}`);
   }
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .map((line) => ({
-      include: line.startsWith("!"),
-      pattern: pathGlob(line.startsWith("!") ? line.slice(1) : line),
-    }));
+  const rules = [];
+  const semanticRules = [];
+  for (const [index, sourceLine] of text.split(/\r?\n/).entries()) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const include = line.startsWith("!");
+    const pattern = include ? line.slice(1).trim() : line;
+    if (!pattern) {
+      throw new Error(
+        `Invalid scan ignore rule at ${file}:${index + 1}: re-inclusion requires a pattern`,
+      );
+    }
+    rules.push({ include, pattern: pathGlob(pattern) });
+    semanticRules.push(`${include ? "!" : ""}${canonicalGlob(pattern)}`);
+  }
+  return {
+    rules,
+    semanticRules,
+    evidence: {
+      ...evidence,
+      found: true,
+      rules: rules.length,
+      sha256: crypto.createHash("sha256").update(text).digest("hex"),
+    },
+  };
 }
 
-function scanScope(root, opts) {
-  const include = stringPatterns(opts.include, "scan.include").map(pathGlob);
-  const exclude = stringPatterns(opts.exclude, "scan.exclude").map(pathGlob);
-  const ignoreRules = readIgnoreRules(root, opts.ignoreFile);
-  return (file) => {
-    const relative = path.relative(root, file).split(path.sep).join("/");
-    if (include.length && !include.some((pattern) => pattern.test(relative))) return false;
-    if (exclude.some((pattern) => pattern.test(relative))) return false;
-    let ignored = false;
-    for (const rule of ignoreRules) {
-      if (rule.pattern.test(relative)) ignored = !rule.include;
-    }
-    return !ignored;
+function createScanScope(root, opts = {}) {
+  root = path.resolve(root);
+  const includePatterns = stringPatterns(opts.include, "scan.include").map(normalizeGlob);
+  const excludePatterns = stringPatterns(opts.exclude, "scan.exclude").map(normalizeGlob);
+  const include = includePatterns.map(pathGlob);
+  const exclude = excludePatterns.map(pathGlob);
+  const ignore = readIgnoreRules(root, opts.ignoreFile);
+  const evidence = {
+    include: includePatterns,
+    exclude: excludePatterns,
+    includeTests: Boolean(opts.includeTests),
+    ignoreFile: ignore.evidence,
+    builtIn: {
+      excludedDirectories: [...SKIP_DIRS].sort(),
+      hiddenDirectoriesExcluded: true,
+    },
+  };
+  evidence.fingerprint = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        include: [...new Set(evidence.include.map(canonicalGlob))].sort(),
+        exclude: [...new Set(evidence.exclude.map(canonicalGlob))].sort(),
+        includeTests: evidence.includeTests,
+        ignoreRules: ignore.semanticRules,
+        builtIn: evidence.builtIn,
+      }),
+    )
+    .digest("hex");
+  return {
+    evidence,
+    matches(file) {
+      const relative = path.relative(root, file).split(path.sep).join("/");
+      if (include.length && !include.some((pattern) => pattern.test(relative))) return false;
+      if (exclude.some((pattern) => pattern.test(relative))) return false;
+      let ignored = false;
+      for (const rule of ignore.rules) {
+        if (rule.pattern.test(relative)) ignored = !rule.include;
+      }
+      return !ignored;
+    },
   };
 }
 
@@ -108,21 +230,40 @@ function scanScope(root, opts) {
  */
 function listSourceFiles(dir, opts = {}) {
   const includeTests = Boolean(opts.includeTests);
-  const inScope = scanScope(path.resolve(dir), opts);
+  const scope = createScanScope(path.resolve(dir), opts);
+  if (typeof opts.onScope === "function") opts.onScope(scope.evidence);
   const onTraversalError =
     typeof opts.onTraversalError === "function" ? opts.onTraversalError : () => {};
+  const onLimit = typeof opts.onLimit === "function" ? opts.onLimit : () => {};
+  const onTimeout = typeof opts.onTimeout === "function" ? opts.onTimeout : () => {};
+  const maxFiles = opts.maxFiles === undefined ? Number.POSITIVE_INFINITY : opts.maxFiles;
+  const deadline = Number.isFinite(opts.deadline)
+    ? opts.deadline
+    : Number.isFinite(opts.timeoutMs)
+      ? Date.now() + opts.timeoutMs
+      : Number.POSITIVE_INFINITY;
   const found = [];
   const stack = [dir];
   while (stack.length) {
     const current = stack.pop();
+    if (Date.now() >= deadline) {
+      onTimeout(current);
+      return found.sort();
+    }
     let entries;
     try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
+      entries = fs
+        .readdirSync(current, { withFileTypes: true })
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     } catch (err) {
       onTraversalError(current, err);
       continue;
     }
     for (const entry of entries) {
+      if (Date.now() >= deadline) {
+        onTimeout(current);
+        return found.sort();
+      }
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
@@ -130,11 +271,17 @@ function listSourceFiles(dir, opts = {}) {
         stack.push(full);
       } else if (SOURCE_EXT.has(path.extname(entry.name))) {
         if (!includeTests && TEST_FILE.test(entry.name)) continue;
-        if (inScope(full)) found.push(full);
+        if (scope.matches(full)) {
+          if (found.length >= maxFiles) {
+            onLimit(full);
+            return found.sort();
+          }
+          found.push(full);
+        }
       }
     }
   }
-  return found;
+  return found.sort();
 }
 
 /**
@@ -245,16 +392,24 @@ function buildGraph(files, resolve) {
   const byPath = new Map(files.map((f) => [f.filePath, f]));
   const nodes = new Map();
   const stats = { dropped: 0 };
-  const ensure = (id, kind) => {
-    if (!nodes.has(id)) nodes.set(id, { id, kind, routes: [], globalMw: [], edges: [] });
+  const ensure = (id, kind, metadata = {}) => {
+    if (!nodes.has(id)) {
+      nodes.set(id, { id, kind, routes: [], globalMw: [], edges: [], ...metadata });
+    }
     return nodes.get(id);
   };
 
   // A local identifier used as `name.get(...)` / mount host: a router/app var,
   // or a require binding that resolves to a router in another file.
   const resolveLocal = (file, name) => {
-    if (file.routers.has(name))
-      return ensure(`${file.filePath}#${name}`, file.routers.get(name).kind);
+    if (file.routers.has(name)) {
+      const router = file.routers.get(name);
+      return ensure(`${file.filePath}#${name}`, router.kind, {
+        file: file.filePath,
+        var: name,
+        line: file.lineAt(router.start),
+      });
+    }
     const b = file.requires.get(name);
     if (b) {
       const target = resolve(file.filePath, b.source);
@@ -374,7 +529,12 @@ function traverse(nodes, nodeId, prefix, inherited, partial, stack, ctx) {
 }
 
 function dedupeKey(r) {
-  return `${r.method} ${r.path} @ ${r.source.file}:${r.source.line}`;
+  return `${r.applicationId || "<unresolved>"}\0${r.method} ${r.path} @ ${r.source.file}:${r.source.line}`;
+}
+
+function applicationId(root, node) {
+  const relative = path.relative(root, node.file).split(path.sep).join("/");
+  return `app:${relative}#${node.var}`;
 }
 
 /**
@@ -418,18 +578,75 @@ function scan(rootDir, opts = {}) {
   // relative rootDir would otherwise orphan every cross-file mount.
   const root = path.resolve(rootDir);
   const diagnostics = [];
+  const limits = scanLimits(opts);
+  const started = Date.now();
   let failed = 0;
+  let skipped = 0;
+  let limited = false;
+  let scope;
   const filePaths = listSourceFiles(root, {
     ...opts,
+    maxFiles: limits.maxFiles,
+    deadline: started + limits.timeoutMs,
+    onScope(evidence) {
+      scope = evidence;
+    },
     onTraversalError(current, err) {
       failed++;
       diagnostics.push(
         `scan: could not read directory ${current}: ${err && err.message ? err.message : String(err)}`,
       );
     },
+    onLimit(file) {
+      limited = true;
+      skipped++;
+      diagnostics.push(
+        `scan: stopped source discovery at scan.maxFiles (${limits.maxFiles}); first omitted file: ${file}`,
+      );
+    },
+    onTimeout(current) {
+      limited = true;
+      skipped++;
+      diagnostics.push(
+        `scan: stopped source discovery at scan.timeoutMs (${limits.timeoutMs}ms) while reading ${current}`,
+      );
+    },
   });
   const files = [];
-  for (const file of filePaths) {
+  let totalBytes = 0;
+  for (let index = 0; index < filePaths.length; index++) {
+    const file = filePaths[index];
+    if (Date.now() - started > limits.timeoutMs) {
+      limited = true;
+      skipped += filePaths.length - index;
+      diagnostics.push(`scan: stopped after scan.timeoutMs (${limits.timeoutMs}ms)`);
+      break;
+    }
+    let size;
+    try {
+      size = fs.statSync(file).size;
+    } catch (err) {
+      failed++;
+      diagnostics.push(`scan: could not stat source file ${file}: ${err.message}`);
+      continue;
+    }
+    if (size > limits.maxFileBytes) {
+      failed++;
+      skipped++;
+      diagnostics.push(
+        `scan: skipped ${file}: ${size} bytes exceeds scan.maxFileBytes (${limits.maxFileBytes})`,
+      );
+      continue;
+    }
+    if (totalBytes + size > limits.maxTotalBytes) {
+      limited = true;
+      skipped += filePaths.length - index;
+      diagnostics.push(
+        `scan: stopped before ${file}: analyzed source would exceed scan.maxTotalBytes (${limits.maxTotalBytes})`,
+      );
+      break;
+    }
+    totalBytes += size;
     let code;
     try {
       code = fs.readFileSync(file, "utf8");
@@ -448,18 +665,34 @@ function scan(rootDir, opts = {}) {
     discovered: filePaths.length,
     analyzed: files.length,
     failed,
-    complete: failed === 0,
+    skipped,
+    limited,
+    totalBytes,
+    complete: failed === 0 && !limited,
+    scope,
   };
-  const resolve = createResolver(loadTsconfig(root), loadImports(root));
+  const resolve = createScopedResolver(root);
   resolveImportedHandlers(files, resolve);
   const { nodes, stats } = buildGraph(files, resolve);
 
   const ctx = { out: [], visited: new Set() };
+  const applications = [];
   let appNodes = 0;
   for (const node of nodes.values()) {
     if (node.kind !== "app") continue;
     appNodes++;
-    traverse(nodes, node.id, "", [], false, new Set([node.id]), ctx);
+    const id = applicationId(root, node);
+    const appCtx = { out: [], visited: ctx.visited };
+    traverse(nodes, node.id, "", [], false, new Set([node.id]), appCtx);
+    for (const route of appCtx.out) route.applicationId = id;
+    ctx.out.push(...appCtx.out);
+    applications.push({
+      id,
+      name: `${path.relative(root, node.file).split(path.sep).join("/")}#${node.var}`,
+      source: { file: node.file, line: node.line },
+      routeCount: appCtx.out.length,
+      globalMiddleware: node.globalMw.map((entry) => entry.mw),
+    });
   }
   const reachable = ctx.out.length;
   // Routers never reached from an app: emit with unknown mount prefix so an
@@ -490,6 +723,9 @@ function scan(rootDir, opts = {}) {
 
   const seen = new Set();
   const routes = out.filter((r) => !seen.has(dedupeKey(r)) && seen.add(dedupeKey(r)));
+  for (const route of routes) {
+    if (route.applicationId === undefined) route.applicationId = null;
+  }
   const globalMiddleware = [];
   for (const node of nodes.values())
     if (node.kind === "app") globalMiddleware.push(...node.globalMw.map((e) => e.mw));
@@ -501,7 +737,7 @@ function scan(rootDir, opts = {}) {
         "Re-run with --mode hybrid --app <entry> to recover them.",
     );
   }
-  return { routes, globalMiddleware, diagnostics, scanCoverage };
+  return { routes, globalMiddleware, applications, diagnostics, scanCoverage };
 }
 
-module.exports = { scan, listSourceFiles, buildGraph };
+module.exports = { scan, scanLimits, createScanScope, listSourceFiles, buildGraph };

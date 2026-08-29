@@ -92,16 +92,34 @@ test("captures app-level global middleware", () => {
 
 test("reports incomplete coverage when a source file cannot be parsed", () => {
   const result = withBrokenFixture((dir) => scanRepo(dir, CONFIG));
-  assert.deepEqual(result.scanCoverage, {
+  const { scope, ...coverage } = result.scanCoverage;
+  assert.deepEqual(coverage, {
     discovered: 2,
     analyzed: 1,
     failed: 1,
+    skipped: 0,
+    limited: false,
+    totalBytes: result.scanCoverage.totalBytes,
     complete: false,
   });
+  assert.match(scope.fingerprint, /^[a-f0-9]{64}$/);
+  assert.ok(result.scanCoverage.totalBytes > 0);
   assert.ok(result.routes.some((route) => route.path === "/visible"));
   assert.ok(
     result.diagnostics.some(
       (message) => message.includes("could not parse") && message.includes("broken.js"),
     ),
   );
+});
+
+test("scan file-count and total-byte limits fail coverage closed", () => {
+  const byCount = audit({ mode: "static", src: FIXTURE, maxFiles: 1 }, CONFIG);
+  assert.equal(byCount.scanCoverage.complete, false);
+  assert.equal(byCount.scanCoverage.limited, true);
+  assert.ok(byCount.diagnostics.some((message) => message.includes("scan.maxFiles")));
+
+  const byBytes = audit({ mode: "static", src: FIXTURE, maxTotalBytes: 1024 }, CONFIG);
+  assert.equal(byBytes.scanCoverage.complete, false);
+  assert.equal(byBytes.scanCoverage.limited, true);
+  assert.ok(byBytes.diagnostics.some((message) => message.includes("scan.maxTotalBytes")));
 });

@@ -36,6 +36,8 @@ function padRight(text, width) {
 }
 
 function compareRoutes(a, b) {
+  const byApplication = (a.applicationId || "").localeCompare(b.applicationId || "");
+  if (byApplication) return byApplication;
   if (a.path === b.path) return a.method.localeCompare(b.method);
   return a.path.localeCompare(b.path);
 }
@@ -95,7 +97,16 @@ function format(report) {
   const audit = report.command === "audit";
   const sorted = report.routes.slice().sort(compareRoutes);
   const lines = header(report);
-  for (const route of sorted) lines.push(renderRoute(route, audit));
+  const applications = new Set(sorted.map((route) => route.applicationId || "unknown"));
+  let currentApplication;
+  for (const route of sorted) {
+    const application = route.applicationId || "unknown";
+    if (applications.size > 1 && application !== currentApplication) {
+      lines.push(paint(`Application: ${application}`, COLORS.bold));
+      currentApplication = application;
+    }
+    lines.push(renderRoute(route, audit));
+  }
   return lines.join("\n");
 }
 

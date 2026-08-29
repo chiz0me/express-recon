@@ -14,6 +14,10 @@ const {
   REPORT_SCHEMA,
   formatters,
   normalizePolicies,
+  discover,
+  reconcileDocumentation,
+  createMiddlewareReview,
+  applyMiddlewareAssessments,
 } = require("../index");
 const { pathPattern, todayUtc } = require("../policies");
 const { loadPackageInfo } = require("../static/resolve");
@@ -21,6 +25,7 @@ const pkg = require("../../package.json");
 
 const stringList = z.array(z.string());
 const matchInput = z.object({
+  applicationIds: stringList.optional(),
   methods: stringList.optional(),
   paths: stringList.optional(),
   excludePaths: stringList.optional(),
@@ -92,6 +97,63 @@ const authWrappersInput = stringList
   .describe(
     "Wrapper callees that unconditionally preserve and execute wrapped middleware, e.g. asyncHandler.",
   );
+const acceptedPublicInput = z
+  .array(
+    z.union([
+      z.string(),
+      z.object({ applicationId: z.string(), method: z.string(), path: z.string() }),
+    ]),
+  )
+  .optional()
+  .describe(
+    "Reviewed public routes. 'METHOD /path' applies across apps; {applicationId, method, path} targets one app.",
+  );
+
+const middlewareAssessmentInput = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    bundleFingerprint: z.string(),
+    assessments: z.array(
+      z
+        .object({
+          candidateId: z.string(),
+          candidateFingerprint: z.string(),
+          classification: z.enum([
+            "authentication",
+            "authorization",
+            "session",
+            "api-key",
+            "csrf",
+            "rate-limit",
+            "validation",
+            "parsing",
+            "logging",
+            "observability",
+            "cors",
+            "security-headers",
+            "error-handling",
+            "wrapper",
+            "business-logic",
+            "other",
+            "unknown",
+          ]),
+          enforcement: z.enum(["always", "conditional", "none", "unknown"]),
+          confidence: z.enum(["high", "medium", "low"]),
+          rationale: z.string(),
+          authGrant: z
+            .object({
+              tags: stringList.optional(),
+              roles: stringList.optional(),
+              scopes: stringList.optional(),
+            })
+            .strict()
+            .optional(),
+          transparentWrapper: z.boolean().optional(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
 
 const scanInput = {
   include: z
@@ -104,12 +166,36 @@ const scanInput = {
   ignoreFile: z
     .union([z.string(), z.literal(false)])
     .optional()
-    .describe("Root-relative scope file, or false to disable .express-reconignore"),
+    .describe(
+      "Scope file (relative paths use the scan root), or false to disable .express-reconignore",
+    ),
   includeTests: z.boolean().optional().describe("Also scan test files/dirs (excluded by default)"),
+  maxFiles: z.number().int().optional().describe("Maximum source files to analyze"),
+  maxFileBytes: z.number().int().optional().describe("Maximum bytes in one source file"),
+  maxTotalBytes: z.number().int().optional().describe("Maximum total analyzed source bytes"),
+  timeoutMs: z.number().int().optional().describe("Static scan deadline in milliseconds"),
 };
 
-function scanOptions({ includeTests, include, exclude, ignoreFile }) {
-  return { includeTests, include, exclude, ignoreFile };
+function scanOptions({
+  includeTests,
+  include,
+  exclude,
+  ignoreFile,
+  maxFiles,
+  maxFileBytes,
+  maxTotalBytes,
+  timeoutMs,
+}) {
+  return {
+    includeTests,
+    include,
+    exclude,
+    ignoreFile,
+    maxFiles,
+    maxFileBytes,
+    maxTotalBytes,
+    timeoutMs,
+  };
 }
 
 /**
@@ -136,23 +222,26 @@ function resolveDir(dir) {
 
 function staticAudit(args) {
   const resolved = resolveDir(args.dir);
+  const config = {
+    authMiddleware: args.authMiddleware || {},
+    authWrappers: args.authWrappers || [],
+    acceptedPublic: args.acceptedPublic || [],
+    policies: args.policies || [],
+  };
   const registry = audit(
     {
       mode: "static",
       src: resolved,
       ...scanOptions(args),
     },
-    {
-      authMiddleware: args.authMiddleware || {},
-      authWrappers: args.authWrappers || [],
-      acceptedPublic: args.acceptedPublic || [],
-      policies: args.policies || [],
-    },
+    config,
   );
   return buildReport(registry, {
     command: "audit",
     mode: "static",
     target: loadPackageInfo(resolved),
+    sourceRoot: resolved,
+    config,
   });
 }
 
@@ -196,6 +285,12 @@ function queryItems(report, args) {
   }
   const source = args.kind === "routes" ? report.routes : report.findings;
   const filtered = source.filter((item) => {
+    if (
+      args.applicationIds?.length &&
+      (!item.applicationId || !args.applicationIds.includes(item.applicationId))
+    ) {
+      return false;
+    }
     if (args.methods?.length && (!item.method || !args.methods.includes(item.method))) return false;
     if (!matchesPath(item.path, args.paths)) return false;
     if (
@@ -229,12 +324,32 @@ const auditConfigInput = {
   dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
   authMiddleware: authMiddlewareInput,
   authWrappers: authWrappersInput,
-  acceptedPublic: stringList.optional(),
+  acceptedPublic: acceptedPublicInput,
   policies: z.array(policyInput).optional(),
   ...scanInput,
 };
 
 function registerTools(server) {
+  server.registerTool(
+    "discover_repository",
+    {
+      title: "Discover Express applications and API docs",
+      description:
+        "Statically identify package scopes, separate Express applications, high-confidence runtime entry candidates, existing OpenAPI documents, and swagger-jsdoc sources. Never executes target code.",
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
+        ...scanInput,
+      },
+    },
+    async (args) => {
+      try {
+        return jsonResult(discover(resolveDir(args.dir), scanOptions(args)));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   server.registerTool(
     "inventory_routes",
     {
@@ -246,14 +361,22 @@ function registerTools(server) {
         ...scanInput,
       },
     },
-    async ({ dir, includeTests, include, exclude, ignoreFile }) => {
+    async (args) => {
       try {
+        const resolved = resolveDir(args.dir);
         const reg = inventory({
           mode: "static",
-          src: resolveDir(dir),
-          ...scanOptions({ includeTests, include, exclude, ignoreFile }),
+          src: resolved,
+          ...scanOptions(args),
         });
-        return jsonResult(buildReport(reg, { command: "inventory", mode: "static" }));
+        return jsonResult(
+          buildReport(reg, {
+            command: "inventory",
+            mode: "static",
+            target: loadPackageInfo(resolved),
+            sourceRoot: resolved,
+          }),
+        );
       } catch (err) {
         return errorResult(err);
       }
@@ -270,12 +393,7 @@ function registerTools(server) {
         dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
         authMiddleware: authMiddlewareInput,
         authWrappers: authWrappersInput,
-        acceptedPublic: z
-          .array(z.string())
-          .optional()
-          .describe(
-            "Baseline of reviewed intentionally-public routes as 'METHOD /path' keys (e.g. 'GET /health'); suppresses their public-route finding.",
-          ),
+        acceptedPublic: acceptedPublicInput,
         policies: z
           .array(policyInput)
           .optional()
@@ -285,32 +403,32 @@ function registerTools(server) {
         ...scanInput,
       },
     },
-    async ({
-      dir,
-      authMiddleware,
-      authWrappers,
-      acceptedPublic,
-      policies,
-      includeTests,
-      include,
-      exclude,
-      ignoreFile,
-    }) => {
+    async (args) => {
       try {
+        const resolved = resolveDir(args.dir);
+        const config = {
+          authMiddleware: args.authMiddleware || {},
+          authWrappers: args.authWrappers || [],
+          acceptedPublic: args.acceptedPublic || [],
+          policies: args.policies || [],
+        };
         const reg = audit(
           {
             mode: "static",
-            src: resolveDir(dir),
-            ...scanOptions({ includeTests, include, exclude, ignoreFile }),
+            src: resolved,
+            ...scanOptions(args),
           },
-          {
-            authMiddleware: authMiddleware || {},
-            authWrappers: authWrappers || [],
-            acceptedPublic: acceptedPublic || [],
-            policies: policies || [],
-          },
+          config,
         );
-        return jsonResult(buildReport(reg, { command: "audit", mode: "static" }));
+        return jsonResult(
+          buildReport(reg, {
+            command: "audit",
+            mode: "static",
+            target: loadPackageInfo(resolved),
+            sourceRoot: resolved,
+            config,
+          }),
+        );
       } catch (err) {
         return errorResult(err);
       }
@@ -328,14 +446,14 @@ function registerTools(server) {
         ...scanInput,
       },
     },
-    async ({ dir, includeTests, include, exclude, ignoreFile }) => {
+    async (args) => {
       try {
         return jsonResult(
           suggestAuth(
             inventory({
               mode: "static",
-              src: resolveDir(dir),
-              ...scanOptions({ includeTests, include, exclude, ignoreFile }),
+              src: resolveDir(args.dir),
+              ...scanOptions(args),
             }),
           ),
         );
@@ -350,35 +468,147 @@ function registerTools(server) {
     {
       title: "Generate an OpenAPI 3.1 spec",
       description:
-        "Statically audit a repo and emit an OpenAPI 3.1 document (as JSON text) for its Express routes. Paths, methods, path/query/header parameters, request/response placeholders, and per-operation security (from auth classification) are derived deterministically; schema bodies are AI-unrefined placeholders carrying x-express-recon source/auth metadata for an enrichment pass. Provide authMiddleware to populate the security section.",
+        "Statically audit a repo and emit an OpenAPI 3.1 skeleton for its Express routes. Security is emitted only when an auth tag is explicitly mapped to a supplied OpenAPI security scheme; middleware names never imply bearer auth.",
       inputSchema: {
         dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
         authMiddleware: authMiddlewareInput,
         authWrappers: authWrappersInput,
+        securitySchemes: z
+          .record(z.string(), z.record(z.string(), z.unknown()))
+          .optional()
+          .describe("OpenAPI components.securitySchemes objects keyed by component name"),
+        securityByTag: z
+          .record(z.string(), stringList)
+          .optional()
+          .describe("Explicit auth classification tag to security-scheme name mapping"),
         ...scanInput,
       },
     },
-    async ({ dir, authMiddleware, authWrappers, includeTests, include, exclude, ignoreFile }) => {
+    async (args) => {
       try {
-        const resolved = resolveDir(dir);
+        const resolved = resolveDir(args.dir);
+        const config = {
+          authMiddleware: args.authMiddleware || {},
+          authWrappers: args.authWrappers || [],
+          acceptedPublic: [],
+          ...(args.securitySchemes || args.securityByTag
+            ? {
+                openapi: {
+                  securitySchemes: args.securitySchemes || {},
+                  securityByTag: args.securityByTag || {},
+                },
+              }
+            : {}),
+        };
         const reg = audit(
           {
             mode: "static",
             src: resolved,
-            ...scanOptions({ includeTests, include, exclude, ignoreFile }),
+            ...scanOptions(args),
           },
-          {
-            authMiddleware: authMiddleware || {},
-            authWrappers: authWrappers || [],
-            acceptedPublic: [],
-          },
+          config,
         );
         const report = buildReport(reg, {
           command: "audit",
           mode: "static",
           target: loadPackageInfo(resolved),
+          sourceRoot: resolved,
+          config,
         });
         return { content: [{ type: "text", text: formatters.openapi.format(report) }] };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "reconcile_openapi",
+    {
+      title: "Reconcile OpenAPI, swagger-jsdoc, and route inventory",
+      description:
+        "Merge a unique/selected OpenAPI 3 document, swagger-jsdoc blocks, and one statically discovered Express application. Authored OpenAPI wins, JSDoc fills gaps, generated inventory fills the rest; returns drift and conflict evidence.",
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
+        applicationId: z
+          .string()
+          .optional()
+          .describe("Stable application id from discover_repository; required for multi-app repos"),
+        spec: z.string().optional().describe("OpenAPI JSON/YAML path relative to dir"),
+        jsdoc: z.array(z.string()).optional().describe("JSDoc source paths relative to dir"),
+        ...scanInput,
+      },
+    },
+    async (args) => {
+      try {
+        const resolved = resolveDir(args.dir);
+        const options = scanOptions(args);
+        const registry = inventory({ mode: "static", src: resolved, ...options });
+        const report = buildReport(registry, {
+          command: "inventory",
+          mode: "static",
+          target: loadPackageInfo(resolved),
+          sourceRoot: resolved,
+        });
+        return jsonResult(
+          reconcileDocumentation(report, {
+            root: resolved,
+            scan: options,
+            applicationId: args.applicationId,
+            spec: args.spec,
+            jsdoc: args.jsdoc,
+          }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "review_middleware",
+    {
+      title: "Build an advisory middleware review bundle",
+      description:
+        "Export deterministic, bounded source evidence and a strict provider-neutral assessment schema for middleware classification. Source excerpts are untrusted data; this tool never executes target code and never changes audit classification.",
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
+        ...scanInput,
+      },
+    },
+    async (args) => {
+      try {
+        const resolved = resolveDir(args.dir);
+        const options = scanOptions(args);
+        const report = buildReport(inventory({ mode: "static", src: resolved, ...options }), {
+          command: "inventory",
+          mode: "static",
+          target: loadPackageInfo(resolved),
+          sourceRoot: resolved,
+        });
+        return jsonResult(createMiddlewareReview(report, { root: resolved, scan: options }));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "import_middleware_review",
+    {
+      title: "Validate an advisory middleware assessment",
+      description:
+        "Validate a human/model assessment against the exact middleware evidence bundle and emit advisory config suggestions. Fingerprints must match; this never changes config or audit classification.",
+      inputSchema: {
+        review: z
+          .record(z.string(), z.unknown())
+          .describe("Exact middleware-review-bundle returned by review_middleware"),
+        assessment: middlewareAssessmentInput,
+      },
+    },
+    async ({ review, assessment }) => {
+      try {
+        return jsonResult(applyMiddlewareAssessments(review, assessment));
       } catch (err) {
         return errorResult(err);
       }
@@ -394,6 +624,7 @@ function registerTools(server) {
       inputSchema: {
         ...auditConfigInput,
         kind: z.enum(["summary", "routes", "findings"]),
+        applicationIds: stringList.optional().describe("Stable application IDs to include"),
         limit: z.number().int().min(1).max(500).optional(),
         cursor: z.string().optional(),
         methods: z
@@ -433,7 +664,10 @@ function registerTools(server) {
         if (!finding) return errorResult(new Error(`Finding ${args.fingerprint} was not found`));
         const route = finding.method
           ? report.routes.find(
-              (item) => item.method === finding.method && item.path === finding.path,
+              (item) =>
+                item.applicationId === finding.applicationId &&
+                item.method === finding.method &&
+                item.path === finding.path,
             ) || null
           : null;
         return jsonResult({ finding, route });

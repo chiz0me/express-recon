@@ -28,3 +28,31 @@ test("reports no gaps when every method on a path agrees", () => {
   ];
   assert.deepEqual(inconsistentPaths(routes), []);
 });
+
+test("per-verb gaps never combine identical paths from separate applications", () => {
+  const routes = [
+    {
+      applicationId: "app:public#app",
+      method: "GET",
+      path: "/health",
+      authStatus: "public",
+    },
+    {
+      applicationId: "app:admin#app",
+      method: "POST",
+      path: "/health",
+      authStatus: "proven",
+    },
+  ];
+  assert.deepEqual(inconsistentPaths(routes), []);
+
+  routes.push({
+    applicationId: "app:admin#app",
+    method: "GET",
+    path: "/health",
+    authStatus: "public",
+  });
+  const gaps = inconsistentPaths(routes);
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].applicationId, "app:admin#app");
+});

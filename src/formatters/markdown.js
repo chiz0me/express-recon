@@ -11,6 +11,8 @@ function renderRow(cells) {
 }
 
 function compareRoutes(a, b) {
+  const byApplication = (a.applicationId || "").localeCompare(b.applicationId || "");
+  if (byApplication) return byApplication;
   if (a.path === b.path) return a.method.localeCompare(b.method);
   return a.path.localeCompare(b.path);
 }
@@ -29,6 +31,7 @@ function sourceLabel(s) {
 function findingIdentity(finding) {
   return [
     `**${finding.severity}**`,
+    finding.applicationId ? `app: \`${finding.applicationId}\`` : null,
     finding.source ? sourceLabel(finding.source) : null,
     finding.fingerprint ? `\`${finding.fingerprint}\`` : null,
   ]
@@ -43,10 +46,10 @@ function pathCell(r) {
 function renderTable(routes, audit) {
   const sorted = routes.slice().sort(compareRoutes);
   const cols = audit
-    ? ["Method", "Path", "Auth", "Source", "Middlewares"]
-    : ["Method", "Path", "Source", "Middlewares"];
+    ? ["Application", "Method", "Path", "Auth", "Source", "Middlewares"]
+    : ["Application", "Method", "Path", "Source", "Middlewares"];
   const body = sorted.map((r) => {
-    const base = [r.method, pathCell(r)];
+    const base = [r.applicationId || "—", r.method, pathCell(r)];
     if (audit) base.push(r.accepted ? "public (accepted)" : r.authStatus);
     base.push(sourceLabel(r.source), mwNames(r.middlewares));
     return renderRow(base);
@@ -124,7 +127,7 @@ function auditSections(report) {
       report.policyExceptions
         .map(
           (exception) =>
-            `- **${exception.policyId}/${exception.exceptionId}** · \`${exception.method} ${exception.path}\` — expires ${exception.expires}: ${exception.reason}`,
+            `- **${exception.policyId}/${exception.exceptionId}** · app: \`${exception.applicationId || "unknown"}\` · \`${exception.method} ${exception.path}\` — expires ${exception.expires}: ${exception.reason}`,
         )
         .join("\n"),
       "",
@@ -156,7 +159,7 @@ function deltaSections(delta) {
       delta.authRegressions
         .map(
           (change) =>
-            `- \`${change.method} ${change.path}\` · ${sourceLabel(change.source)} — ${change.from} → **${change.to}**. ${change.explanation}`,
+            `- app: \`${change.applicationId || "unknown"}\` · \`${change.method} ${change.path}\` · ${sourceLabel(change.source)} — ${change.from} → **${change.to}**. ${change.explanation}`,
         )
         .join("\n"),
       "",

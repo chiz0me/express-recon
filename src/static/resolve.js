@@ -21,8 +21,9 @@ function tolerantJsonParse(text) {
  * Load tsconfig path-alias config by walking up from `rootDir`. Returns the
  * resolved `baseUrl` directory and `paths` map, or null if none is found.
  */
-function loadTsconfig(rootDir) {
-  let dir = rootDir;
+function loadTsconfig(rootDir, stopDir) {
+  let dir = path.resolve(rootDir);
+  const stop = stopDir && path.resolve(stopDir);
   for (let i = 0; i < 12; i++) {
     const file = path.join(dir, "tsconfig.json");
     if (fs.existsSync(file)) {
@@ -32,6 +33,7 @@ function loadTsconfig(rootDir) {
         return { baseUrl: path.resolve(dir, opts.baseUrl || "."), paths: opts.paths || {} };
       }
     }
+    if (stop && dir === stop) break;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -45,8 +47,9 @@ function loadTsconfig(rootDir) {
  * package scope whose imports apply. Returns `{ dir, imports }` where paths are
  * relative to `dir`, or null if none is found or it has no `imports`.
  */
-function loadImports(rootDir) {
-  let dir = rootDir;
+function loadImports(rootDir, stopDir) {
+  let dir = path.resolve(rootDir);
+  const stop = stopDir && path.resolve(stopDir);
   for (let i = 0; i < 12; i++) {
     const file = path.join(dir, "package.json");
     if (fs.existsSync(file)) {
@@ -54,6 +57,7 @@ function loadImports(rootDir) {
       const imports = parsed && parsed.imports;
       return imports && typeof imports === "object" ? { dir, imports } : null;
     }
+    if (stop && dir === stop) break;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -153,6 +157,33 @@ function createResolver(tsconfig, pkgImports) {
   };
 }
 
+function withinRoot(root, file) {
+  const relative = path.relative(root, file);
+  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== "..");
+}
+
+/**
+ * Resolve each importing file against its own nearest tsconfig and package
+ * `imports` scope. A repository-wide resolver incorrectly applies the root
+ * package's aliases to every workspace in a monorepo. Resolved files are kept
+ * inside the requested scan root so aliases cannot silently pull unrelated
+ * source from a parent checkout into an offline/remote inventory.
+ */
+function createScopedResolver(rootDir) {
+  const root = path.resolve(rootDir);
+  const cache = new Map();
+  return (fromFile, source) => {
+    const dir = path.dirname(fromFile);
+    let resolve = cache.get(dir);
+    if (!resolve) {
+      resolve = createResolver(loadTsconfig(dir, root), loadImports(dir, root));
+      cache.set(dir, resolve);
+    }
+    const hit = resolve(fromFile, source);
+    return hit && withinRoot(root, hit) ? hit : null;
+  };
+}
+
 /**
  * Read `{ name, version }` from the nearest package.json (walking up from
  * `rootDir`), for the OpenAPI `info` block. Returns null if none is found.
@@ -176,4 +207,11 @@ function loadPackageInfo(rootDir) {
   return null;
 }
 
-module.exports = { loadTsconfig, loadImports, loadPackageInfo, createResolver, EXTENSIONS };
+module.exports = {
+  loadTsconfig,
+  loadImports,
+  loadPackageInfo,
+  createResolver,
+  createScopedResolver,
+  EXTENSIONS,
+};
