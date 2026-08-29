@@ -313,6 +313,47 @@ every repository and turns each embedded report into an audit when applicable.
 Use this only for genuinely shared middleware conventions; names alone remain
 insufficient evidence.
 
+### `render`
+
+Render existing machine-readable artifacts as a browsable offline HTML site:
+
+```bash
+express-recon render --input .express-recon/acme \
+  --out .express-recon/acme-site
+```
+
+Both options are required. `--input` accepts a direct `routes.json`,
+`repo-scan.json`, or `organization-inventory.json` path, or a directory containing
+one. Directory detection prefers the organization aggregate, then a repository
+scan, then a route report. `render` never scans source, acquires a repository,
+executes target code, contacts the network, or invokes a model.
+
+The output contains:
+
+- `index.html`, with route/repository search and status filtering;
+- `repositories/<name>.html` for every organization entry with an available
+  detailed scan;
+- local `assets/report.css` and `assets/report.js` with no CDN dependency; and
+- `render-manifest.json`, recording the source kind, generated pages, and
+  non-fatal artifact warnings.
+
+The output directory must be empty or contain a prior express-recon HTML site.
+On a rerender, the prior manifest is validated before only its generated files
+are replaced; stale repository pages are removed and unrelated files are
+preserved. A nonempty unowned directory, unsafe generated symlink, or tampered
+manifest path fails closed instead of overwriting or deleting unknown content.
+
+Organization artifact references are resolved inside the input directory and
+real-path checked so traversal and escaping symlinks are not followed. Report
+values are treated as untrusted text and HTML-escaped. Generated pages use a
+restrictive content security policy and do not fetch JSON at viewing time, so a
+site copied into a CI artifact remains usable through `file://`. Missing, unsafe,
+or damaged per-repository artifacts produce an aggregate warning rather than
+hiding the remaining organization evidence. Root input errors exit `1`.
+
+HTML is a human review projection, not a new evidence schema. Automation and AI
+agents should continue consuming the original JSON contracts.
+
 ### `schema`
 
 Print the report JSON Schema to stdout:
@@ -334,6 +375,7 @@ With `--out`, directories are created as needed.
 | `import-review` | `middleware-suggestions.json` |
 | `scan-repo` | `repo-scan.json`, `discovery.json`, `routes.json`; OpenAPI/docs report when mergeable |
 | `scan-org` | `organization-inventory.json`; per-repo `repo-scan.json`, discovery, routes, and mergeable docs under `repositories/<name>/`; `organization-checkpoint.json` while incomplete |
+| `render` | `index.html`, local CSS/JavaScript, `render-manifest.json`, and organization repository pages |
 | `suggest-auth` / `schema` | JSON on stdout |
 
 `pretty` is terminal-oriented and is not written as an artifact. Supported
@@ -677,6 +719,7 @@ Primary exports:
 - `scanRepository(source, options)` and `acquireRepository(source, options)`
 - `scanOrganization(organization, options)` and
   `listOrganizationRepositories(organization, options)`
+- `renderHtmlSite(inputPath, outputPath)`
 - `executeRuntime(appPath, boot)` and `instrument(express)`
 - `evaluatePolicies`, `normalizePolicies`, `loadConfig`, and `validateConfig`
 - `REPORT_SCHEMA`, `MIDDLEWARE_ASSESSMENT_SCHEMA`, and `formatters`
@@ -728,6 +771,11 @@ library stream.
 The CLI owns checkpoint persistence, compatibility fingerprints, and artifact
 integrity validation; library callers supplying `resumeEntries` must provide
 equivalent validation themselves.
+
+`renderHtmlSite()` is synchronous and returns the render manifest plus the
+absolute `index.html` path. It accepts the same file or directory inputs as the
+CLI `render` command and writes a deterministic, offline site without changing
+the input artifacts.
 
 ## Related guides
 

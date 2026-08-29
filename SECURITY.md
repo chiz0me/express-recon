@@ -72,6 +72,17 @@ own in-scope files. A centrally governed organization audit should pass
 scope fingerprints provide review evidence but do not replace that policy
 choice.
 
+`render` treats report fields and repository metadata as untrusted text. It
+HTML-escapes values, uses fixed local CSS/JavaScript, adds a restrictive content
+security policy, and performs no browser-time fetches. Organization artifact
+references must remain within the input folder after both lexical and real-path
+resolution, so traversal and escaping symlinks are not followed. The resulting
+HTML still contains the same potentially sensitive repository names, routes,
+source locations, findings, and documentation evidence as its input. Protect
+and retain it like the original JSON; rendering is not redaction. Rerendering
+uses a validated prior manifest to replace only renderer-owned files and refuses
+nonempty, unowned output directories or unsafe generated symlinks.
+
 The CLI's runtime and hybrid modes import the target application's entry point
 inside a disposable child process. The parent enforces a timeout and output
 limit, and the worker contains target `process.exit()` calls, crashes, leaked

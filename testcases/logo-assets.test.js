@@ -67,7 +67,8 @@ test("brand SVGs use the fixed red accent", () => {
   ];
   for (const file of files) {
     const svg = fs.readFileSync(file, "utf8");
-    assert.match(svg, /#E24B4A/i, `${path.basename(file)} lacks the brand accent`);
+    assert.match(svg, /#D13F3F/i, `${path.basename(file)} lacks the brand accent`);
+    assert.doesNotMatch(svg, /#E24B4A/i, `${path.basename(file)} retains the pale red accent`);
     assert.doesNotMatch(svg, /#EF9F27/i, `${path.basename(file)} retains the old amber accent`);
   }
 });

@@ -43,3 +43,61 @@ jobs:
       - run: npm pack --dry-run
 
       - run: npm publish --provenance --access public
+
+  sync-marketplace:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: chiz0me/claude-plugins
+          ssh-key: ${{ secrets.MARKETPLACE_SYNC_KEY }}
+          path: marketplace
+          # Required for the later push; this deploy key is scoped only to claude-plugins.
+          persist-credentials: true
+
+      - name: Bump express-recon version in marketplace.json
+        id: update
+        working-directory: marketplace
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = '.claude-plugin/marketplace.json';
+          const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const target = data.plugins.find((plugin) => plugin.name === 'express-recon');
+          if (!target) {
+            console.error('express-recon is not listed in the Claude plugin marketplace');
+            process.exit(1);
+          }
+
+          const desired = process.env.RELEASE_TAG.replace(/^v/, '');
+          if (target.version === desired) {
+            console.log(`marketplace already at ${desired}; no-op`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=false\n');
+            process.exit(0);
+          }
+
+          target.version = desired;
+          fs.writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
+          console.log(`bumped express-recon to ${desired}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=true\n');
+          NODE
+
+      - name: Commit and push
+        if: steps.update.outputs.changed == 'true'
+        working-directory: marketplace
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/marketplace.json
+          git commit -m "sync: bump express-recon to ${RELEASE_TAG}"
+          git push "git@github.com:chiz0me/claude-plugins.git" HEAD:main

@@ -20,6 +20,7 @@ const {
 } = require("./review");
 const { acquireRepository, scanRepository } = require("./repository");
 const { listOrganizationRepositories, scanOrganization } = require("./organization");
+const { renderHtmlSite } = require("./html");
 
 /**
  * express-recon — an inventory + audit harness for Express 4/5 route surfaces,
@@ -40,6 +41,7 @@ const { listOrganizationRepositories, scanOrganization } = require("./organizati
  *   - `createMiddlewareReview()`    bounded provider-neutral review evidence
  *   - `scanRepository()`            acquire one Git ref and statically scan it
  *   - `scanOrganization()`          enumerate API-visible repos and scan a bounded pool
+ *   - `renderHtmlSite()`             render existing reports as a static offline site
  *
  * `opts` is `{ mode: "static"|"runtime"|"hybrid", src?, app? }`.
  */
@@ -55,6 +57,7 @@ module.exports = {
   scanRepository,
   listOrganizationRepositories,
   scanOrganization,
+  renderHtmlSite,
   audit,
   suggestAuth,
   buildReport,

@@ -67,6 +67,7 @@ test("CLI help exposes onboarding, trust terminology, and exit codes", () => {
     "docs",
     "review-middleware",
     "import-review",
+    "render",
     "scan-org",
     "scan-repo",
     "schema",

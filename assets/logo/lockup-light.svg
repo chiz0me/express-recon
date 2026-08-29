@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="300" height="64" viewBox="0 0 300 64" role="img" aria-label="express-recon">
   <g>
-    <path d="M18 50 L44.5 16" stroke-width="6.5" stroke-linecap="round" stroke="#1F2328" fill="none"/>
-    <path d="M27 38 L14 38" stroke-width="4.5" stroke-linecap="round" stroke="#1F2328" fill="none"/>
-    <circle cx="10.5" cy="38" r="3.5" fill="#1F2328"/>
-    <path d="M37.5 25 L49 25" stroke-width="4.5" stroke-linecap="round" stroke="#1F2328" fill="none"/>
-    <circle cx="52.5" cy="25" r="3.5" fill="#1F2328"/>
-    <circle cx="48" cy="11" r="5.5" fill="none" stroke="#E24B4A" stroke-width="4"/>
+    <path d="M18 50 L44.5 16" stroke-width="6.5" stroke-linecap="round" stroke="#111827" fill="none"/>
+    <path d="M27 38 L14 38" stroke-width="4.5" stroke-linecap="round" stroke="#111827" fill="none"/>
+    <circle cx="10.5" cy="38" r="3.5" fill="#111827"/>
+    <path d="M37.5 25 L49 25" stroke-width="4.5" stroke-linecap="round" stroke="#111827" fill="none"/>
+    <circle cx="52.5" cy="25" r="3.5" fill="#111827"/>
+    <circle cx="48" cy="11" r="5.5" fill="none" stroke="#D13F3F" stroke-width="4"/>
   </g>
-  <text x="76" y="42" fill="#1F2328" font-family="ui-sans-serif, -apple-system, &quot;Segoe UI&quot;, Roboto, &quot;Helvetica Neue&quot;, Arial, sans-serif" font-size="27px" letter-spacing="-0.4px">
-    <tspan font-weight="400" fill="#6A737D">express-</tspan><tspan font-weight="500">recon</tspan>
+  <text x="76" y="42" fill="#111827" font-family="ui-sans-serif, -apple-system, &quot;Segoe UI&quot;, Roboto, &quot;Helvetica Neue&quot;, Arial, sans-serif" font-size="27px" letter-spacing="-0.4px">
+    <tspan font-weight="400" fill="#3F4A59">express-</tspan><tspan font-weight="500">recon</tspan>
   </text>
 </svg>

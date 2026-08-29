@@ -116,6 +116,7 @@ operational failure.
 | Validate a review response | `import-review` | No | No | advisory config suggestions |
 | Scan one Git ref | `scan-repo` | No | Yes, for Git fetch | provenance plus static results |
 | Inventory a GitHub organization | `scan-org` | No | Yes, API plus Git fetches | per-repo reports plus aggregate index |
+| Browse saved reports | `render` | No | No | offline HTML site |
 | Recover dynamic wiring | runtime/hybrid `inventory` or `audit` | **Yes** | Target code may use it | runtime observations |
 
 The repository is the acquisition and discovery boundary. Each detected
@@ -303,6 +304,32 @@ a protected cache or artifact if a later run must resume it. Keep private-repo
 inventories out of pull-request caches, and use a low concurrency first so the
 runner's disk/network envelope is measured before increasing it.
 
+### Browse saved reports as HTML
+
+Generate a static site from an existing output directory without rescanning:
+
+```bash
+npx --no-install express-recon render \
+  --input .express-recon/acme \
+  --out .express-recon/acme-site
+```
+
+Open `.express-recon/acme-site/index.html` in a browser. `render` auto-detects
+`organization-inventory.json`, `repo-scan.json`, or `routes.json` in that order;
+you can also pass one of those files directly. An organization becomes a compact
+overview plus one page per available repository report, so the renderer reads
+and releases detailed artifacts individually instead of combining every route
+into one enormous page.
+
+The generated site contains local CSS and JavaScript only, works from `file://`,
+performs no network requests, executes no target code, and makes no model calls.
+Repository-controlled strings are HTML-escaped, referenced artifacts cannot
+escape the input folder, and a restrictive content security policy is included.
+`render-manifest.json` lists the generated pages and any detailed artifacts that
+could not be rendered. Treat the original JSON as the machine-readable evidence
+contract; HTML is a human review surface suitable for a CI artifact or static
+site host.
+
 ### Pull-request gates
 
 ```bash
@@ -401,6 +428,7 @@ const {
   applyMiddlewareAssessments,
   scanRepository,
   scanOrganization,
+  renderHtmlSite,
   executeRuntime,
   formatters,
 } = require("express-recon");
@@ -422,6 +450,8 @@ async function observeOrganization() {
     },
   });
 }
+
+renderHtmlSite(".express-recon/acme", ".express-recon/acme-site");
 ```
 
 Passing an already loaded Express app to `inventory()`/`audit()` executes it in

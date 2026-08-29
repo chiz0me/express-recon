@@ -176,6 +176,22 @@ findings from separate repos using app ID alone. Configuration supplied to an
 organization scan is shared across every repo, so restate that assumption when
 making audit claims.
 
+#### Generate HTML only for human handoff
+
+When the user wants a browsable result, an agent may render the completed output
+folder without rerunning the scan:
+
+```bash
+EXPRESS_RECON_CONTEXT=agent express-recon render \
+  --input <outDir> --out <htmlDir>
+```
+
+Rendering is deterministic, offline, and model-free. Return the generated
+`index.html` path to the user. Do not read the generated pages back into model
+context: use the smaller JSON aggregate and selectively chosen repository JSON
+for analysis. HTML generation itself consumes no inference tokens; opening or
+returning its contents to a model does.
+
 ### Audit with known guards
 
 Pass only confirmed middleware names to `audit_routes`. Dotted callees such as

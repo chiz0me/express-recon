@@ -17,6 +17,7 @@ const {
   applyMiddlewareAssessments,
   scanRepository,
   scanOrganization,
+  renderHtmlSite,
 } = require("./index");
 const { executeRuntime } = require("./runtime/execute");
 const { loadPackageInfo } = require("./static/resolve");
@@ -65,6 +66,8 @@ Commands:
                 reconcile documentation when possible. Never executes target code.
   scan-org      Enumerate API-visible repositories in one GitHub organization,
                 scan them statically, and build an aggregate Express inventory.
+  render        Generate a browsable offline HTML site from an existing report
+                JSON file or express-recon output directory. Does not rescan.
   schema        Print the JSON Schema of the report contract and exit.
 
 Options:
@@ -83,6 +86,8 @@ Options:
                         auto-detected when omitted).
   --review <path>       middleware-review.json input for import-review.
   --assessment <path>   JSON/YAML assessment input for import-review.
+  --input <path>        routes.json, repo-scan.json, organization-inventory.json,
+                        or a directory containing one of those files (render only).
   --repo <url|owner/repo|path>
                         repository for scan-repo (HTTPS/GitHub shorthand/local).
   --org <name>          GitHub organization for scan-org. GH_TOKEN or GITHUB_TOKEN
@@ -102,8 +107,8 @@ Options:
                         discovery/review/repository commands.
                         openapi emits an OpenAPI 3.1 document (openapi.json); use
                         audit plus an explicit security mapping to add security.
-  --out <dir>           write command-specific JSON/Markdown/OpenAPI artifacts
-                        into <dir> (else stdout)
+  --out <dir>           write command-specific artifacts into <dir> (else stdout).
+                        Required by render and agent-initiated organization scans.
   --baseline <path>     compare with a prior JSON report; adds delta/new findings
   --fail-on <statuses>  audit: exit 2 if any route matches, e.g. public or
                         public,unknown, policy / policy:<id>, new, regression,
@@ -158,6 +163,7 @@ const COMMANDS = new Set([
   "import-review",
   "inventory",
   "review-middleware",
+  "render",
   "scan-org",
   "scan-repo",
   "schema",
@@ -217,6 +223,7 @@ function parseArgs(argv) {
     else if (arg === "--jsdoc") (out.jsdoc ||= []).push(takeValue(arg, i++));
     else if (arg === "--review") out.review = takeValue(arg, i++);
     else if (arg === "--assessment") out.assessment = takeValue(arg, i++);
+    else if (arg === "--input") out.input = takeValue(arg, i++);
     else if (arg === "--repo") out.repo = takeValue(arg, i++);
     else if (arg === "--org") out.org = takeValue(arg, i++);
     else if (arg === "--ref") out.ref = takeValue(arg, i++);
@@ -414,6 +421,14 @@ function validateArgs(args) {
     }
     if (args.provided.has("--format") && args.format !== "json") {
       throw new Error("import-review supports only --format json");
+    }
+  }
+  if (args.command === "render") {
+    const supported = new Set(["--input", "--out"]);
+    const unsupported = [...args.provided].filter((option) => !supported.has(option));
+    if (unsupported.length) throw new Error(`render does not accept ${unsupported.join(", ")}`);
+    if (!args.input || !args.out) {
+      throw new Error("render requires --input <report-or-dir> and --out <dir>");
     }
   }
   if (args.command === "scan-repo") {
@@ -623,6 +638,24 @@ function writeReport(report, args) {
   if (formats.has("pretty") && (!outDir || formats.size === 1)) {
     process.stdout.write(formatters.pretty.format(report) + "\n");
   }
+}
+
+function runRender(args) {
+  const result = renderHtmlSite(resolvePath(args.input), resolvePath(args.out));
+  process.stdout.write(
+    JSON.stringify(
+      {
+        kind: "html-render-result",
+        sourceKind: result.source.kind,
+        output: result.output,
+        pages: result.pages.length,
+        warnings: result.warnings.length,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  return 0;
 }
 
 function failOnExit(report, failOn) {
@@ -1060,6 +1093,7 @@ async function main(argv) {
   if (args.command === "docs") return runDocs(args);
   if (args.command === "review-middleware") return runMiddlewareReview(args);
   if (args.command === "import-review") return runImportReview(args);
+  if (args.command === "render") return runRender(args);
   if (args.command === "scan-org") return runScanOrganization(args);
   if (args.command === "scan-repo") return runScanRepository(args);
   if (args.command === "suggest-auth") return runSuggestAuth(args);

@@ -94,3 +94,29 @@ test("CI covers docs, package contents, releases, and dependency update automati
     "npm",
   ]);
 });
+
+test("a successful npm publish synchronizes the Claude plugin marketplace safely", () => {
+  const text = fs.readFileSync(path.join(ROOT, ".github", "workflows", "publish.yml"), "utf8");
+  const workflow = YAML.parse(text);
+  const sync = workflow.jobs["sync-marketplace"];
+  assert.equal(sync.needs, "publish");
+  assert.equal(sync["timeout-minutes"], 10);
+  assert.deepEqual(sync.permissions, { contents: "read" });
+
+  const checkout = sync.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+  assert.equal(checkout.with.repository, "chiz0me/claude-plugins");
+  assert.equal(checkout.with["ssh-key"], "${{ secrets.MARKETPLACE_SYNC_KEY }}");
+  assert.equal(checkout.with["persist-credentials"], true);
+  assert.equal(checkout.with.token, undefined);
+
+  const update = sync.steps.find((step) => step.id === "update");
+  assert.match(update.run, /plugin\.name === 'express-recon'/);
+  assert.match(update.run, /target\.version === desired/);
+  assert.match(update.run, /changed=false/);
+
+  const push = sync.steps.find((step) => step.name === "Commit and push");
+  assert.equal(push.if, "steps.update.outputs.changed == 'true'");
+  assert.match(push.run, /git add \.claude-plugin\/marketplace\.json/);
+  assert.match(push.run, /git@github\.com:chiz0me\/claude-plugins\.git/);
+  assert.doesNotMatch(text, /MARKETPLACE_SYNC_TOKEN/);
+});
