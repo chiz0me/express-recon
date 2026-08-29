@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const Ajv2020 = require("ajv/dist/2020");
 const addFormats = require("ajv-formats");
+const { version: PACKAGE_VERSION } = require("../package.json");
 
 const {
   inventory,
@@ -28,7 +29,7 @@ test("audit report carries a versioned contract with summary + findings", () => 
   });
   assert.equal(report.schemaVersion, "2.0");
   assert.equal(report.tool, "express-recon");
-  assert.equal(report.toolVersion, "0.5.0");
+  assert.equal(report.toolVersion, PACKAGE_VERSION);
   assert.ok(report.applications.length > 0);
   assert.equal(report.summary.routes, report.routes.length);
   assert.equal(report.scanCoverage.complete, true);
