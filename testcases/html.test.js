@@ -254,13 +254,14 @@ test("organization rendering writes per-repository pages and contains unsafe art
         scope: { executionMode: "static", executedTargetCode: false },
         coverage: { complete: false, incompleteRepositories: ["acme/unsafe"] },
         summary: {
-          repositoriesDiscovered: 3,
-          repositoriesScanned: 2,
+          repositoriesDiscovered: 5,
+          repositoriesScanned: 4,
           expressRepositories: 2,
+          nonExpressRepositories: 1,
           applications: 2,
           routes: 4,
           failedRepositories: 0,
-          inconclusiveRepositories: 1,
+          inconclusiveRepositories: 2,
         },
         repositories: [
           {
@@ -284,6 +285,22 @@ test("organization rendering writes per-repository pages and contains unsafe art
             scan: repositoryScan({ repository: { source: "acme/payments-copy" } }),
           },
           {
+            repository: { name: "no-express", fullName: "acme/no-express" },
+            status: "not-express",
+            scanned: true,
+            coverageComplete: true,
+            express: { applicationCount: 0, routeCount: 0, documentation: {} },
+            scan: repositoryScan({ repository: { source: "must-not-be-rendered" } }),
+          },
+          {
+            repository: { name: "partial", fullName: "acme/partial" },
+            status: "inconclusive",
+            scanned: true,
+            coverageComplete: false,
+            express: { applicationCount: 0, routeCount: 0, documentation: {} },
+            scan: repositoryScan({ repository: { source: "acme/partial" } }),
+          },
+          {
             repository: { name: "unsafe", fullName: "acme/unsafe" },
             status: "inconclusive",
             scanned: true,
@@ -301,7 +318,7 @@ test("organization rendering writes per-repository pages and contains unsafe art
       );
 
       assert.equal(result.source.kind, "organization");
-      assert.equal(manifest.pages.length, 3);
+      assert.equal(manifest.pages.length, 4);
       assert.equal(manifest.warnings.length, 1);
       assert.match(manifest.warnings[0], /escapes the input folder/);
       assert.match(html, /GitHub organization inventory/);
@@ -309,6 +326,11 @@ test("organization rendering writes per-repository pages and contains unsafe art
       assert.match(html, /Some detailed reports could not be rendered/);
       assert.match(html, /repositories\/payments\.html/);
       assert.match(html, /repositories\/payments-2\.html/);
+      assert.match(html, /repositories\/partial\.html/);
+      assert.match(html, /View diagnostics/);
+      assert.match(html, /No Express report/);
+      assert.doesNotMatch(html, /repositories\/no-express\.html/);
+      assert.doesNotMatch(html, /must-not-be-rendered/);
       assert.match(html, /acme&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
       assert.doesNotMatch(html, /must-not-be-read/);
       assert.ok(fs.existsSync(path.join(root, "site", "repositories", "payments.html")));
@@ -377,18 +399,22 @@ test("organization rendering rejects absolute, missing, wrong-kind, and escaping
         repositories: [
           {
             repository: { fullName: "acme/absolute" },
+            status: "express",
             artifacts: { repositoryScan: outside },
           },
           {
             repository: { fullName: "acme/missing" },
+            status: "express",
             artifacts: { repositoryScan: "repositories/missing/repo-scan.json" },
           },
           {
             repository: { fullName: "acme/wrong" },
+            status: "express",
             artifacts: { repositoryScan: "repositories/wrong/routes.json" },
           },
           {
             repository: { fullName: "acme/linked" },
+            status: "inconclusive",
             artifacts: { repositoryScan: "repositories/linked/repo-scan.json" },
           },
         ],
@@ -433,10 +459,14 @@ test("rerendering removes only stale files owned by the previous manifest", () =
     assert.ok(fs.existsSync(stale));
     fs.writeFileSync(path.join(output, "keep.txt"), "not renderer-owned");
 
-    writeJson(organizationFile, organization([entry("one")]));
+    writeJson(
+      organizationFile,
+      organization([entry("one"), { ...entry("two"), status: "not-express" }]),
+    );
     const result = renderHtmlSite(root, output);
     assert.equal(result.pages.length, 2);
     assert.equal(fs.existsSync(stale), false);
+    assert.match(fs.readFileSync(result.output, "utf8"), /No Express report/);
     assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "not renderer-owned");
   });
 });

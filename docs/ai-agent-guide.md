@@ -190,7 +190,10 @@ Rendering is deterministic, offline, and model-free. Return the generated
 `index.html` path to the user. Do not read the generated pages back into model
 context: use the smaller JSON aggregate and selectively chosen repository JSON
 for analysis. HTML generation itself consumes no inference tokens; opening or
-returning its contents to a model does.
+returning its contents to a model does. Organization sites generate detail
+pages only for confirmed Express repositories and diagnostics pages for
+inconclusive scans; definite non-Express and unscanned entries remain in the
+index without separate pages.
 
 ### Audit with known guards
 

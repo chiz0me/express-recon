@@ -317,9 +317,11 @@ npx --no-install express-recon render \
 Open `.express-recon/acme-site/index.html` in a browser. `render` auto-detects
 `organization-inventory.json`, `repo-scan.json`, or `routes.json` in that order;
 you can also pass one of those files directly. An organization becomes a compact
-overview plus one page per available repository report, so the renderer reads
-and releases detailed artifacts individually instead of combining every route
-into one enormous page.
+overview plus one page per confirmed Express repository and one diagnostics page
+per inconclusive scan. Definite non-Express, skipped, empty, and failed entries
+remain visible in the overview without generating detail pages. The renderer
+reads and releases selected artifacts individually instead of combining every
+route into one enormous page.
 
 The generated site contains local CSS and JavaScript only, works from `file://`,
 performs no network requests, executes no target code, and makes no model calls.

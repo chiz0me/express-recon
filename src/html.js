@@ -472,6 +472,18 @@ function slug(value, fallback) {
   return normalized || fallback;
 }
 
+function organizationDetailLabel(status) {
+  if (status === "express") return "View report";
+  if (status === "inconclusive") return "View diagnostics";
+  return "";
+}
+
+function organizationNoDetailLabel(status) {
+  if (status === "not-express") return "No Express report";
+  if (status === "inconclusive") return "No diagnostic artifact";
+  return "No detailed report";
+}
+
 function organizationRows(report, detailPages) {
   return list(report.repositories)
     .map((value, index) => {
@@ -486,9 +498,10 @@ function organizationRows(report, detailPages) {
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
+      const detailLabel = organizationDetailLabel(entry.status);
       const detail = detailPages[index]
-        ? `<a href="${escapeHtml(detailPages[index])}">View report</a>`
-        : `<span class="subtle">No detailed artifact</span>`;
+        ? `<a href="${escapeHtml(detailPages[index])}">${detailLabel}</a>`
+        : `<span class="subtle">${organizationNoDetailLabel(entry.status)}</span>`;
       return `<tr data-search="${escapeHtml(search)}" data-status="${escapeHtml(status)}">
         <td><div class="stack"><strong>${escapeHtml(name)}</strong>${entry.resumed ? `<span>${badge("resumed", "info")}</span>` : ""}${entry.error ? `<span class="subtle">${escapeHtml(entry.error)}</span>` : ""}</div></td>
         <td>${badge(status)}</td>
@@ -684,6 +697,7 @@ function renderOrganization(input, output, warnings, pages) {
   const used = new Set();
   for (const [index, value] of list(input.value.repositories).entries()) {
     const entry = object(value);
+    if (!organizationDetailLabel(entry.status)) continue;
     let scan;
     try {
       scan = referencedRepositoryScan(input.root, entry);

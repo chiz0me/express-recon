@@ -331,8 +331,9 @@ executes target code, contacts the network, or invokes a model.
 The output contains:
 
 - `index.html`, with route/repository search and status filtering;
-- `repositories/<name>.html` for every organization entry with an available
-  detailed scan;
+- `repositories/<name>.html` for confirmed Express repositories and
+  inconclusive scans with an available detailed artifact; definite non-Express,
+  skipped, empty, and failed entries remain index-only;
 - local `assets/report.css` and `assets/report.js` with no CDN dependency; and
 - `render-manifest.json`, recording the source kind, generated pages, and
   non-fatal artifact warnings.
