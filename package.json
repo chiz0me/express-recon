@@ -1,6 +1,6 @@
 {
   "name": "express-recon",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Offline-first Express 4/5 route and GitHub organization inventory, configuration-relative auth audit, OpenAPI reconciliation, and middleware review.",
   "keywords": [
     "audit",
