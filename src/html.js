@@ -355,7 +355,7 @@ function routeReportPage(report, title, extras = {}) {
 
 function repositoryTitle(scan, fallback) {
   const source = object(scan.repository).source;
-  const target = object(scan.inventory).target;
+  const target = object(object(scan.inventory).target);
   return display(source, display(target.name, fallback));
 }
 

@@ -213,6 +213,31 @@ test("repository folders render discovery, provenance, findings, routes, and doc
   });
 });
 
+test("repository reports without package target metadata use repository identity", () => {
+  temporary("html-repository-without-target", (root) => {
+    const scan = repositoryScan({
+      repository: {
+        ...repositoryScan().repository,
+        source: "https://github.com/acme/no-package",
+      },
+      inventory: routeReport({
+        target: null,
+        applications: [],
+        routes: [],
+        findings: [],
+        summary: { routes: 0 },
+      }),
+    });
+    writeJson(path.join(root, "repo-scan.json"), scan);
+
+    const result = renderHtmlSite(root, path.join(root, "site"));
+    const html = fs.readFileSync(result.output, "utf8");
+    assert.equal(result.pages.length, 1);
+    assert.match(html, /https:\/\/github\.com\/acme\/no-package/);
+    assert.match(html, /No routes were recorded/);
+  });
+});
+
 test("organization rendering writes per-repository pages and contains unsafe artifact paths", () => {
   temporary("html-organization", (root) => {
     const artifact = path.join(root, "repositories", "payments", "repo-scan.json");
