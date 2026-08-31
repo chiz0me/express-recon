@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFileSync, spawnSync } = require("node:child_process");
+const { PassThrough } = require("node:stream");
 
 const {
   listOrganizationRepositories,
@@ -15,7 +16,9 @@ const {
 } = require("../src/organization");
 const { githubGitConfig, normalizeRepository } = require("../src/repository");
 const {
+  normalizeOrganizationOutputChoice,
   resolveExecutionContext,
+  resolveOrganizationOutputArgs,
   resolveOrganizationProgressMode,
   runScanOrganization,
 } = require("../src/cli");
@@ -221,6 +224,215 @@ test("agent execution context requires streamed output and stays quiet by defaul
     assert.equal(scans, 1);
     assert.equal(stderr, "");
     assert.ok(fs.existsSync(path.join(output, "organization-inventory.json")));
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test("scan-org output conflicts fail closed in automation and preserve every file", async () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-conflict-"));
+  const existing = path.join(output, "keep.txt");
+  fs.writeFileSync(existing, "keep me");
+  let scans = 0;
+  try {
+    await assert.rejects(
+      runScanOrganization(
+        { org: "acme", out: output, progress: "auto", provided: new Set() },
+        {
+          environment: { EXPRESS_RECON_CONTEXT: "agent" },
+          async scanOrganization() {
+            scans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /--overwrite.*No files were changed/,
+    );
+    assert.equal(scans, 0);
+    assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+    assert.equal(fs.existsSync(path.join(output, "organization-checkpoint.json")), false);
+
+    await assert.rejects(
+      runScanOrganization(
+        {
+          org: "acme",
+          out: output,
+          resume: true,
+          progress: "auto",
+          provided: new Set(["--resume"]),
+        },
+        {
+          environment: { EXPRESS_RECON_CONTEXT: "ci" },
+          async scanOrganization() {
+            scans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /--resume could not find organization-checkpoint\.json/,
+    );
+    assert.equal(scans, 0);
+    assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+
+    await assert.rejects(
+      runScanOrganization(
+        { org: "acme", out: output, progress: "auto", provided: new Set() },
+        {
+          environment: {},
+          outputConflictPrompt(state) {
+            assert.equal(state.hasCheckpoint, false);
+            return "cancel";
+          },
+          async scanOrganization() {
+            scans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /cancelled; no files were changed/,
+    );
+    assert.equal(scans, 0);
+    assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test("scan-org refuses unsafe generated output directories before enumeration", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-output-link-"));
+  const output = path.join(root, "output");
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(output);
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(output, "repositories"), "dir");
+  let scans = 0;
+  try {
+    await assert.rejects(
+      runScanOrganization(
+        {
+          org: "acme",
+          out: output,
+          overwrite: true,
+          progress: "auto",
+          provided: new Set(["--overwrite"]),
+        },
+        {
+          environment: { EXPRESS_RECON_CONTEXT: "agent" },
+          async scanOrganization() {
+            scans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /artifact must be a regular directory.*No files were changed/,
+    );
+    assert.equal(scans, 0);
+    assert.deepEqual(fs.readdirSync(outside), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scan-org interactive overwrite starts fresh without deleting unrelated files", async () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-overwrite-"));
+  const existing = path.join(output, "keep.txt");
+  fs.writeFileSync(existing, "keep me");
+  let prompts = 0;
+  let scans = 0;
+  try {
+    const code = await runScanOrganization(
+      { org: "acme", out: output, progress: "auto", provided: new Set() },
+      {
+        environment: {},
+        outputConflictPrompt(state) {
+          prompts++;
+          assert.equal(state.entries, 1);
+          assert.equal(state.hasCheckpoint, false);
+          assert.equal(state.hasInventory, false);
+          return "overwrite";
+        },
+        async scanOrganization() {
+          scans++;
+          return emptyOrganizationResult();
+        },
+      },
+    );
+    assert.equal(code, 0);
+    assert.equal(prompts, 1);
+    assert.equal(scans, 1);
+    assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+    assert.ok(fs.existsSync(path.join(output, "organization-inventory.json")));
+
+    const overwritten = await runScanOrganization(
+      {
+        org: "acme",
+        out: output,
+        overwrite: true,
+        progress: "auto",
+        provided: new Set(["--overwrite"]),
+      },
+      {
+        environment: { EXPRESS_RECON_CONTEXT: "ci" },
+        outputConflictPrompt() {
+          throw new Error("explicit overwrite unexpectedly prompted");
+        },
+        async scanOrganization() {
+          scans++;
+          return emptyOrganizationResult();
+        },
+      },
+    );
+    assert.equal(overwritten, 0);
+    assert.equal(scans, 2);
+    assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test("organization output choices accept clear aliases and cancel by default", () => {
+  assert.equal(normalizeOrganizationOutputChoice("r"), "resume");
+  assert.equal(normalizeOrganizationOutputChoice(" Resume "), "resume");
+  assert.equal(normalizeOrganizationOutputChoice("o"), "overwrite");
+  assert.equal(normalizeOrganizationOutputChoice("overwrite"), "overwrite");
+  assert.equal(normalizeOrganizationOutputChoice(""), "cancel");
+  assert.equal(normalizeOrganizationOutputChoice("no"), "cancel");
+  assert.equal(normalizeOrganizationOutputChoice("maybe"), null);
+});
+
+test("the terminal output prompt explains invalid choices before accepting overwrite", async () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-prompt-"));
+  const input = new PassThrough();
+  const stderr = new PassThrough();
+  input.isTTY = true;
+  stderr.isTTY = true;
+  stderr.columns = 120;
+  let prompt = "";
+  stderr.on("data", (chunk) => {
+    prompt += chunk.toString();
+  });
+  fs.writeFileSync(path.join(output, "keep.txt"), "keep me");
+  try {
+    const resolved = resolveOrganizationOutputArgs(
+      { out: output, progress: "auto", provided: new Set() },
+      { stdin: input, stderr },
+      "auto",
+    );
+    setImmediate(() => {
+      input.write("maybe\n");
+      setImmediate(() => {
+        input.write("r\n");
+        setImmediate(() => input.end("o\n"));
+      });
+    });
+    const args = await resolved;
+    assert.equal(args.overwrite, true);
+    assert.equal(args.resume, false);
+    assert.ok(args.provided.has("--overwrite"));
+    assert.match(prompt, /No checkpoint is available/);
+    assert.match(prompt, /Enter overwrite or cancel/);
+    assert.match(prompt, /Resume is unavailable/);
+    assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "keep me");
   } finally {
     fs.rmSync(output, { recursive: true, force: true });
   }
@@ -813,10 +1025,17 @@ test("scan-org resumes valid artifacts, retries damaged work, and rejects scope 
 
     fs.appendFileSync(path.join(output, "repositories", "two", "routes.json"), "corrupt");
     const scanned = [];
+    let resumePrompts = 0;
     const code = await runScanOrganization(
-      { ...args, resume: true, concurrency: "2" },
+      { ...args, concurrency: "2" },
       {
         environment: {},
+        outputConflictPrompt(state) {
+          resumePrompts++;
+          assert.equal(state.hasCheckpoint, true);
+          assert.equal(state.hasRepositories, true);
+          return "resume";
+        },
         scanOrganization(organization, options) {
           return scanOrganization(organization, {
             ...options,
@@ -830,6 +1049,7 @@ test("scan-org resumes valid artifacts, retries damaged work, and rejects scope 
       },
     );
     assert.equal(code, 0);
+    assert.equal(resumePrompts, 1);
     assert.deepEqual(scanned, ["acme/two"]);
     const aggregate = JSON.parse(
       fs.readFileSync(path.join(output, "organization-inventory.json"), "utf8"),
@@ -841,6 +1061,7 @@ test("scan-org resumes valid artifacts, retries damaged work, and rejects scope 
       "acme/one",
     );
     assert.equal(aggregate.resume.repositoriesReused, 1);
+    assert.equal(aggregate.resume.requested, true);
     assert.equal(aggregate.resume.checkpoint, null);
     assert.equal(fs.existsSync(checkpoint), false);
   } finally {
@@ -969,8 +1190,12 @@ test("organization and CLI limits fail before making a GitHub request", () => {
   for (const args of [
     ["scan-org"],
     ["scan-org", "--org", "acme", "--max-repos", "0"],
+    ["scan-org", "--org", "invalid/name", "--out", "unused"],
     ["scan-org", "--org", "acme", "--resume"],
+    ["scan-org", "--org", "acme", "--overwrite"],
     ["scan-org", "--org", "acme", "--out", "unused", "--resume", "--resume"],
+    ["scan-org", "--org", "acme", "--out", "unused", "--overwrite", "--overwrite"],
+    ["scan-org", "--org", "acme", "--out", "unused", "--resume", "--overwrite"],
     ["scan-org", "--org", "acme", "--concurrency", "9"],
     ["scan-org", "--org", "acme", "--progress", "loud"],
     ["scan-org", "--org", "acme", "--progress", "plain", "--no-progress"],

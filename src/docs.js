@@ -4,8 +4,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const YAML = require("yaml");
 const { build: buildOpenApi } = require("./formatters/openapi");
-const { discoverApiDocumentation } = require("./discover");
+const { discover } = require("./discover");
 const { scanLimits } = require("./static/scan");
+const { MODULE_EXTENSIONS, loadStaticDocumentModule } = require("./static/document-module");
 
 const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
 
@@ -75,7 +76,13 @@ function loadSpec(file, options = {}) {
       `API documentation ${file} is ${size} bytes, exceeding scan.maxFileBytes (${limits.maxFileBytes})`,
     );
   }
-  const value = parseData(fs.readFileSync(file, "utf8"), file);
+  const extension = path.extname(file).toLowerCase();
+  const value = MODULE_EXTENSIONS.has(extension)
+    ? loadStaticDocumentModule(file, {
+        root: options.root || path.dirname(file),
+        ...options,
+      }).value
+    : parseData(fs.readFileSync(file, "utf8"), file);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`API documentation ${file} must contain an object`);
   }
@@ -194,6 +201,31 @@ function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function namedTagArray(value) {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) => isObject(item) && typeof item.name === "string" && item.name.trim().length > 0,
+    )
+  );
+}
+
+function mergeTopLevelTags(target, incoming, context, pointer) {
+  const byName = new Map(target.map((tag, index) => [tag.name, { tag, index }]));
+  for (const incomingTag of incoming) {
+    const existing = byName.get(incomingTag.name);
+    if (existing) {
+      fillMissing(existing.tag, incomingTag, context, `${pointer}/${existing.index}`);
+      continue;
+    }
+    const index = target.length;
+    const added = clone(incomingTag);
+    target.push(added);
+    byName.set(added.name, { tag: added, index });
+    if (context.addedPointers) context.addedPointers.push(`${pointer}/${index}`);
+  }
+}
+
 /**
  * Fill missing fields without changing higher-precedence authored values.
  * Conflicts are recorded only within authored layers (base OpenAPI/JSDoc), not
@@ -210,6 +242,10 @@ function fillMissing(target, incoming, context, pointer = "") {
         writable: true,
       });
       if (context.addedPointers) context.addedPointers.push(nextPointer);
+      continue;
+    }
+    if (nextPointer === "/tags" && namedTagArray(target[key]) && namedTagArray(incoming[key])) {
+      mergeTopLevelTags(target[key], incoming[key], context, nextPointer);
       continue;
     }
     if (isObject(target[key]) && isObject(incoming[key])) {
@@ -244,24 +280,86 @@ function operations(document) {
   return output;
 }
 
-function selectApplication(report, requested) {
+function applicationSelectionError(message, ids) {
+  const error = new Error(message);
+  error.code = "APPLICATION_SELECTION_REQUIRED";
+  error.applicationIds = ids;
+  return error;
+}
+
+function selectApplication(report, requested, discovery, specification) {
   const ids = (report.applications || []).map((application) => application.id).sort();
-  if (requested === "all") return { id: "all", ids };
+  const discovered = new Map(
+    (discovery.applications || []).map((application) => [application.id, application]),
+  );
+  const metadata = (id) => discovered.get(id) || {};
+  if (requested === "all") return { id: "all", ids, reason: "explicit-all", packageId: null };
   if (requested) {
     if (!ids.includes(requested)) {
       throw new Error(
         `Unknown application ID ${JSON.stringify(requested)}; found: ${ids.join(", ") || "none"}`,
       );
     }
-    return { id: requested, ids: [requested] };
+    return {
+      id: requested,
+      ids: [requested],
+      reason: "explicit",
+      packageId: metadata(requested).packageId || null,
+    };
   }
-  if (ids.length === 1) return { id: ids[0], ids };
+  if (specification?.packageId) {
+    const matching = ids.filter(
+      (id) => metadata(id).packageId && metadata(id).packageId === specification.packageId,
+    );
+    if (matching.length === 1) {
+      return {
+        id: matching[0],
+        ids: matching,
+        reason: "documentation-package",
+        packageId: specification.packageId,
+      };
+    }
+    if (matching.length === 0 && ids.length > 0) {
+      const knownPackages = ids.map((id) => metadata(id).packageId).filter(Boolean);
+      if (knownPackages.length === ids.length) {
+        throw applicationSelectionError(
+          `OpenAPI document ${JSON.stringify(specification.path)} belongs to ${specification.packageId}, ` +
+            `but the detected Express application package(s) are ${[...new Set(knownPackages)].join(", ")}. ` +
+            "Choose --app-id <id> to confirm an intentional cross-package merge.",
+          ids,
+        );
+      }
+    }
+  }
+  if (!specification?.packageId && specification && ids.length === 1) {
+    const applicationPackageId = metadata(ids[0]).packageId;
+    if (applicationPackageId) {
+      const applicationPackage = (discovery.packages || []).find(
+        (item) => item.id === applicationPackageId,
+      );
+      throw applicationSelectionError(
+        `OpenAPI document ${JSON.stringify(specification.path)} is outside the detected Express ` +
+          `application package ${applicationPackage?.root || applicationPackageId}. ` +
+          "Choose --app-id <id> to confirm an intentional cross-package merge.",
+        ids,
+      );
+    }
+  }
+  if (ids.length === 1) {
+    return {
+      id: ids[0],
+      ids,
+      reason: "single-application",
+      packageId: metadata(ids[0]).packageId || null,
+    };
+  }
   if (ids.length > 1) {
-    throw new Error(
+    throw applicationSelectionError(
       `Multiple Express applications were found; choose --app-id <id> or use --app-id all intentionally. Found: ${ids.join(", ")}`,
+      ids,
     );
   }
-  return { id: null, ids: [] };
+  return { id: null, ids: [], reason: "no-application", packageId: null };
 }
 
 function selectReport(report, selection) {
@@ -275,19 +373,48 @@ function selectReport(report, selection) {
   return { ...report, routes, applications };
 }
 
+function packageForPath(discovery, file) {
+  const normalized = file.split(path.sep).join("/").replace(/^\.\//, "");
+  const owner = (discovery.packages || [])
+    .filter((item) => {
+      const root = item.root === "." ? "" : item.root.replace(/\/$/, "");
+      return root === "" || normalized === root || normalized.startsWith(`${root}/`);
+    })
+    .sort((left, right) => right.root.length - left.root.length)[0];
+  return owner?.id || null;
+}
+
 function autoSpec(root, opts, discovery, limits) {
-  if (opts.spec) return resolveInput(root, opts.spec, "--spec", limits);
+  if (opts.spec) {
+    const file = resolveInput(root, opts.spec, "--spec", limits);
+    const relativeFile = relative(root, file);
+    const discovered = discovery.documentation.specifications.find(
+      (item) => item.path === relativeFile,
+    );
+    return {
+      file,
+      path: relativeFile,
+      packageId: discovered?.packageId || packageForPath(discovery, relativeFile),
+      format: discovered?.format || null,
+    };
+  }
   const candidates = discovery.documentation.specifications.filter(
-    (item) => item.format === "openapi" || item.format === "candidate",
+    (item) =>
+      item.format === "openapi" ||
+      item.format === "candidate" ||
+      item.format === "openapi-module" ||
+      item.format === "openapi-module-candidate",
   );
   if (candidates.length > 1) {
     throw new Error(
       `Multiple OpenAPI documents were found; choose --spec <path>. Found: ${candidates.map((item) => item.path).join(", ")}`,
     );
   }
-  return candidates.length === 1
-    ? resolveInput(root, candidates[0].path, "discovered spec", limits)
-    : null;
+  if (candidates.length !== 1) return null;
+  return {
+    ...candidates[0],
+    file: resolveInput(root, candidates[0].path, "discovered spec", limits),
+  };
 }
 
 function selectedJSDoc(root, opts, discovery, limits) {
@@ -299,15 +426,49 @@ function normalizeSource(root, source) {
   return source ? { ...source, file: relative(root, source.file) } : null;
 }
 
+function routeGraphUncertainty(report, selection) {
+  const fallbackOrphans = (report.routes || []).filter(
+    (route) => route.applicationId === null,
+  ).length;
+  const orphanRoutes = report.routeGraph?.orphanRoutes ?? fallbackOrphans;
+  const opaqueMounts = (report.routeGraph?.opaqueMounts || []).filter(
+    (mount) =>
+      selection.id === "all" ||
+      mount.applicationId === null ||
+      mount.applicationId === selection.id,
+  );
+  return {
+    incomplete: orphanRoutes > 0 || opaqueMounts.length > 0,
+    orphanRoutes,
+    registrarRoutes: report.routeGraph?.registrarRoutes || 0,
+    opaqueMounts,
+  };
+}
+
+function operationPath(operation) {
+  const separator = operation.indexOf(" ");
+  return separator < 0 ? operation : operation.slice(separator + 1);
+}
+
+function underOpaqueMount(operation, mount) {
+  if (mount.pathConfidence !== "full" || !mount.path) return true;
+  const documentedPath = operationPath(operation);
+  const wildcard = mount.path.indexOf("*");
+  const rawPrefix = wildcard < 0 ? mount.path : mount.path.slice(0, wildcard);
+  const prefix = rawPrefix.length > 1 ? rawPrefix.replace(/\/$/, "") : rawPrefix;
+  return prefix === "/" || documentedPath === prefix || documentedPath.startsWith(`${prefix}/`);
+}
+
 function reconcileDocumentation(report, opts = {}) {
   const root = fs.realpathSync(path.resolve(opts.root || process.cwd()));
   const limits = scanLimits(opts.scan || {});
   const deadline = Date.now() + limits.timeoutMs;
-  const discovery = opts.discovery || discoverApiDocumentation(root, opts.scan || {});
-  const selection = selectApplication(report, opts.applicationId);
+  const discovery = opts.discovery || discover(root, opts.scan || {});
+  const specification = autoSpec(root, opts, discovery, limits);
+  const selection = selectApplication(report, opts.applicationId, discovery, specification);
   const scopedReport = selectReport(report, selection);
   const generated = buildOpenApi(scopedReport);
-  const specFile = autoSpec(root, opts, discovery, limits);
+  const specFile = specification?.file || null;
   const jsdocFiles = selectedJSDoc(root, opts, discovery, limits);
   const inputFiles = [...new Set([...(specFile ? [specFile] : []), ...jsdocFiles])];
   if (inputFiles.length > limits.maxFiles) {
@@ -321,7 +482,9 @@ function reconcileDocumentation(report, opts = {}) {
       `API documentation inputs total ${inputBytes} bytes, exceeding scan.maxTotalBytes (${limits.maxTotalBytes})`,
     );
   }
-  const base = specFile ? stripPreviouslyGenerated(clone(loadSpec(specFile, limits))) : {};
+  const base = specFile
+    ? stripPreviouslyGenerated(clone(loadSpec(specFile, { ...limits, root })))
+    : {};
   const conflicts = [];
   const merged = clone(base);
   const jsdoc = {};
@@ -375,6 +538,19 @@ function reconcileDocumentation(report, opts = {}) {
   const documentedOperations = [...codeKeys].filter((key) => authoredKeys.has(key)).sort();
   const dynamicOperations = [...codeOps.keys()].filter((key) => key.includes("{dynamic}"));
   const duplicateOperations = generated["x-express-recon"]?.duplicateOperations || [];
+  const graph = routeGraphUncertainty(report, selection);
+  const incompleteInventory = report.scanCoverage?.complete === false || graph.incomplete;
+  const incompleteDocumentationDiscovery =
+    discovery.complete === false || discovery.discoveryCoverage?.complete === false;
+  const unverifiedDocsOnlyOperations = docsOnlyOperations.filter(
+    (operation) =>
+      graph.orphanRoutes > 0 ||
+      graph.opaqueMounts.some((mount) => underOpaqueMount(operation, mount)),
+  );
+  const unverifiedDocsOnly = new Set(unverifiedDocsOnlyOperations);
+  const verifiedDocsOnlyOperations = docsOnlyOperations.filter(
+    (operation) => !unverifiedDocsOnly.has(operation),
+  );
 
   const reconciliation = {
     schemaVersion: "1.0",
@@ -382,8 +558,14 @@ function reconcileDocumentation(report, opts = {}) {
     precedence: ["base", "jsdoc", "generated"],
     sources: {
       base: specFile ? relative(root, specFile) : null,
+      basePackageId: specification?.packageId || null,
       jsdoc: jsdocFiles.map((file) => relative(root, file)),
       jsdocBlocks: jsdocBlockCount,
+    },
+    selection: {
+      reason: selection.reason,
+      applicationPackageId: selection.packageId,
+      documentationPackageId: specification?.packageId || null,
     },
     summary: {
       codeOperations: codeKeys.size,
@@ -391,19 +573,29 @@ function reconcileDocumentation(report, opts = {}) {
       documentedOperations: documentedOperations.length,
       codeOnlyOperations: codeOnlyOperations.length,
       docsOnlyOperations: docsOnlyOperations.length,
+      verifiedDocsOnlyOperations: verifiedDocsOnlyOperations.length,
+      unverifiedDocsOnlyOperations: unverifiedDocsOnlyOperations.length,
       conflicts: conflicts.length,
       dynamicOperations: dynamicOperations.length,
       duplicateOperations: duplicateOperations.length,
-      incompleteInventory: report.scanCoverage?.complete === false,
-      incompleteDocumentationDiscovery: discovery.complete === false,
+      incompleteInventory,
+      incompleteDocumentationDiscovery,
     },
     codeOnlyOperations,
     docsOnlyOperations,
+    verifiedDocsOnlyOperations,
+    unverifiedDocsOnlyOperations,
     documentedOperations,
     conflicts,
     dynamicOperations: dynamicOperations.sort(),
     duplicateOperations,
     scanCoverage: report.scanCoverage || null,
+    routeGraph: {
+      complete: !graph.incomplete,
+      orphanRoutes: graph.orphanRoutes,
+      registrarRoutes: graph.registrarRoutes,
+      opaqueMounts: graph.opaqueMounts,
+    },
     diagnostics: [...new Set([...(discovery.diagnostics || []), ...(report.diagnostics || [])])],
   };
   merged["x-express-recon"] = {

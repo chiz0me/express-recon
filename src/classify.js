@@ -200,6 +200,7 @@ function classify(registry, options) {
     ),
     ...(options && options.openapi ? { openapi: options.openapi } : {}),
     ...(registry.scanCoverage ? { scanCoverage: registry.scanCoverage } : {}),
+    ...(registry.routeGraph ? { routeGraph: registry.routeGraph } : {}),
   };
 }
 

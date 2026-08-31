@@ -29,9 +29,11 @@ tags to OpenAPI security schemes.
 
 ## Select one application
 
-Discovery gives every `express()` root a stable ID. `docs` automatically selects
-the only app in a single-app repository. In a multi-app repository, pass
-`--app-id <id>` so identical paths from other apps do not contaminate the spec.
+Discovery gives every `express()` root a stable ID and owning package. `docs`
+automatically selects an unambiguous app in the existing specification's
+package. Multiple matches and cross-package merges require `--app-id <id>` so
+an unrelated spec or app does not contaminate the result—even when only one app
+was detected repository-wide.
 
 `--app-id all` is available for deliberate collision analysis. OpenAPI cannot
 represent two operations with the same method and path, so express-recon keeps
@@ -51,11 +53,20 @@ Authored disagreements between the base document and JSDoc are recorded in
 between authored descriptions/schemas and generated placeholders are not
 treated as conflicts because authored content intentionally wins.
 
-`--spec` selects an OpenAPI JSON/YAML file when discovery finds more than one.
-`--jsdoc` is repeatable; when omitted, all discovered annotation sources are
-used. Inputs must remain inside the scan root and obey the configured file-size
-limit. Swagger 2 is detected but rejected because it cannot be merged safely;
-convert it to OpenAPI 3 first.
+`--spec` selects an OpenAPI JSON/YAML file or data-only JavaScript/TypeScript
+module when discovery finds more than one. CommonJS and ESM module exports are
+reconstructed with a bounded AST interpreter; they are never imported or run.
+Local data-module composition and a tiny set of modeled data helpers are
+supported, but external package code is never loaded. Side-effect code and
+unsupported computation fail closed with an incomplete discovery diagnostic.
+`--jsdoc` is repeatable; when omitted, all discovered annotation
+sources are used. Inputs must remain inside the scan root and obey configured
+count, byte, and timeout limits. Swagger 2 is detected but rejected because it
+cannot be merged safely; convert it to OpenAPI 3 first.
+
+Top-level JSDoc `tags` arrays merge by tag name. Missing fields and distinct
+tags are retained; incompatible values on the same named tag remain authored
+conflicts.
 
 ## Outputs and gates
 
@@ -69,6 +80,10 @@ The report separates:
 
 - `codeOnlyOperations`: registered in code but absent from authored docs;
 - `docsOnlyOperations`: authored but absent from the selected app inventory;
+- `verifiedDocsOnlyOperations`: docs-only operations that a complete route graph
+  can treat as drift;
+- `unverifiedDocsOnlyOperations`: docs-only operations that unresolved routes or
+  opaque route providers prevent the static scan from disproving;
 - `documentedOperations`: present in both;
 - `conflicts`: authored values that disagree, with JSON pointers and sources;
 - `dynamicOperations`: paths containing an unresolved dynamic segment;
@@ -83,10 +98,11 @@ express-recon docs --src . --app-id 'app:src/app.js#app' \
   --fail-on docs-drift,docs-conflict,docs-incomplete
 ```
 
-- `docs-drift` matches code-only or docs-only operations.
+- `docs-drift` matches code-only or verified docs-only operations.
 - `docs-conflict` matches authored value conflicts.
 - `docs-incomplete` matches dynamic/duplicate operations, incomplete route
-  coverage, or incomplete documentation discovery.
+  coverage or documentation discovery, unresolved route graphs, and possible
+  opaque route-provider mounts.
 
 A matched gate exits `2`; invalid input or an operational error exits `1`.
 
@@ -198,8 +214,11 @@ static reconciliation command; merge hybrid-derived improvements deliberately.
 ### A documented operation is reported as docs-only
 
 Confirm that the selected app is correct, method/path templates agree, and the
-route was not omitted by scan scope or a parse failure. A docs-only operation may
-also be obsolete documentation—express-recon does not delete it automatically.
+route was not omitted by scan scope or a parse failure. Inspect whether it is
+`verifiedDocsOnlyOperations` or `unverifiedDocsOnlyOperations`: the latter means
+static evidence is insufficient for a stale-doc conclusion. A verified docs-only
+operation may still be intentionally documented or obsolete—express-recon does
+not delete it automatically.
 
 ### Security is absent
 

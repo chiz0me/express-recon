@@ -23,6 +23,11 @@ function withRepository(run) {
     fs.cpSync(FIXTURE, root, { recursive: true });
     fs.writeFileSync(path.join(root, "oversized.js"), "x".repeat(2048));
     fs.symlinkSync("app.js", path.join(root, "linked-app.js"));
+    fs.mkdirSync(path.join(root, ".cursor", "apiContracts"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, ".cursor", "apiContracts", "openapi.json"),
+      JSON.stringify({ openapi: "3.1.0", info: { title: "Hidden", version: "1" }, paths: {} }),
+    );
     git(root, ["init", "--quiet"]);
     git(root, ["config", "user.email", "tests@example.test"]);
     git(root, ["config", "user.name", "express-recon tests"]);
@@ -109,6 +114,30 @@ test("ignored symlinks make repository acquisition explicitly incomplete", () =>
     assert.equal(result.repository.acquisition.skippedFiles, 0);
     assert.equal(result.repository.acquisition.skippedSymlinks, 1);
     assert.equal(result.repository.acquisition.complete, false);
+  });
+});
+
+test("repository scans materialize hidden API contracts only with includeHidden", () => {
+  withRepository((root) => {
+    const defaultResult = scanRepository(root);
+    assert.equal(
+      defaultResult.discovery.documentation.specifications.some((item) =>
+        item.path.startsWith(".cursor/"),
+      ),
+      false,
+    );
+
+    const included = scanRepository(root, { scan: { includeHidden: true } });
+    assert.equal(
+      included.discovery.documentation.specifications.some(
+        (item) => item.path === ".cursor/apiContracts/openapi.json",
+      ),
+      true,
+    );
+    assert.equal(
+      included.discovery.discoveryCoverage.scope.builtIn.hiddenDirectoriesExcluded,
+      false,
+    );
   });
 });
 

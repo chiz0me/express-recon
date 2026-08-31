@@ -170,6 +170,10 @@ const scanInput = {
       "Scope file (relative paths use the scan root), or false to disable .express-reconignore",
     ),
   includeTests: z.boolean().optional().describe("Also scan test files/dirs (excluded by default)"),
+  includeHidden: z
+    .boolean()
+    .optional()
+    .describe("Also scan hidden directories; .git and generated/vendor directories stay excluded"),
   maxFiles: z.number().int().optional().describe("Maximum source files to analyze"),
   maxFileBytes: z.number().int().optional().describe("Maximum bytes in one source file"),
   maxTotalBytes: z.number().int().optional().describe("Maximum total analyzed source bytes"),
@@ -178,6 +182,7 @@ const scanInput = {
 
 function scanOptions({
   includeTests,
+  includeHidden,
   include,
   exclude,
   ignoreFile,
@@ -188,6 +193,7 @@ function scanOptions({
 }) {
   return {
     includeTests,
+    includeHidden,
     include,
     exclude,
     ignoreFile,
@@ -550,10 +556,12 @@ function registerTools(server) {
           target: loadPackageInfo(resolved),
           sourceRoot: resolved,
         });
+        const discovery = discover(resolved, options);
         return jsonResult(
           reconcileDocumentation(report, {
             root: resolved,
             scan: options,
+            discovery,
             applicationId: args.applicationId,
             spec: args.spec,
             jsdoc: args.jsdoc,

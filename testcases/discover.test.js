@@ -8,6 +8,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const { discover, inventory, buildReport } = require("../src");
+const { loadSpec } = require("../src/docs");
 
 const FIXTURE = path.join(__dirname, "fixtures", "discovery-app");
 const CLI = path.join(__dirname, "..", "src", "cli.js");
@@ -40,9 +41,200 @@ test("same method/path in separate apps remains distinct in the inventory", () =
 test("discovery finds existing specs and swagger-jsdoc sources", () => {
   const result = discover(FIXTURE);
   assert.deepEqual(result.documentation.specifications, [
-    { path: "docs/openapi.yaml", format: "openapi", version: "3.1.0" },
+    {
+      path: "docs/openapi.yaml",
+      format: "openapi",
+      version: "3.1.0",
+      packageId: "package:.",
+    },
   ]);
   assert.deepEqual(result.documentation.jsdoc, ["src/documented.js"]);
+});
+
+test("statically reconstructs data-only JavaScript OpenAPI modules", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-openapi-module-"));
+  try {
+    const docs = path.join(root, "openapi");
+    fs.mkdirSync(docs);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "module-docs" }));
+    fs.writeFileSync(
+      path.join(docs, "builder.js"),
+      [
+        "function operation({ endpoint, method = 'get', summary }) {",
+        "  return { [endpoint]: { [method]: { summary, responses: { 200: { description: 'OK' } } } } };",
+        "}",
+        "module.exports = { operation };",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(docs, "paths.js"),
+      [
+        "const { operation } = require('./builder');",
+        "const endpoints = [{ endpoint: '/health', summary: 'Health' }];",
+        "module.exports = endpoints.reduce((all, item) => ({ ...all, ...operation(item) }), {});",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(docs, "index.js"),
+      [
+        "const paths = require('./paths');",
+        "module.exports = { openapi: '3.1.0', info: { title: 'Static module', version: '1' }, paths };",
+      ].join("\n"),
+    );
+
+    const result = discover(root);
+    assert.deepEqual(result.documentation.specifications, [
+      {
+        path: "openapi/index.js",
+        format: "openapi-module",
+        version: "3.1.0",
+        packageId: "package:.",
+      },
+    ]);
+    const document = loadSpec(path.join(docs, "index.js"), { root });
+    assert.equal(document.paths["/health"].get.summary, "Health");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("statically reconstructs data-only ESM OpenAPI modules", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-openapi-esm-"));
+  try {
+    const docs = path.join(root, "openapi");
+    fs.mkdirSync(docs);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "esm-docs" }));
+    fs.writeFileSync(
+      path.join(docs, "paths.mjs"),
+      "export default { '/ready': { get: { responses: { 204: { description: 'Ready' } } } } };",
+    );
+    fs.writeFileSync(
+      path.join(docs, "index.mjs"),
+      [
+        "import paths from './paths.mjs';",
+        "export default { openapi: '3.1.0', info: { title: 'ESM module', version: '1' }, paths };",
+      ].join("\n"),
+    );
+
+    const result = discover(root);
+    assert.equal(result.documentation.specifications[0].format, "openapi-module");
+    const document = loadSpec(path.join(docs, "index.mjs"), { root });
+    assert.equal(document.paths["/ready"].get.responses[204].description, "Ready");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executable OpenAPI modules fail closed without running repository code", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-unsafe-openapi-module-"));
+  try {
+    const docs = path.join(root, "openapi");
+    const marker = path.join(root, "executed.txt");
+    fs.mkdirSync(docs);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "unsafe-docs" }));
+    fs.writeFileSync(
+      path.join(docs, "index.js"),
+      [
+        "const fs = require('node:fs');",
+        `fs.writeFileSync(${JSON.stringify(marker)}, 'executed');`,
+        "module.exports = { openapi: '3.1.0', info: { title: 'Unsafe', version: '1' }, paths: {} };",
+      ].join("\n"),
+    );
+
+    const result = discover(root);
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(result.discoveryCoverage.complete, false);
+    assert.equal(result.documentation.specifications[0].format, "openapi-module-candidate");
+    assert.match(result.diagnostics.join("\n"), /external module "node:fs" is not allowed/);
+    assert.throws(() => loadSpec(path.join(docs, "index.js"), { root }), /is not allowed/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("static OpenAPI modules cannot amplify a small input into an unbounded value", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-bounded-openapi-module-"));
+  try {
+    const docs = path.join(root, "openapi");
+    fs.mkdirSync(docs);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "bounded-docs" }));
+    fs.writeFileSync(
+      path.join(docs, "index.js"),
+      [
+        "let padding = '0123456789abcdef';",
+        ...Array.from({ length: 8 }, () => "padding += padding;"),
+        "module.exports = { openapi: '3.1.0', info: { title: 'Bounded', version: '1' }, paths: {}, padding };",
+      ].join("\n"),
+    );
+
+    assert.throws(
+      () => loadSpec(path.join(docs, "index.js"), { root, maxTotalBytes: 1024 }),
+      /bounded value limit/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("static OpenAPI modules cannot reach or mutate host prototypes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-prototype-openapi-module-"));
+  const probe = "__expressReconStaticDocumentProbe";
+  try {
+    const docs = path.join(root, "openapi");
+    fs.mkdirSync(docs);
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "prototype-docs" }));
+    fs.writeFileSync(
+      path.join(docs, "index.js"),
+      [
+        `[].constructor.prototype.${probe} = true;`,
+        "module.exports = { openapi: '3.1.0', info: { title: 'Unsafe', version: '1' }, paths: {} };",
+      ].join("\n"),
+    );
+
+    assert.equal(Array.prototype[probe], undefined);
+    assert.throws(
+      () => loadSpec(path.join(docs, "index.js"), { root }),
+      /inherited array property/,
+    );
+    assert.equal(Array.prototype[probe], undefined);
+  } finally {
+    delete Array.prototype[probe];
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("hidden API contracts require an explicit includeHidden opt-in", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-hidden-docs-"));
+  try {
+    const hidden = path.join(root, ".cursor", "apiContracts");
+    fs.mkdirSync(hidden, { recursive: true });
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "hidden-docs" }));
+    fs.writeFileSync(
+      path.join(hidden, "openapi.json"),
+      JSON.stringify({ openapi: "3.1.0", info: { title: "Hidden", version: "1" }, paths: {} }),
+    );
+
+    const defaultResult = discover(root);
+    assert.deepEqual(defaultResult.documentation.specifications, []);
+    assert.equal(defaultResult.discoveryCoverage.scope.builtIn.hiddenDirectoriesExcluded, true);
+
+    const included = discover(root, { includeHidden: true });
+    assert.equal(
+      included.documentation.specifications[0].path,
+      ".cursor/apiContracts/openapi.json",
+    );
+    assert.equal(included.discoveryCoverage.scope.builtIn.hiddenDirectoriesExcluded, false);
+    const cli = spawnSync("node", [CLI, "discover", "--src", root, "--include-hidden"], {
+      encoding: "utf8",
+    });
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.equal(
+      JSON.parse(cli.stdout).documentation.specifications[0].path,
+      ".cursor/apiContracts/openapi.json",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("reports normalize application and route source paths relative to the scan root", () => {

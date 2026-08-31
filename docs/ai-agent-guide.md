@@ -163,6 +163,15 @@ durability. Progress remains operational telemetry, not evidence. If the
 terminal event is `scan-failed`, report the failure and preserve the output
 directory for a compatible `--resume`.
 
+Agent context never answers an output-directory prompt. If `--out` is nonempty,
+the CLI fails before GitHub access or file changes unless the invocation says
+`--resume` or `--overwrite`. Inspect whether
+`organization-checkpoint.json` exists: use `--resume` only for a compatible
+interrupted run, and use `--overwrite` only when the requested goal is a fresh
+scan. Overwrite resets resumable state and replaces colliding organization
+artifacts, but preserves unrelated files rather than recursively deleting the
+directory. Do not guess between these actions when the user's intent is unclear.
+
 If `resume.checkpoint` names `organization-checkpoint.json`, coverage is still
 incomplete. An agent may propose rerunning the same command with `--resume`, but
 must preserve the organization, repository cap, filters, config, and scan scope.
@@ -276,6 +285,22 @@ fields, and generated inventory fills remaining gaps. Report:
 - dynamic and duplicate operations;
 - incomplete inventory or documentation discovery;
 - placeholder schemas that still require handler/validator review.
+
+The reconciler can statically reconstruct data-only CommonJS/ESM OpenAPI
+modules; it never imports target code. Treat an unsupported module diagnostic as
+incomplete evidence, not permission to execute it. App selection is
+package-aware. If the tool requests `--app-id` for an ambiguous or cross-package
+merge, present the candidate IDs and do not guess.
+
+By default, hidden directories are outside scan scope. Use `includeHidden: true`
+or `--include-hidden` only when the user or repository goal explicitly places a
+contract under a hidden path such as `.cursor/`; mention the scope expansion in
+the result. Never enable it routinely across an organization.
+
+Separate verified docs-only drift from unverified docs-only operations.
+Unverified means orphan routes or an opaque mount prevent a static stale-doc
+conclusion: gate it as incomplete and recommend targeted hybrid/manual review,
+not deletion of the authored operation.
 
 Do not invent an authentication protocol from a middleware name. Use
 `openapi_spec` security inputs only when the user provides explicit security

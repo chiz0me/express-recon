@@ -197,6 +197,10 @@ For an agent-initiated scan:
 - Set `EXPRESS_RECON_CONTEXT=agent`. This makes the CLI require `--out <dir>` and
   default to no progress, preventing detailed stdout and routine stderr from
   flooding model context. Explicit `--progress` still overrides the default.
+- Agent/CI runs never prompt for a nonempty output directory. If one already
+  exists, inspect it first and pass `--resume` for a compatible checkpoint or
+  `--overwrite` for an explicitly requested fresh scan. Do not infer overwrite
+  intent: it resets checkpoint state, although unrelated files are preserved.
 - If progress must be monitored, use `--progress json 2>scan-progress.jsonl` and
   inspect only a bounded tail or selected failure/checkpoint/final events; never
   load the complete progress stream into context.
@@ -240,6 +244,10 @@ EXPRESS_RECON_CONTEXT=agent express-recon scan-org \
   executes the app's module-load code. `static` never executes the target.
 - For a public GitHub/HTTPS ref, use `scan-repo`; it performs bounded static
   acquisition only and never exposes target execution.
+- Hidden directories are excluded by default. Add `--include-hidden` only when
+  the requested scope explicitly includes a hidden contract path such as
+  `.cursor/`; record that wider scope and do not apply it indiscriminately to an
+  organization.
 - For a GitHub organization, use `scan-org --out <dir>`. Default concurrency is
   one; every bounded repository snapshot is deleted before the report returns.
   After an interruption, reuse the exact scan-defining options with `--resume`;
@@ -250,3 +258,7 @@ EXPRESS_RECON_CONTEXT=agent express-recon scan-org \
 - To also **document the API** (OpenAPI 3.1 / Swagger with request/response
   schemas and per-endpoint notes), use the `openapi-doc` skill, or add
   `--format openapi` to the same `audit` command for the deterministic skeleton.
+  The `docs` command can reconstruct data-only JavaScript/TypeScript OpenAPI
+  modules without executing them. Do not bypass an incomplete-module diagnostic
+  by importing repository code. Treat unverified docs-only operations as
+  incomplete evidence, not confirmed stale documentation.

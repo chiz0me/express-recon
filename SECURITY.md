@@ -15,6 +15,13 @@ unprotected endpoint.
 Static mode parses JavaScript and TypeScript source without importing the target
 application. It is the appropriate mode for untrusted checkouts.
 
+JavaScript/TypeScript OpenAPI modules are also handled without `require()` or
+dynamic import. A bounded AST interpreter accepts a deliberately small data-only
+subset, follows only local modules inside the scan root, and rejects unsupported
+imports or computation. Explicitly modeled data helpers never load their
+external package implementation. A rejected module remains an incomplete
+documentation candidate; express-recon does not fall back to executing it.
+
 `scan-repo` accepts GitHub shorthand, HTTPS Git URLs, or explicit local Git
 directories. It fetches one shallow ref into a temporary object store without a
 working-tree checkout, then materializes only size/count-bounded JS, TS, JSON,
@@ -48,6 +55,10 @@ validation. Explicitly compatible releases validate the checkpoint's original
 fingerprint and artifact digests before upgrading it to the current compatibility
 generation. Checkpoints and private-repository artifacts remain sensitive
 metadata and should receive the same access controls as the final report.
+All CLI artifact writers refuse an existing symbolic link or non-regular output
+target. Organization scans additionally validate their generated checkpoint,
+aggregate, and `repositories/` paths before enumeration, so reusing an output
+directory cannot redirect report writes through those paths.
 
 `GH_TOKEN`/`GITHUB_TOKEN` are read from the environment for API access and
 private Git fetches. The token is not accepted as a CLI argument, written to
@@ -74,6 +85,12 @@ own in-scope files. A centrally governed organization audit should pass
 `--no-ignore-file` or one absolute, trusted ignore file. Aggregate and detailed
 scope fingerprints provide review evidence but do not replace that policy
 choice.
+
+Hidden directories are excluded by default. `--include-hidden` (or
+`scan.includeHidden: true`) deliberately widens local and remote materialization
+to paths such as `.cursor/`, while `.git`, dependencies, and generated/build
+outputs remain excluded. Hidden paths can contain private configuration or
+tooling; enable this only when the scan goal requires those inputs.
 
 `render` treats report fields and repository metadata as untrusted text. It
 HTML-escapes values, uses fixed local CSS/JavaScript, adds a restrictive content

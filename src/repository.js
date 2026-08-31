@@ -194,11 +194,13 @@ function remaining(deadline) {
   return value;
 }
 
-function safeTreePath(value) {
+function safeTreePath(value, includeHidden = false) {
   if (!value || value.includes("\\") || path.posix.isAbsolute(value)) return false;
   const parts = value.split("/");
   if (parts.some((part) => !part || part === "." || part === "..")) return false;
-  return !parts.slice(0, -1).some((part) => part.startsWith(".") || SKIP_DIRS.has(part));
+  return !parts
+    .slice(0, -1)
+    .some((part) => SKIP_DIRS.has(part) || (!includeHidden && part.startsWith(".")));
 }
 
 function materializable(value) {
@@ -219,7 +221,16 @@ function parseTree(output) {
     .filter(Boolean);
 }
 
-function writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadline, gitConfig) {
+function writeSnapshot(
+  objectRepo,
+  commit,
+  snapshot,
+  repository,
+  limits,
+  deadline,
+  gitConfig,
+  includeHidden,
+) {
   const output = git(
     gitArgs(repository, ["-C", objectRepo, "ls-tree", "-rlz", "--full-tree", commit]),
     { timeoutMs: remaining(deadline), maxBuffer: MAX_TREE_OUTPUT, gitConfig },
@@ -243,7 +254,7 @@ function writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadlin
           (item) =>
             item.type === "blob" &&
             ["100644", "100755"].includes(item.mode) &&
-            safeTreePath(item.path) &&
+            safeTreePath(item.path, includeHidden) &&
             materializable(item.path),
         );
       skippedFiles += omitted.length;
@@ -259,7 +270,7 @@ function writeSnapshot(objectRepo, commit, snapshot, repository, limits, deadlin
       if (entry.mode === "160000" || entry.type === "commit") skippedSubmodules++;
       continue;
     }
-    if (!safeTreePath(entry.path) || !materializable(entry.path)) continue;
+    if (!safeTreePath(entry.path, includeHidden) || !materializable(entry.path)) continue;
     if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > limits.maxFileBytes) {
       skippedFiles++;
       skippedBytes += Number.isFinite(entry.size) && entry.size > 0 ? entry.size : 0;
@@ -331,7 +342,8 @@ function within(root, file) {
 function acquireRepository(source, opts = {}) {
   const repository = normalizeRepository(source);
   const remoteGitConfig = githubGitConfig(repository, opts.githubToken);
-  const limits = scanLimits({ ...opts.config?.scan, ...opts.scan });
+  const scan = { ...opts.config?.scan, ...opts.scan };
+  const limits = scanLimits(scan);
   const requestedRef = opts.ref || "HEAD";
   if (!validRef(requestedRef)) throw new Error(`Invalid Git ref ${JSON.stringify(requestedRef)}`);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-repository-"));
@@ -376,6 +388,7 @@ function acquireRepository(source, opts = {}) {
       limits,
       deadline,
       remoteGitConfig,
+      Boolean(scan.includeHidden),
     );
     return {
       temp,
@@ -475,25 +488,25 @@ function scanRepository(source, opts = {}) {
     });
     let documentation;
     const selected = opts.applicationId;
-    if (!selected && inventoryReport.applications.length > 1) {
+    try {
+      const result = reconcileDocumentation(inventoryReport, {
+        root,
+        scan,
+        discovery,
+        applicationId: selected,
+        spec: opts.spec,
+        jsdoc: opts.jsdoc,
+      });
+      documentation = { status: "merged", document: result.document, report: result.report };
+    } catch (err) {
       documentation = {
-        status: "needs-application-selection",
-        reason: "Multiple Express applications were found; rerun with --app-id <id>",
-        applicationIds: inventoryReport.applications.map((application) => application.id),
+        status:
+          err.code === "APPLICATION_SELECTION_REQUIRED"
+            ? "needs-application-selection"
+            : "needs-input",
+        reason: err.message,
+        ...(Array.isArray(err.applicationIds) ? { applicationIds: err.applicationIds } : {}),
       };
-    } else {
-      try {
-        const result = reconcileDocumentation(inventoryReport, {
-          root,
-          scan,
-          applicationId: selected,
-          spec: opts.spec,
-          jsdoc: opts.jsdoc,
-        });
-        documentation = { status: "merged", document: result.document, report: result.report };
-      } catch (err) {
-        documentation = { status: "needs-input", reason: err.message };
-      }
     }
     progress({
       phase: "cleaning-up",

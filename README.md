@@ -61,6 +61,12 @@ comments, and later `!pattern` re-inclusion rules. Use `--no-ignore-file` for an
 explicit ignore-file-free run; built-in dependency/build/hidden/test exclusions
 still apply.
 
+Hidden directories stay excluded unless `--include-hidden` (or
+`scan.includeHidden: true`) is set. Use that opt-in when contracts intentionally
+live under a path such as `.cursor/`; `.git`, dependencies, and generated/build
+directories remain excluded. Because hidden trees can contain private tooling
+or configuration, do not enable it indiscriminately in organization scans.
+
 `.express-reconignore` controls scan inputs; it is separate from `.gitignore`.
 Add the output directory (for example `.express-recon/`) to `.gitignore` unless
 you intentionally review and commit a baseline. Reports may contain sensitive
@@ -159,9 +165,12 @@ npx --no-install express-recon docs --src . \
   --out .express-recon/public-api
 ```
 
-`docs` requires a selection when more than one app is present. `--app-id all`
-is an intentional collision-reporting merge, not the default. For trusted
-hybrid scans, bind the runtime entry to the same ID:
+`docs` first matches the OpenAPI document's owning package to the Express apps
+in that package. Ambiguous or cross-package merges require `--app-id`; this also
+prevents a root-level or unrelated spec from being silently paired with the only
+app elsewhere in a monorepo. `--app-id all` is an intentional
+collision-reporting merge, not the default. For trusted hybrid scans, bind the
+runtime entry to the same ID:
 
 ```bash
 npx --no-install express-recon audit --mode hybrid --src . \
@@ -181,8 +190,12 @@ npx --no-install express-recon docs --src . --app-id 'app:src/app.js#app' \
 Precedence is deterministic: existing OpenAPI wins, JSDoc fills missing fields,
 and generated inventory fills the remainder. `docs-report.json` records
 code-only/docs-only operations, authored conflicts, duplicates, dynamic paths,
-and incomplete discovery. Swagger 2 is detected but must be converted before
-merging. See the [OpenAPI guide](./docs/openapi.md).
+and incomplete discovery. Data-only JavaScript/TypeScript OpenAPI modules are
+reconstructed with a bounded static interpreter; repository code is never
+imported or run, external package code is never loaded, and unsupported helpers
+or computation fail closed. Swagger 2 is detected but must be converted before
+merging. See the
+[OpenAPI guide](./docs/openapi.md).
 
 ### Advisory AI middleware classification
 
@@ -284,6 +297,15 @@ Resume reuse is visible as `RESUME` events, and `CHECKPOINT` is emitted only
 after a completed repository's artifacts and atomically replaced checkpoint are
 durable.
 
+If `--out` is nonempty and neither action is specified, a local interactive
+terminal asks whether to resume, overwrite, or cancel; cancel is the default.
+CI, agent, non-TTY, and JSON-progress runs never prompt and fail before GitHub
+access or file changes with an actionable `--resume`/`--overwrite` message.
+`--overwrite` starts a fresh checkpoint and replaces only colliding organization
+artifacts; it does not recursively clean the directory, so unrelated files are
+preserved. Use a new output directory when old and new artifacts must be kept
+fully separate.
+
 The default repository cap is 100; raise `--max-repos` deliberately for larger
 organizations. Hitting the cap, an API pagination failure, a failed/incomplete
 repository scan, or an inconclusive non-Express result makes aggregate coverage
@@ -299,9 +321,9 @@ The aggregate records config/scan/scope fingerprints, while each detailed route
 report records the resolved ignore-file evidence.
 
 Resume continues the recorded commits; it is not an incremental “scan latest”
-operation. Run again without `--resume` to rebuild against current default
-branches. Raising a repository cap likewise starts a fresh run because it
-changes the inventory scope.
+operation. Run with `--overwrite` to rebuild an existing output directory
+against current default branches. Raising a repository cap likewise requires a
+fresh run because it changes the inventory scope.
 
 For a scheduled organization CI job, persist the complete `--out` directory in
 a protected cache or artifact if a later run must resume it. Keep private-repo
@@ -479,6 +501,9 @@ exported primitives.
 - Static analysis cannot fully recover data-driven route registration, arbitrary
   dependency injection, computed mounts, or every TypeScript resolution pattern.
   It retains partial evidence and diagnostics instead of silently dropping it.
+- Documentation-only operations are split into verified and unverified drift
+  when unresolved route graphs or opaque route providers prevent a sound stale-
+  documentation conclusion.
 - Auth classification is only as sound as the reviewed middleware allowlist.
 - OpenAPI request/response schemas are placeholders until grounded in handler or
   validator code. The bundled `openapi-doc` skill provides that AI-assisted pass.

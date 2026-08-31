@@ -106,6 +106,17 @@ function normalizeDiagnostics(diagnostics, root) {
   return diagnostics.map((message) => message.split(normalizedRoot).join("."));
 }
 
+function normalizeRouteGraph(graph, root) {
+  if (!graph) return undefined;
+  return {
+    ...graph,
+    opaqueMounts: (graph.opaqueMounts || []).map((mount) => ({
+      ...mount,
+      source: normalizeSource(mount.source, root),
+    })),
+  };
+}
+
 function summarize(routes, findings) {
   const summary = {
     routes: routes.length,
@@ -155,6 +166,7 @@ function buildReport(registry, meta) {
     report.diagnostics = normalizeDiagnostics(registry.diagnostics, sourceRoot);
   }
   if (registry.scanCoverage) report.scanCoverage = registry.scanCoverage;
+  if (registry.routeGraph) report.routeGraph = normalizeRouteGraph(registry.routeGraph, sourceRoot);
   if (registry.openapi) report.openapi = registry.openapi;
   if (meta.command === "audit") {
     if (registry.policies && registry.policies.length) report.policies = registry.policies;

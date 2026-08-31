@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const YAML = require("yaml");
 const { scan, scanLimits, createScanScope, listSourceFiles } = require("./static/scan");
+const { MODULE_EXTENSIONS, loadStaticDocumentModule } = require("./static/document-module");
 const pkg = require("../package.json");
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", "out"]);
@@ -69,7 +70,7 @@ function collectRepositoryFiles(root, limits, diagnostics, opts = {}) {
       if (entry.isDirectory()) {
         if (
           SKIP_DIRS.has(entry.name) ||
-          entry.name.startsWith(".") ||
+          (!opts.includeHidden && entry.name.startsWith(".")) ||
           (!opts.includeTests && TEST_DIRS.has(entry.name))
         ) {
           continue;
@@ -285,7 +286,34 @@ function looksLikeSpec(file, maxFileBytes, diagnostics) {
   return null;
 }
 
-function discoverDocumentation(root, files, opts, diagnostics) {
+function moduleSpecSignal(file, code) {
+  if (!MODULE_EXTENSIONS.has(path.extname(file).toLowerCase())) return false;
+  if (!/(?:module\.exports\s*=|export\s+default\b)/.test(code)) return false;
+  if (!/(^|[\s,{])["']?(openapi|swagger)["']?\s*:/m.test(code)) return false;
+  return /openapi|swagger|api[-_.]?docs?/i.test(file.split(path.sep).join("/"));
+}
+
+function inspectModuleSpec(root, file, code, opts, diagnostics) {
+  if (!moduleSpecSignal(file, code)) return null;
+  try {
+    const loaded = loadStaticDocumentModule(file, { root, ...opts });
+    const value = loaded.value;
+    if (value && typeof value.openapi === "string") {
+      return { format: "openapi-module", version: value.openapi };
+    }
+    if (value && typeof value.swagger === "string") {
+      return { format: "swagger-module", version: value.swagger };
+    }
+    return null;
+  } catch (err) {
+    diagnostics.push(
+      `discover: could not statically resolve OpenAPI module ${file}: ${err.message}`,
+    );
+    return { format: "openapi-module-candidate", version: null, incomplete: true };
+  }
+}
+
+function discoverDocumentation(root, files, opts, diagnostics, packages = []) {
   const specifications = [];
   let complete = true;
   let totalBytes = 0;
@@ -323,7 +351,13 @@ function discoverDocumentation(root, files, opts, diagnostics) {
     }
     totalBytes += size;
     const detected = looksLikeSpec(file, opts.maxFileBytes || 5 * 1024 * 1024, diagnostics);
-    if (detected) specifications.push({ path: posixRelative(root, file), ...detected });
+    if (detected) {
+      specifications.push({
+        path: posixRelative(root, file),
+        ...detected,
+        packageId: owningPackage(file, packages)?.id || null,
+      });
+    }
   }
   const jsdoc = [];
   const sourceFiles = listSourceFiles(root, {
@@ -371,14 +405,28 @@ function discoverDocumentation(root, files, opts, diagnostics) {
         break;
       }
       totalBytes += size;
-      if (/@(?:openapi|swagger)\b/.test(fs.readFileSync(file, "utf8"))) {
+      const code = fs.readFileSync(file, "utf8");
+      if (/@(?:openapi|swagger)\b/.test(code)) {
         jsdoc.push(posixRelative(root, file));
+      }
+      const detected = inspectModuleSpec(root, file, code, opts, diagnostics);
+      if (detected) {
+        if (detected.incomplete) complete = false;
+        const { incomplete: _incomplete, ...specification } = detected;
+        specifications.push({
+          path: posixRelative(root, file),
+          ...specification,
+          packageId: owningPackage(file, packages)?.id || null,
+        });
       }
     } catch (err) {
       complete = false;
       diagnostics.push(`discover: could not inspect JSDoc source ${file}: ${err.message}`);
     }
   }
+  specifications.sort((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+  );
   return { documentation: { specifications, jsdoc: jsdoc.sort() }, complete };
 }
 
@@ -387,19 +435,21 @@ function discoverApiDocumentation(rootDir, opts = {}) {
   const limits = scanLimits(opts);
   const diagnostics = [];
   const collection = collectRepositoryFiles(root, limits, diagnostics, opts);
+  const packageDiscovery = discoverPackages(root, collection.files, limits, diagnostics);
   const documentation = discoverDocumentation(
     root,
     collection.files,
     { ...opts, ...limits },
     diagnostics,
+    packageDiscovery.packages,
   );
   return {
     documentation: documentation.documentation,
     diagnostics,
-    complete: collection.complete && documentation.complete,
+    complete: collection.complete && packageDiscovery.complete && documentation.complete,
     coverage: {
       files: collection.files.length,
-      complete: collection.complete && documentation.complete,
+      complete: collection.complete && packageDiscovery.complete && documentation.complete,
       scope: collection.scope,
     },
   };
@@ -431,7 +481,13 @@ function discover(rootDir, opts = {}) {
         candidates.length === 1 && candidates[0].confidence === "high" ? candidates[0].path : null,
     };
   });
-  const documentation = discoverDocumentation(root, files, { ...opts, ...limits }, diagnostics);
+  const documentation = discoverDocumentation(
+    root,
+    files,
+    { ...opts, ...limits },
+    diagnostics,
+    packages,
+  );
   return {
     schemaVersion: "1.0",
     tool: "express-recon",
@@ -453,6 +509,7 @@ function discover(rootDir, opts = {}) {
     },
     orphanRoutes: registry.routes.filter((route) => route.applicationId === null).length,
     scanCoverage: registry.scanCoverage,
+    routeGraph: registry.routeGraph,
     diagnostics: [...diagnostics, ...(registry.diagnostics || [])].map((message) =>
       message.split(root).join("."),
     ),

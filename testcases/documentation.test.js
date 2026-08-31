@@ -53,11 +53,14 @@ test("CLI help exposes onboarding, trust terminology, and exit codes", () => {
   assert.match(result.stdout, /public\s+no configured authentication guard matched/);
   assert.match(result.stdout, /Exit codes:/);
   assert.match(result.stdout, /--resume\s+resume a scan-org run/);
+  assert.match(result.stdout, /--overwrite\s+start a fresh scan-org run/);
   assert.match(result.stdout, /--progress <mode>\s+scan-org progress on stderr/);
   assert.match(result.stdout, /--no-progress\s+alias for --progress none/);
   assert.match(result.stdout, /--no-ignore-file\s+disable the default\/configured/);
   assert.match(result.stdout, /EXPRESS_RECON_CONTEXT=agent/);
   assert.match(result.stdout, /scan-org requires --out and defaults progress to none/);
+  assert.match(result.stdout, /Existing output requires explicit --resume or --overwrite/);
+  assert.match(result.stdout, /--version\s+print the installed express-recon version/);
 
   for (const command of [
     "discover",

@@ -33,6 +33,7 @@ test("audit report carries a versioned contract with summary + findings", () => 
   assert.ok(report.applications.length > 0);
   assert.equal(report.summary.routes, report.routes.length);
   assert.equal(report.scanCoverage.complete, true);
+  assert.equal(report.routeGraph.complete, true);
   assert.equal(report.scanCoverage.discovered, report.scanCoverage.analyzed);
   assert.match(report.scanCoverage.scope.fingerprint, /^[a-f0-9]{64}$/);
   const publicFinding = report.findings.find(

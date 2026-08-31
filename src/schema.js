@@ -405,6 +405,33 @@ const REPORT_SCHEMA = {
       description:
         "warnings about incomplete parsing/reads, resolution confidence, policy expiry, and boot behavior",
     },
+    routeGraph: {
+      type: "object",
+      additionalProperties: false,
+      description:
+        "Static app-to-router graph confidence, including unresolved routes and opaque use() mounts",
+      properties: {
+        complete: { type: "boolean" },
+        orphanRoutes: { type: "integer", minimum: 0 },
+        registrarRoutes: { type: "integer", minimum: 0 },
+        opaqueMounts: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              applicationId: { type: ["string", "null"] },
+              path: { type: ["string", "null"] },
+              pathConfidence: { enum: ["full", "partial", "unknown"] },
+              middlewares: { type: "array", items: { type: "string" } },
+              source,
+            },
+            required: ["applicationId", "path", "pathConfidence", "middlewares", "source"],
+          },
+        },
+      },
+      required: ["complete", "orphanRoutes", "registrarRoutes", "opaqueMounts"],
+    },
     scanCoverage: {
       type: "object",
       additionalProperties: false,

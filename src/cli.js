@@ -3,6 +3,8 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const readline = require("node:readline/promises");
+const pkg = require("../package.json");
 const {
   inventory,
   audit,
@@ -23,7 +25,7 @@ const { executeRuntime } = require("./runtime/execute");
 const { loadPackageInfo } = require("./static/resolve");
 const { loadConfig } = require("./config");
 const { loadReviewFile } = require("./review");
-const { DEFAULT_MAX_REPOSITORIES } = require("./organization");
+const { DEFAULT_MAX_REPOSITORIES, validateOrganization } = require("./organization");
 const { PROGRESS_MODES, createOrganizationProgressReporter } = require("./organization-progress");
 const {
   CHECKPOINT_FILENAME,
@@ -96,6 +98,8 @@ Options:
   --max-repos <n>       scan-org repository cap (default 100; maximum 10000).
   --concurrency <n>     scan-org snapshots processed at once (default 1; maximum 8).
   --resume              resume a scan-org run from the checkpoint in --out.
+  --overwrite           start a fresh scan-org run in a nonempty --out directory;
+                        replace colliding organization artifacts, keep other files.
   --progress <mode>     scan-org progress on stderr: auto, plain, json, or none
                         (default: auto; TTY status locally, plain lines in CI).
   --no-progress         alias for --progress none.
@@ -123,14 +127,18 @@ Options:
                         (default: .express-reconignore)
   --no-ignore-file      disable the default/configured scan ignore file
   --include-tests       also scan test files/dirs (excluded by default)
+  --include-hidden      also scan hidden directories such as .cursor (default: exclude;
+                        .git and generated/vendor directories remain excluded)
+  --version             print the installed express-recon version and exit
   --help                show this message
 
 Environment:
   EXPRESS_RECON_CONTEXT=agent
                         scan-org requires --out and defaults progress to none.
+                        Existing output requires explicit --resume or --overwrite.
                         Explicit --progress/--no-progress always takes precedence.
   EXPRESS_RECON_CONTEXT=ci
-                        scan-org defaults to stable plain progress.
+                        scan-org defaults to stable plain progress and never prompts.
   EXPRESS_RECON_CONTEXT=interactive
                         scan-org retains automatic TTY/non-TTY progress selection.
 
@@ -199,6 +207,7 @@ function resolveOrganizationProgressMode(args, context) {
 
 function parseArgs(argv) {
   if (argv[0] === "--help" || argv[0] === "-h") return { help: true };
+  if (argv[0] === "--version" || argv[0] === "-V") return { version: true };
   const out = { command: argv[0], mode: "static", format: "pretty", progress: "auto" };
   const provided = new Set();
   const takeValue = (option, index) => {
@@ -246,6 +255,10 @@ function parseArgs(argv) {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
       out.includeTests = true;
+    } else if (arg === "--include-hidden") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.includeHidden = true;
     } else if (arg === "--include-archived" || arg === "--include-forks") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
@@ -255,6 +268,10 @@ function parseArgs(argv) {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
       out.resume = true;
+    } else if (arg === "--overwrite") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.overwrite = true;
     } else if (arg === "--no-progress") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
@@ -309,6 +326,7 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-tests",
       "--mode",
       "--out",
@@ -336,6 +354,7 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-tests",
       "--mode",
       "--src",
@@ -356,6 +375,7 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-tests",
       "--out",
       "--src",
@@ -376,6 +396,7 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-tests",
       "--jsdoc",
       "--out",
@@ -398,6 +419,7 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-tests",
       "--mode",
       "--out",
@@ -440,6 +462,7 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-tests",
       "--jsdoc",
       "--out",
@@ -464,12 +487,14 @@ function validateArgs(args) {
       "--ignore-file",
       "--no-ignore-file",
       "--include",
+      "--include-hidden",
       "--include-archived",
       "--include-forks",
       "--include-tests",
       "--max-repos",
       "--org",
       "--out",
+      "--overwrite",
       "--progress",
       "--no-progress",
       "--resume",
@@ -477,7 +502,14 @@ function validateArgs(args) {
     const unsupported = [...args.provided].filter((option) => !supported.has(option));
     if (unsupported.length) throw new Error(`scan-org does not accept ${unsupported.join(", ")}`);
     if (!args.org) throw new Error("scan-org requires --org <name>");
+    validateOrganization(args.org);
     if (args.resume && !args.out) throw new Error("scan-org --resume requires --out <dir>");
+    if (args.overwrite && !args.out) {
+      throw new Error("scan-org --overwrite requires --out <dir>");
+    }
+    if (args.resume && args.overwrite) {
+      throw new Error("scan-org --resume and --overwrite cannot be used together");
+    }
     for (const [option, value, maximum] of [
       ["--max-repos", args.maxRepos, 10_000],
       ["--concurrency", args.concurrency, 8],
@@ -606,6 +638,7 @@ async function harnessOpts(args, config) {
       runtimeEntry: runtimeEntry || undefined,
       applicationId: runtimeApplicationId || undefined,
       includeTests: args.includeTests,
+      includeHidden: args.includeHidden ?? scan.includeHidden,
       include: [...(scan.include || []), ...(args.include || [])],
       exclude: [...(scan.exclude || []), ...(args.exclude || [])],
       ignoreFile: args.ignoreFile === undefined ? scan.ignoreFile : args.ignoreFile,
@@ -620,7 +653,17 @@ async function harnessOpts(args, config) {
 function emit(text, format, outDir, file) {
   if (!outDir) return process.stdout.write(text + "\n");
   fs.mkdirSync(outDir, { recursive: true });
-  fs.writeFileSync(path.join(outDir, file), text + "\n");
+  const output = path.join(outDir, file);
+  try {
+    const stat = fs.lstatSync(output);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`Output artifact must be a regular file: ${output}`);
+    }
+  } catch (value) {
+    const err = value instanceof Error ? value : new Error(String(value));
+    if (err.code !== "ENOENT") throw err;
+  }
+  fs.writeFileSync(output, text + "\n");
 }
 
 function writeReport(report, args) {
@@ -746,6 +789,7 @@ function discoveryOptions(args, config) {
   const scan = config.scan || {};
   return {
     includeTests: args.includeTests,
+    includeHidden: args.includeHidden ?? scan.includeHidden,
     include: [...(scan.include || []), ...(args.include || [])],
     exclude: [...(scan.exclude || []), ...(args.exclude || [])],
     ignoreFile: args.ignoreFile === undefined ? scan.ignoreFile : args.ignoreFile,
@@ -781,9 +825,11 @@ async function runDocs(args) {
     sourceRoot: root,
     config,
   });
+  const discovery = discover(root, scan);
   const result = reconcileDocumentation(report, {
     root,
     scan,
+    discovery,
     applicationId: args.appId,
     spec: args.spec,
     jsdoc: args.jsdoc,
@@ -800,7 +846,11 @@ async function runDocs(args) {
   const statuses = new Set(args.failOn.split(",").map((status) => status.trim()));
   const summary = result.report.summary;
   let hits = 0;
-  if (statuses.has("docs-drift")) hits += summary.codeOnlyOperations + summary.docsOnlyOperations;
+  if (statuses.has("docs-drift")) {
+    hits +=
+      summary.codeOnlyOperations +
+      (summary.verifiedDocsOnlyOperations ?? summary.docsOnlyOperations);
+  }
   if (statuses.has("docs-conflict")) hits += summary.conflicts;
   if (statuses.has("docs-incomplete")) {
     hits += summary.dynamicOperations + summary.duplicateOperations;
@@ -879,12 +929,217 @@ async function runScanRepository(args) {
 }
 
 function organizationArtifactName(repository) {
-  return repository.name.replace(/[^A-Za-z0-9._-]+/g, "_");
+  if (!repository || typeof repository.name !== "string") {
+    throw new Error("Organization repository artifact requires a repository name");
+  }
+  const name = repository.name.replace(/[^A-Za-z0-9._-]+/g, "_");
+  if (!name || name === "." || name === "..") {
+    throw new Error(`Organization repository has an unsafe artifact name: ${repository.name}`);
+  }
+  return name;
+}
+
+function organizationOutputEntry(output, name, expected) {
+  const entry = path.join(output, name);
+  let stat;
+  try {
+    stat = fs.lstatSync(entry);
+  } catch (value) {
+    const err = value instanceof Error ? value : new Error(String(value));
+    throw new Error(`Could not inspect organization output artifact ${entry}: ${err.message}`);
+  }
+  const valid = expected === "directory" ? stat.isDirectory() : stat.isFile();
+  if (stat.isSymbolicLink() || !valid) {
+    throw new Error(
+      `Organization output artifact must be a regular ${expected}: ${entry}. No files were changed.`,
+    );
+  }
+}
+
+function ensureOrganizationOutputDirectory(directory) {
+  let stat;
+  try {
+    stat = fs.lstatSync(directory);
+  } catch (value) {
+    const err = value instanceof Error ? value : new Error(String(value));
+    if (err.code !== "ENOENT") {
+      throw new Error(
+        `Could not inspect organization output directory ${directory}: ${err.message}`,
+      );
+    }
+    fs.mkdirSync(directory);
+    stat = fs.lstatSync(directory);
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`Organization output path must be a regular directory: ${directory}`);
+  }
+}
+
+function inspectOrganizationOutput(outDir) {
+  const output = resolvePath(outDir);
+  if (!fs.existsSync(output)) {
+    return {
+      output,
+      empty: true,
+      entries: 0,
+      hasCheckpoint: false,
+      hasInventory: false,
+      hasRepositories: false,
+    };
+  }
+  let stat;
+  let entries;
+  try {
+    stat = fs.statSync(output);
+    if (!stat.isDirectory()) {
+      throw new Error(`Organization scan output is not a directory: ${output}`);
+    }
+    entries = fs.readdirSync(output);
+  } catch (value) {
+    const err = value instanceof Error ? value : new Error(String(value));
+    if (err.message.startsWith("Organization scan output is not a directory:")) throw err;
+    throw new Error(`Could not inspect organization scan output ${output}: ${err.message}`);
+  }
+  const names = new Set(entries);
+  for (const [name, expected] of [
+    [CHECKPOINT_FILENAME, "file"],
+    ["organization-inventory.json", "file"],
+    ["repositories", "directory"],
+  ]) {
+    if (names.has(name)) organizationOutputEntry(output, name, expected);
+  }
+  return {
+    output,
+    empty: entries.length === 0,
+    entries: entries.length,
+    hasCheckpoint: names.has(CHECKPOINT_FILENAME),
+    hasInventory: names.has("organization-inventory.json"),
+    hasRepositories: names.has("repositories"),
+  };
+}
+
+function organizationOutputConflictError(state) {
+  const choices = state.hasCheckpoint
+    ? "rerun with --resume to continue it or --overwrite to start fresh"
+    : "rerun with --overwrite to start fresh";
+  return new Error(
+    `Organization scan output is not empty: ${JSON.stringify(state.output)}; ${choices}. ` +
+      "No files were changed.",
+  );
+}
+
+function normalizeOrganizationOutputChoice(value) {
+  const choice = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (choice === "r" || choice === "resume") return "resume";
+  if (choice === "o" || choice === "overwrite") return "overwrite";
+  if (["", "c", "cancel", "n", "no"].includes(choice)) return "cancel";
+  return null;
+}
+
+async function promptForOrganizationOutput(state, dependencies) {
+  const input = dependencies.stdin || process.stdin;
+  const output = dependencies.stderr || process.stderr;
+  const prompt = state.hasCheckpoint
+    ? "Choose [r]esume, [o]verwrite, or [c]ancel (default): "
+    : "Choose [o]verwrite or [c]ancel (default): ";
+  output.write(
+    `express-recon: ${state.entries} existing item${state.entries === 1 ? "" : "s"} found in ` +
+      `${JSON.stringify(state.output)}.\n` +
+      (state.hasCheckpoint
+        ? "A checkpoint is available. Resume preserves completed repository evidence.\n"
+        : "No checkpoint is available, so this run cannot be resumed.\n") +
+      "Overwrite starts a fresh scan, replaces colliding organization artifacts, and keeps other files.\n",
+  );
+  const terminal = readline.createInterface({ input, output, terminal: true });
+  try {
+    while (true) {
+      const choice = normalizeOrganizationOutputChoice(await terminal.question(prompt));
+      if (choice === "resume" && !state.hasCheckpoint) {
+        output.write("Resume is unavailable because no organization checkpoint was found.\n");
+      } else if (choice) {
+        return choice;
+      } else {
+        output.write(
+          state.hasCheckpoint
+            ? "Enter resume, overwrite, or cancel.\n"
+            : "Enter overwrite or cancel.\n",
+        );
+      }
+    }
+  } catch (value) {
+    const err = value instanceof Error ? value : new Error(String(value));
+    throw new Error(
+      `Could not read organization output choice; no files were changed: ${err.message}`,
+    );
+  } finally {
+    terminal.close();
+  }
+}
+
+async function resolveOrganizationOutputArgs(args, dependencies, executionContext) {
+  if (!args.out) return args;
+  if (args.resume && args.overwrite) {
+    throw new Error("scan-org --resume and --overwrite cannot be used together");
+  }
+  const state = inspectOrganizationOutput(args.out);
+  if (args.resume) {
+    if (!state.hasCheckpoint) {
+      throw new Error(
+        `scan-org --resume could not find ${CHECKPOINT_FILENAME} in ${JSON.stringify(state.output)}`,
+      );
+    }
+    return args;
+  }
+  if (args.overwrite || state.empty) return args;
+
+  let choice;
+  if (typeof dependencies.outputConflictPrompt === "function") {
+    choice = normalizeOrganizationOutputChoice(await dependencies.outputConflictPrompt(state));
+    if (!choice) throw new Error("Organization output prompt returned an unsupported choice");
+  } else {
+    const input = dependencies.stdin || process.stdin;
+    const output = dependencies.stderr || process.stderr;
+    const isTTY =
+      dependencies.promptIsTTY === undefined
+        ? input.isTTY === true && output.isTTY === true
+        : dependencies.promptIsTTY === true;
+    const progressMode = resolveOrganizationProgressMode(args, executionContext);
+    if (
+      executionContext === "agent" ||
+      executionContext === "ci" ||
+      progressMode === "json" ||
+      !isTTY
+    ) {
+      throw organizationOutputConflictError(state);
+    }
+    choice = await promptForOrganizationOutput(state, dependencies);
+  }
+
+  if (choice === "cancel") {
+    throw new Error("Organization scan cancelled; no files were changed");
+  }
+  if (choice === "resume" && !state.hasCheckpoint) {
+    throw new Error(`Cannot resume: ${CHECKPOINT_FILENAME} was not found in ${state.output}`);
+  }
+  const provided = new Set(args.provided || []);
+  provided.add(choice === "resume" ? "--resume" : "--overwrite");
+  return {
+    ...args,
+    resume: choice === "resume",
+    overwrite: choice === "overwrite",
+    provided,
+  };
 }
 
 function writeRepositoryArtifacts(outDir, repository, scan) {
-  const relativeDir = path.posix.join("repositories", organizationArtifactName(repository));
-  const repoDir = path.join(outDir, ...relativeDir.split("/"));
+  const artifactName = organizationArtifactName(repository);
+  const relativeDir = path.posix.join("repositories", artifactName);
+  const repositoriesDir = path.join(outDir, "repositories");
+  ensureOrganizationOutputDirectory(repositoriesDir);
+  const repoDir = path.join(repositoriesDir, artifactName);
+  ensureOrganizationOutputDirectory(repoDir);
   emit(JSON.stringify(scan, null, 2), "json", repoDir, "repo-scan.json");
   emit(JSON.stringify(scan.discovery, null, 2), "json", repoDir, "discovery.json");
   emit(JSON.stringify(scan.inventory, null, 2), "json", repoDir, "routes.json");
@@ -1048,6 +1303,7 @@ async function executeScanOrganization(args, dependencies, reporter) {
 }
 
 async function runScanOrganization(args, dependencies = {}) {
+  validateOrganization(args.org);
   const environment = dependencies.environment || process.env;
   const executionContext = resolveExecutionContext(environment);
   if (executionContext === "agent" && !args.out) {
@@ -1055,22 +1311,23 @@ async function runScanOrganization(args, dependencies = {}) {
       "EXPRESS_RECON_CONTEXT=agent requires scan-org --out <dir> to keep detailed reports out of model context",
     );
   }
+  const effectiveArgs = await resolveOrganizationOutputArgs(args, dependencies, executionContext);
   const reporter =
     dependencies.progressReporter ||
     createOrganizationProgressReporter({
-      mode: resolveOrganizationProgressMode(args, executionContext),
+      mode: resolveOrganizationProgressMode(effectiveArgs, executionContext),
       stream: dependencies.progressStream || process.stderr,
       isTTY: dependencies.progressIsTTY,
       now: dependencies.progressNow,
     });
   try {
-    return await executeScanOrganization(args, dependencies, reporter);
+    return await executeScanOrganization(effectiveArgs, dependencies, reporter);
   } catch (value) {
     const err = value instanceof Error ? value : new Error(String(value));
     if (reporter.mode === "json") {
       const reported = reporter.emit({
         event: "scan-failed",
-        organization: args.org,
+        organization: effectiveArgs.org,
         error: safeOrganizationProgressError(err, dependencies.environment || process.env),
       });
       if (reported) JSON_PROGRESS_ERRORS.add(err);
@@ -1084,6 +1341,10 @@ async function runScanOrganization(args, dependencies = {}) {
 async function main(argv) {
   const args = parseArgs(argv);
   validateArgs(args);
+  if (args.version) {
+    process.stdout.write(`${pkg.version}\n`);
+    return 0;
+  }
   if (args.help || !args.command || args.command === "help") {
     process.stdout.write(USAGE);
     return args.help || args.command ? 0 : 1;
@@ -1124,8 +1385,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  inspectOrganizationOutput,
   main,
+  normalizeOrganizationOutputChoice,
   resolveExecutionContext,
+  resolveOrganizationOutputArgs,
   resolveOrganizationProgressMode,
   runScanOrganization,
   writeRepositoryArtifacts,

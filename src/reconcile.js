@@ -239,6 +239,7 @@ function reconcile(staticReg, runtimeReg) {
       ? { openapi: staticReg.openapi || runtimeReg.openapi }
       : {}),
     ...(staticReg.scanCoverage ? { scanCoverage: staticReg.scanCoverage } : {}),
+    ...(staticReg.routeGraph ? { routeGraph: staticReg.routeGraph } : {}),
   };
 }
 

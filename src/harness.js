@@ -61,6 +61,7 @@ function scanOptions(opts) {
     maxFileBytes: opts.maxFileBytes,
     maxTotalBytes: opts.maxTotalBytes,
     timeoutMs: opts.timeoutMs,
+    includeHidden: opts.includeHidden,
   };
 }
 

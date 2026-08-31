@@ -45,7 +45,7 @@ Important output fields:
 
 Supported controls are `--src`, scan scope/limits through `--config`,
 `--include`, `--exclude`, `--ignore-file`/`--no-ignore-file`, `--include-tests`,
-and `--out`.
+`--include-hidden`, and `--out`.
 
 ### `inventory`
 
@@ -106,16 +106,25 @@ express-recon docs --src . --app-id 'app:src/app.js#app' \
 ```
 
 `--spec` is optional when exactly one OpenAPI candidate is discovered.
-`--jsdoc` is repeatable; when omitted, all discovered annotation sources are
-used. A multi-app repository requires `--app-id`; `all` is permitted only as an
+JSON/YAML documents and data-only JavaScript/TypeScript CommonJS or ESM modules
+are supported. Module exports are reconstructed by a bounded static interpreter;
+target code and external package code are not imported, and unsupported helpers
+or computation produce an incomplete candidate diagnostic. `--jsdoc` is repeatable; when
+omitted, all discovered annotation sources are used.
+
+Selection is package-aware: one app in the base document's owning package is
+selected automatically. Multiple matching apps, or a document and app in
+different package scopes, require `--app-id`; `all` is permitted only as an
 intentional collision-reporting merge.
 
 Documentation gates:
 
-- `docs-drift`: code-only plus docs-only operations.
+- `docs-drift`: code-only plus verified docs-only operations.
 - `docs-conflict`: authored OpenAPI/JSDoc values disagree.
 - `docs-incomplete`: dynamic or duplicate operations, incomplete route scan, or
-  incomplete documentation discovery.
+  incomplete documentation discovery. It also matches unresolved/orphan route
+  graphs and possible opaque route-provider mounts; docs-only operations in
+  that state are reported as unverified rather than stale.
 
 ### `review-middleware`
 
@@ -202,6 +211,8 @@ Scope and resource controls:
 - `--max-repos` defaults to 100 and accepts 1–10,000;
 - `--concurrency` defaults to 1 and accepts 1–8;
 - `--resume` requires `--out` and continues a compatible checkpoint;
+- `--overwrite` requires `--out` and starts fresh while preserving unrelated
+  files in that directory;
 - `--progress` accepts `auto`, `plain`, `json`, or `none`; `--no-progress` is an
   alias for `--progress none`;
 - scan configuration and CLI include/exclude/ignore/test scope apply
@@ -249,6 +260,14 @@ progress, while `interactive` retains TTY/non-TTY auto-selection. An explicit
 and storage safeguards only; it is not scan evidence and does not change scope
 fingerprints.
 
+When `--out` is nonempty, an interactive TTY asks for `resume`, `overwrite`, or
+`cancel` before enumeration or writes; cancel is the default. CI, agent,
+non-TTY, and JSON-progress runs never prompt because they may not have a human
+input channel and stderr may be machine-readable. They fail closed with the
+exact `--resume`/`--overwrite` choices instead. `--overwrite` replaces
+colliding organization artifacts and resets the checkpoint, but deliberately
+does not recursively delete the output directory or unrelated files.
+
 Every JSON event has `schemaVersion`, `kind`, `event`, `timestamp`,
 `elapsedMs`, and `organization`. Depending on the lifecycle point it also has
 repository identity, selected `index`, `processed`/`total`, `active`, `failed`,
@@ -274,7 +293,8 @@ pipeline.
 
 #### Resume and checkpoints
 
-`--resume` requires `--out`. On a fresh output run, the CLI creates
+`--resume` and `--overwrite` are mutually exclusive and require `--out`. On a
+fresh or explicit overwrite run, the CLI creates
 `organization-checkpoint.json` before enumeration and atomically replaces it
 after each repository whose acquisition, discovery, and source analysis are all
 complete. The checkpoint records compact repository evidence, commit IDs,
@@ -297,13 +317,13 @@ increments the compatibility generation and rejects the checkpoint instead of
 mixing incompatible results. `--concurrency` and the current token are
 deliberately not fingerprinted: concurrency does not change evidence, and every
 resume is still restricted to repositories visible during its fresh API
-enumeration. Run without `--resume` for a new scan of current default branches
-or to change the repository cap/scope.
+enumeration. Run with `--overwrite` for a new scan of current default branches
+or to change the repository cap/scope in an existing output directory.
 
 The checkpoint remains after an interrupted or aggregate-incomplete run. It is
 deleted only after a complete `organization-inventory.json` is successfully
 written. A repository cap itself cannot be repaired by resume; start a fresh run
-with a larger `--max-repos` value.
+with `--overwrite` and a larger `--max-repos` value.
 
 Repository statuses are `express`, `not-express`, `inconclusive`, `failed`,
 `empty`, `skipped-archived`, `skipped-fork`, `skipped-disabled`, or
@@ -374,6 +394,9 @@ express-recon schema > express-recon-report.schema.json
 ## Artifacts and exit codes
 
 With `--out`, directories are created as needed.
+Existing regular artifact files may be replaced, but the CLI refuses symbolic
+links and non-regular files at generated artifact paths. Organization scans also
+reject unsafe `repositories/` output directories before GitHub enumeration.
 
 | Command | Artifact(s) |
 | --- | --- |
@@ -534,6 +557,7 @@ have a route selector, reason, and valid ISO date. Active exceptions appear in
 scan:
   include: ["apps/api/**", "packages/routes/**"]
   exclude: ["**/generated/**", "**/vendor/**"]
+  includeHidden: false # true opts into paths such as .cursor/
   ignoreFile: .express-reconignore # false disables it
   maxFiles: 50000
   maxFileBytes: 5242880
@@ -563,9 +587,14 @@ in order, so `!pattern` can reverse only an earlier ignore rule—not an explici
 exclude or a missing include. This is a deliberately small glob format, not a
 complete `.gitignore` implementation.
 
-Dependency, VCS, build, hidden, and test paths are excluded by default. Test
-directories include `test`, `tests`, `testcases`, `spec`, `specs`, `__tests__`,
-and `__mocks__`; `--include-tests` opts them and `*.test.*`/`*.spec.*` files in.
+Dependency, VCS, build, hidden, and test paths are excluded by default.
+`--include-hidden` or `scan.includeHidden: true` opts hidden directories such as
+`.cursor/` into local and remote materialization, discovery, and source scans;
+`.git` and built-in dependency/build outputs remain excluded. Treat this as an
+intentional scope expansion because hidden paths may contain private tooling or
+configuration. Test directories include `test`, `tests`, `testcases`, `spec`,
+`specs`, `__tests__`, and `__mocks__`; `--include-tests` opts them and
+`*.test.*`/`*.spec.*` files in.
 
 Limits are applied in deterministic path order. Parse/read/traversal failures or
 limits set coverage `complete: false` and add diagnostics. Do not convert an
@@ -628,6 +657,10 @@ Important fields:
   include/exclude values, test selection, ignore-file presence/rule count/content
   hash, built-in exclusions, and an effective-scope fingerprint. Absolute ignore
   paths are represented as `<external>/<basename>` rather than leaked.
+- `routeGraph`: whether every emitted route was assigned to an app plus counts
+  for orphan/registrar routes and evidence for possible opaque route-provider
+  mounts. A false `complete` value prevents documentation-only operations from
+  being asserted stale without further evidence.
 - `summary`, `findings`, normalized `policies`, and applied
   `policyExceptions`: audit only.
 - `delta`: comparison with `--baseline`.

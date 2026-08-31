@@ -95,6 +95,14 @@ test("--help prints usage and exits successfully", () => {
   assert.match(result.stdout, /Usage: express-recon/);
 });
 
+test("--version prints only the installed package version", () => {
+  const pkg = require("../package.json");
+  const result = spawnSync("node", [CLI, "--version"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${pkg.version}\n`);
+  assert.equal(result.stderr, "");
+});
+
 test("suggest-auth prints ranked candidates", () => {
   const result = JSON.parse(run(["suggest-auth", "--src", FIXTURE]).stdout);
   assert.ok(result.candidates.some((c) => c.name === "requireAuth"));
@@ -129,6 +137,33 @@ test("CLI rejects options that do not apply to the selected command", () => {
   });
   assert.equal(schemaOutput.status, 1);
   assert.match(schemaOutput.stderr, /does not accept/);
+
+  const inventoryOverwrite = spawnSync(
+    "node",
+    [CLI, "inventory", "--src", FIXTURE, "--overwrite"],
+    { encoding: "utf8" },
+  );
+  assert.equal(inventoryOverwrite.status, 1);
+  assert.match(inventoryOverwrite.stderr, /does not accept --overwrite/);
+});
+
+test("CLI output artifacts never follow an existing symbolic link", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-output-link-"));
+  const output = path.join(root, "output");
+  const outside = path.join(root, "outside.json");
+  fs.mkdirSync(output);
+  fs.writeFileSync(outside, "keep outside");
+  fs.symlinkSync(outside, path.join(output, "discovery.json"));
+  try {
+    const result = spawnSync("node", [CLI, "discover", "--src", FIXTURE, "--out", output], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Output artifact must be a regular file/);
+    assert.equal(fs.readFileSync(outside, "utf8"), "keep outside");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a large json report survives a stdout pipe without truncation", () => {

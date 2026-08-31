@@ -21,6 +21,7 @@ const SCAN_KEYS = new Set([
   "exclude",
   "ignoreFile",
   "include",
+  "includeHidden",
   "maxFileBytes",
   "maxFiles",
   "maxTotalBytes",
@@ -144,6 +145,9 @@ function validateConfig(value) {
     knownKeys(value.scan, SCAN_KEYS, "scan");
     if (value.scan.include !== undefined) stringArray(value.scan.include, "scan.include");
     if (value.scan.exclude !== undefined) stringArray(value.scan.exclude, "scan.exclude");
+    if (value.scan.includeHidden !== undefined && typeof value.scan.includeHidden !== "boolean") {
+      throw new Error("scan.includeHidden must be a boolean");
+    }
     if (
       value.scan.ignoreFile !== undefined &&
       value.scan.ignoreFile !== false &&

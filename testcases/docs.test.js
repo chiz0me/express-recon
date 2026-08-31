@@ -52,11 +52,59 @@ test("reconciles base OpenAPI, JSDoc, and code with deterministic precedence", (
   assert.equal(report.summary.incompleteDocumentationDiscovery, false);
 });
 
-test("requires an application selection when more than one app exists", () => {
-  assert.throws(
-    () => reconcileDocumentation(inventoryReport(), { root: FIXTURE }),
-    /Multiple Express applications were found/,
-  );
+test("automatically selects the only Express app in the documentation package", () => {
+  const { report } = reconcileDocumentation(inventoryReport(), { root: FIXTURE });
+  assert.equal(report.applicationId, PUBLIC_APP);
+  assert.equal(report.selection.reason, "documentation-package");
+  assert.equal(report.selection.applicationPackageId, "package:.");
+  assert.equal(report.selection.documentationPackageId, "package:.");
+});
+
+test("cross-package documentation requires an explicit application confirmation", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-doc-package-"));
+  try {
+    const service = path.join(root, "service");
+    fs.mkdirSync(service);
+    fs.writeFileSync(
+      path.join(service, "package.json"),
+      JSON.stringify({ name: "nested-service", dependencies: { express: "^5" } }),
+    );
+    fs.writeFileSync(
+      path.join(service, "app.js"),
+      [
+        'const express = require("express");',
+        "const app = express();",
+        'app.get("/health", handler);',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(root, "openapi.yaml"),
+      [
+        "openapi: 3.1.0",
+        "info:",
+        "  title: Unowned root API",
+        "  version: 1.0.0",
+        "paths: {}",
+      ].join("\n"),
+    );
+    const report = buildReport(inventory({ mode: "static", src: root }), {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+    });
+    assert.throws(
+      () => reconcileDocumentation(report, { root }),
+      /outside the detected Express application package service/,
+    );
+    const explicit = reconcileDocumentation(report, {
+      root,
+      applicationId: "app:service/app.js#app",
+    });
+    assert.equal(explicit.report.selection.reason, "explicit");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("an intentional all-app merge surfaces duplicate operations", () => {
@@ -65,6 +113,148 @@ test("an intentional all-app merge surfaces duplicate operations", () => {
     applicationId: "all",
   });
   assert.ok(report.duplicateOperations.some((item) => item.path === "/health"));
+});
+
+test("top-level JSDoc tags merge by name instead of conflicting as whole arrays", () => {
+  const dir = fs.mkdtempSync(path.join(FIXTURE, ".docs-tags-"));
+  try {
+    const first = path.join(dir, "first.js");
+    const second = path.join(dir, "second.js");
+    fs.writeFileSync(
+      first,
+      [
+        "/**",
+        " * @openapi",
+        " * tags:",
+        " *   - name: Documents",
+        " *     description: Document operations",
+        " */",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      second,
+      [
+        "/**",
+        " * @openapi",
+        " * tags:",
+        " *   - name: Generation",
+        " *     description: File generation operations",
+        " */",
+      ].join("\n"),
+    );
+    const { document, report } = reconciled({
+      jsdoc: [path.relative(FIXTURE, first), path.relative(FIXTURE, second)],
+    });
+    assert.deepEqual(
+      document.tags.map((tag) => tag.name),
+      ["Documents", "Generation"],
+    );
+    assert.equal(
+      report.conflicts.some((conflict) => conflict.pointer === "/tags"),
+      false,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("opaque mounts make documentation-only operations unverified and inventory incomplete", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-opaque-docs-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "opaque-docs", dependencies: { express: "^5" } }),
+    );
+    fs.writeFileSync(path.join(root, "config.js"), 'module.exports = "/scheduler/dashboard";');
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      [
+        'const express = require("express");',
+        'const dashboardHome = require("./config");',
+        "const app = express();",
+        "app.use(dashboardHome, authenticate, agendash);",
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(root, "openapi.json"),
+      JSON.stringify({
+        openapi: "3.1.0",
+        info: { title: "Opaque mount", version: "1" },
+        paths: {
+          "/scheduler/dashboard": {
+            get: { responses: { 200: { description: "OK" } } },
+          },
+        },
+      }),
+    );
+    const report = buildReport(inventory({ mode: "static", src: root }), {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+    });
+    const result = reconcileDocumentation(report, { root });
+    assert.equal(result.report.summary.incompleteInventory, true);
+    assert.equal(result.report.summary.verifiedDocsOnlyOperations, 0);
+    assert.equal(result.report.summary.unverifiedDocsOnlyOperations, 1);
+    assert.deepEqual(result.report.unverifiedDocsOnlyOperations, ["GET /scheduler/dashboard"]);
+    assert.equal(result.report.routeGraph.opaqueMounts.length, 1);
+
+    const drift = spawnSync("node", [CLI, "docs", "--src", root, "--fail-on", "docs-drift"], {
+      encoding: "utf8",
+    });
+    assert.equal(drift.status, 0, drift.stderr);
+    const incomplete = spawnSync(
+      "node",
+      [CLI, "docs", "--src", root, "--fail-on", "docs-incomplete"],
+      { encoding: "utf8" },
+    );
+    assert.equal(incomplete.status, 2, incomplete.stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("opaque mount uncertainty is scoped and ordinary middleware is not a route provider", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-scoped-opaque-docs-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "scoped-opaque-docs", dependencies: { express: "^5" } }),
+    );
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      [
+        'const express = require("express");',
+        "const app = express();",
+        'app.use("/subscription/*", createRequestContext);',
+        'app.use("/docs", swaggerUi.serve);',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(root, "openapi.json"),
+      JSON.stringify({
+        openapi: "3.1.0",
+        info: { title: "Scoped opaque mount", version: "1" },
+        paths: {
+          "/docs/index.html": { get: { responses: { 200: { description: "OK" } } } },
+          "/stale": { get: { responses: { 200: { description: "OK" } } } },
+        },
+      }),
+    );
+    const report = buildReport(inventory({ mode: "static", src: root }), {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+    });
+    const result = reconcileDocumentation(report, { root });
+    assert.equal(result.report.routeGraph.opaqueMounts.length, 1);
+    assert.deepEqual(result.report.unverifiedDocsOnlyOperations, ["GET /docs/index.html"]);
+    assert.deepEqual(result.report.verifiedDocsOnlyOperations, ["GET /stale"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("reconciliation is idempotent", () => {

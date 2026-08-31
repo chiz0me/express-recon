@@ -193,7 +193,7 @@ function createScanScope(root, opts = {}) {
     ignoreFile: ignore.evidence,
     builtIn: {
       excludedDirectories: [...SKIP_DIRS].sort(),
-      hiddenDirectoriesExcluded: true,
+      hiddenDirectoriesExcluded: !opts.includeHidden,
     },
   };
   evidence.fingerprint = crypto
@@ -266,7 +266,9 @@ function listSourceFiles(dir, opts = {}) {
       }
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        if (SKIP_DIRS.has(entry.name) || (!opts.includeHidden && entry.name.startsWith("."))) {
+          continue;
+        }
         if (!includeTests && TEST_DIRS.has(entry.name)) continue;
         stack.push(full);
       } else if (SOURCE_EXT.has(path.extname(entry.name))) {
@@ -394,7 +396,7 @@ function buildGraph(files, resolve) {
   const stats = { dropped: 0 };
   const ensure = (id, kind, metadata = {}) => {
     if (!nodes.has(id)) {
-      nodes.set(id, { id, kind, routes: [], globalMw: [], edges: [], ...metadata });
+      nodes.set(id, { id, kind, routes: [], globalMw: [], edges: [], opaqueUses: [], ...metadata });
     }
     return nodes.get(id);
   };
@@ -444,6 +446,9 @@ function buildGraph(files, resolve) {
     }
     for (const [host, mws] of file.globalMwByHost) {
       resolveLocal(file, host).globalMw.push(...mws.map((e) => ({ ...e, file: file.filePath })));
+    }
+    for (const use of file.opaqueUses || []) {
+      resolveLocal(file, use.host).opaqueUses.push({ ...use, file: file.filePath });
     }
     for (const edge of file.edges) {
       const target = resolveRef(file, edge.targetRef);
@@ -513,6 +518,17 @@ function traverse(nodes, nodeId, prefix, inherited, partial, stack, ctx) {
   if (!node) return;
   ctx.visited.add(nodeId);
   const own = node.globalMw.map((e) => ({ ...e, scopeAbs: absScope(prefix, e.scope) }));
+  for (const use of node.opaqueUses || []) {
+    ctx.opaqueUses?.push({
+      path:
+        use.pathConfidence === "unknown" || use.mountPath === null
+          ? null
+          : joinPath(prefix, use.mountPath),
+      pathConfidence: use.pathConfidence,
+      middlewares: use.middlewares,
+      source: { file: use.file, line: use.line },
+    });
+  }
   for (const route of node.routes) {
     const accMw = inherited.concat(own.filter((e) => appliesInOrder(e, route)));
     emitRoute(route, prefix, accMw, partial, ctx.out);
@@ -541,7 +557,7 @@ function applicationId(root, node) {
  * Flag when static resolution likely under- or over-counted routes, so a
  * confident-looking report can't hide a collapsed mount graph.
  */
-function diagnose({ appNodes, reachable, orphan, dropped }) {
+function diagnose({ appNodes, reachable, orphan, dropped, opaqueMounts }) {
   const out = [];
   if (appNodes > 0 && reachable === 0 && orphan + dropped > 0) {
     out.push(
@@ -561,6 +577,12 @@ function diagnose({ appNodes, reachable, orphan, dropped }) {
     out.push(
       `${orphan} route(s) belong to routers never mounted on an app and were emitted ` +
         "with an unknown path prefix.",
+    );
+  }
+  if (opaqueMounts > 0) {
+    out.push(
+      `${opaqueMounts} use() registration(s) may mount opaque route providers; ` +
+        "documentation-only operations under those mounts cannot be verified statically.",
     );
   }
   return out;
@@ -682,10 +704,13 @@ function scan(rootDir, opts = {}) {
     if (node.kind !== "app") continue;
     appNodes++;
     const id = applicationId(root, node);
-    const appCtx = { out: [], visited: ctx.visited };
+    const appCtx = { out: [], visited: ctx.visited, opaqueUses: [] };
     traverse(nodes, node.id, "", [], false, new Set([node.id]), appCtx);
     for (const route of appCtx.out) route.applicationId = id;
     ctx.out.push(...appCtx.out);
+    for (const use of appCtx.opaqueUses) {
+      (ctx.opaqueUses ||= []).push({ ...use, applicationId: id });
+    }
     applications.push({
       id,
       name: `${path.relative(root, node.file).split(path.sep).join("/")}#${node.var}`,
@@ -729,7 +754,35 @@ function scan(rootDir, opts = {}) {
   const globalMiddleware = [];
   for (const node of nodes.values())
     if (node.kind === "app") globalMiddleware.push(...node.globalMw.map((e) => e.mw));
-  diagnostics.push(...diagnose({ appNodes, reachable, orphan, dropped: stats.dropped }));
+  const unresolvedOpaqueUses = [];
+  for (const node of nodes.values()) {
+    if (ctx.visited.has(node.id)) continue;
+    for (const use of node.opaqueUses || []) {
+      unresolvedOpaqueUses.push({
+        applicationId: null,
+        path: use.pathConfidence === "full" ? use.mountPath : null,
+        pathConfidence: use.pathConfidence,
+        middlewares: use.middlewares,
+        source: { file: use.file, line: use.line },
+      });
+    }
+  }
+  const opaqueSeen = new Set();
+  const opaqueMounts = [...(ctx.opaqueUses || []), ...unresolvedOpaqueUses].filter((item) => {
+    const key = `${item.applicationId || ""}\0${item.path || ""}\0${item.source.file}:${item.source.line}`;
+    if (opaqueSeen.has(key)) return false;
+    opaqueSeen.add(key);
+    return true;
+  });
+  diagnostics.push(
+    ...diagnose({
+      appNodes,
+      reachable,
+      orphan,
+      dropped: stats.dropped,
+      opaqueMounts: opaqueMounts.length,
+    }),
+  );
   for (const [host, count] of registrarHosts) {
     diagnostics.push(
       `${count} route(s) registered on unresolved host ${host} — likely a registrar ` +
@@ -737,7 +790,15 @@ function scan(rootDir, opts = {}) {
         "Re-run with --mode hybrid --app <entry> to recover them.",
     );
   }
-  return { routes, globalMiddleware, applications, diagnostics, scanCoverage };
+  const registrarRoutes = [...registrarHosts.values()].reduce((total, count) => total + count, 0);
+  const orphanRoutes = routes.filter((route) => route.applicationId === null).length;
+  const routeGraph = {
+    complete: orphanRoutes === 0 && opaqueMounts.length === 0,
+    orphanRoutes,
+    registrarRoutes,
+    opaqueMounts,
+  };
+  return { routes, globalMiddleware, applications, diagnostics, scanCoverage, routeGraph };
 }
 
 module.exports = { scan, scanLimits, createScanScope, listSourceFiles, buildGraph };

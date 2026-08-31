@@ -41,6 +41,8 @@ test("configuration rejects unknown fields and malformed scan/baseline values", 
   assert.throws(() => validateConfig({ authMiddlewares: {} }), /unknown field/);
   assert.throws(() => validateConfig({ scan: { includes: ["src/**"] } }), /unknown field/);
   assert.throws(() => validateConfig({ scan: { include: "src/**" } }), /array/);
+  assert.throws(() => validateConfig({ scan: { includeHidden: "yes" } }), /boolean/);
+  assert.doesNotThrow(() => validateConfig({ scan: { includeHidden: true } }));
   assert.throws(() => validateConfig({ acceptedPublic: ["get /health"] }), /METHOD \/path/);
   assert.throws(() => validateConfig({ acceptedPublic: ["GET /health "] }), /METHOD \/path/);
   assert.throws(

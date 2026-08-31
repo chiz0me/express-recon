@@ -582,6 +582,22 @@ function flattenLayers(args) {
   return flat;
 }
 
+const OPAQUE_ROUTE_PROVIDER_SIGNAL =
+  /agendash|swagger|openapi|graphi?ql|dashboard|adminjs|adminbro|bull.?board|router|routes|route-provider/i;
+
+/**
+ * `use()` also attaches ordinary middleware, so treating every unresolved
+ * identifier as a hidden router would make nearly every Express app
+ * incomplete. Retain only strong route-provider signals for integrations whose
+ * routes live behind middleware rather than METHOD() registrations.
+ */
+function looksLikeOpaqueRouteProvider(item) {
+  const ref = item.ref || {};
+  return OPAQUE_ROUTE_PROVIDER_SIGNAL.test(
+    [item.mw?.name, ref.source, ...(ref.props || [])].filter(Boolean).join(" "),
+  );
+}
+
 /** Collect `host.use(...)` mounts and host-level middleware into `out`. */
 function extractMounts(program, code, ctx, out) {
   walk(program, (node) => {
@@ -605,6 +621,36 @@ function extractMounts(program, code, ctx, out) {
     }));
     const refs = tagged.filter((t) => isMountRef(t.node, t.ref, ctx));
     const mws = tagged.filter((t) => !isMountRef(t.node, t.ref, ctx)).map((t) => t.mw);
+    const opaqueLayers = tagged.filter((item) => {
+      if (isMountRef(item.node, item.ref, ctx)) return false;
+      const layer = unwrap(item.node);
+      return (
+        (layer.type === "Identifier" || layer.type === "MemberExpression") &&
+        looksLikeOpaqueRouteProvider(item)
+      );
+    });
+    const first = unwrap(node.arguments[0]);
+    const ambiguousLeadingPath =
+      !hasPath &&
+      node.arguments.length > 1 &&
+      first &&
+      (first.type === "Identifier" || first.type === "MemberExpression");
+    if (opaqueLayers.length > 0 && ((refs.length === 0 && hasPath) || ambiguousLeadingPath)) {
+      for (const candidatePath of hasPath ? mountPaths : [null]) {
+        out.opaqueUses.push({
+          host,
+          mountPath: candidatePath,
+          pathConfidence:
+            hasPath && candidatePath !== "<dynamic>"
+              ? "full"
+              : ambiguousLeadingPath
+                ? "unknown"
+                : "partial",
+          middlewares: opaqueLayers.map((item) => item.mw.name),
+          line,
+        });
+      }
+    }
     for (const mountPath of mountPaths) {
       if (refs.length === 0) {
         // Path-scoped middleware keeps its scope so it can be applied only to
@@ -745,6 +791,7 @@ function analyzeFile(code, filePath, onParseError) {
     routes: [],
     edges: [],
     registrarRoutes: [],
+    opaqueUses: [],
     globalMwByHost: new Map(),
     handlerIndex,
     lineAt,

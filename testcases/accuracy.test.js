@@ -158,6 +158,20 @@ test("hybrid reconcile merges a partial static route with its runtime twin by su
   assert.deepEqual(routes[0].observations.conflicts, ["path"]);
 });
 
+test("hybrid reconcile preserves static route-graph uncertainty", () => {
+  const routeGraph = {
+    complete: false,
+    orphanRoutes: 1,
+    registrarRoutes: 1,
+    opaqueMounts: [],
+  };
+  const result = reconcile(
+    { routes: [], globalMiddleware: [], routeGraph },
+    { routes: [], globalMiddleware: [] },
+  );
+  assert.deepEqual(result.routeGraph, routeGraph);
+});
+
 test("hybrid reconcile pairs routes by registration source when suffixes are ambiguous", () => {
   const { routes } = reconcile(
     { routes: [staticRoute("/users/:id")], globalMiddleware: [] },
