@@ -20,6 +20,10 @@ const TEST_DIRS = new Set([
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 const DOC_EXTENSIONS = new Set([".json", ".yaml", ".yml"]);
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".cjs", ".mjs", ".ts", ".tsx", ".cts", ".mts"]);
+// Swagger UI's browser distributions contain OpenAPI-shaped strings and export
+// wrappers, but they are render-time code rather than authored API contracts.
+const SWAGGER_UI_RUNTIME_ASSET =
+  /^swagger-ui(?:-es-bundle(?:-core)?|-bundle|-standalone-preset)?(?:\.min)?\.[cm]?js$/i;
 
 function relevantRepositoryFile(name) {
   const extension = path.extname(name).toLowerCase();
@@ -346,6 +350,7 @@ function looksLikeSpec(file, maxFileBytes, diagnostics) {
 
 function moduleSpecSignal(file, code) {
   if (!MODULE_EXTENSIONS.has(path.extname(file).toLowerCase())) return false;
+  if (SWAGGER_UI_RUNTIME_ASSET.test(path.basename(file))) return false;
   if (!/(?:module\.exports\s*=|export\s+default\b)/.test(code)) return false;
   if (!/(^|[\s,{])["']?(openapi|swagger)["']?\s*:/m.test(code)) return false;
   return /openapi|swagger|api[-_.]?docs?/i.test(file.split(path.sep).join("/"));

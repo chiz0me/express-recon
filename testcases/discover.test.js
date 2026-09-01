@@ -125,6 +125,33 @@ test("statically reconstructs data-only ESM OpenAPI modules", () => {
   }
 });
 
+test("Swagger UI runtime bundles are not treated as API specification modules", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-swagger-ui-assets-"));
+  try {
+    const assets = path.join(root, "static", "swagger");
+    fs.mkdirSync(assets, { recursive: true });
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "ui-assets" }));
+    for (const filename of [
+      "swagger-ui.js",
+      "swagger-ui-bundle.js",
+      "swagger-ui-es-bundle.js",
+      "swagger-ui-standalone-preset.js",
+    ]) {
+      fs.writeFileSync(
+        path.join(assets, filename),
+        "module.exports = { openapi: '3.1.0', swagger: '2.0', runtime: this };",
+      );
+    }
+
+    const result = discover(root);
+    assert.deepEqual(result.documentation.specifications, []);
+    assert.equal(result.discoveryCoverage.complete, true);
+    assert.doesNotMatch(result.diagnostics.join("\n"), /statically resolve OpenAPI module/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("executable OpenAPI modules fail closed without running repository code", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-unsafe-openapi-module-"));
   try {

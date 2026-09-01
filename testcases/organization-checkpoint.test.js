@@ -174,6 +174,17 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
     assert.equal(loaded.entries[0].routeGraphComplete, false);
     assert.deepEqual(loaded.diagnostics, []);
 
+    const preCatalog = structuredClone(entry);
+    preCatalog.express.documentation = { specifications: 1 };
+    atomicWriteJson(file, {
+      ...checkpoint,
+      completed: [preCatalog],
+    });
+    const refresh = loadCheckpoint(file, "acme", currentIdentity, root);
+    assert.equal(refresh.entries.length, 0);
+    assert.match(refresh.diagnostics[0], /predates retained specification catalogs/);
+    atomicWriteJson(file, checkpoint);
+
     fs.appendFileSync(path.join(root, "repositories", "z-api", "routes.json"), "damaged");
     const damaged = loadCheckpoint(file, "acme", currentIdentity, root);
     assert.equal(damaged.entries.length, 0);

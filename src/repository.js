@@ -7,7 +7,7 @@ const { spawnSync } = require("node:child_process");
 const { inventory, audit } = require("./harness");
 const { buildReport } = require("./report");
 const { discover } = require("./discover");
-const { reconcileDocumentation } = require("./docs");
+const { describeRenderableSpecification, loadSpec, reconcileDocumentation } = require("./docs");
 const { loadPackageInfo } = require("./static/resolve");
 const { scanLimits } = require("./static/scan");
 const pkg = require("../package.json");
@@ -440,6 +440,163 @@ function repositoryProgress(callback, source) {
   };
 }
 
+function safeDocumentationError(error, root) {
+  let message = String(error instanceof Error ? error.message : error);
+  for (const value of [root, fs.realpathSync(root)]) message = message.split(value).join(".");
+  return message.slice(0, 2_000);
+}
+
+function specificationInput(root, relativePath, limits) {
+  const realRoot = fs.realpathSync(root);
+  const file = path.resolve(realRoot, ...String(relativePath).split("/"));
+  if (!within(realRoot, file)) throw new Error("specification path leaves the repository snapshot");
+  const realFile = fs.realpathSync(file);
+  if (!within(realRoot, realFile)) {
+    throw new Error("specification symlink leaves the repository snapshot");
+  }
+  const stat = fs.statSync(realFile);
+  if (!stat.isFile()) throw new Error("specification input is not a file");
+  if (stat.size > limits.maxFileBytes) {
+    throw new Error(
+      `specification is ${stat.size} bytes, exceeding scan.maxFileBytes (${limits.maxFileBytes})`,
+    );
+  }
+  return { root: realRoot, file: realFile, bytes: stat.size };
+}
+
+/**
+ * Parse discovered API contracts as bounded data before the temporary source
+ * snapshot is removed. Documents are embedded only when a caller will persist
+ * them immediately, keeping ordinary library scans and stdout compact.
+ */
+function catalogSpecifications(root, discovery, scan, retainDocuments) {
+  const limits = scanLimits(scan);
+  const deadline = Date.now() + limits.timeoutMs;
+  const specifications = [];
+  let totalBytes = 0;
+  for (const discovered of discovery.documentation?.specifications || []) {
+    const metadata = {
+      path: discovered.path,
+      format: discovered.format,
+      version: discovered.version ?? null,
+      packageId: discovered.packageId ?? null,
+    };
+    try {
+      if (Date.now() >= deadline) {
+        throw new Error(`specification catalog exceeded scan.timeoutMs (${limits.timeoutMs}ms)`);
+      }
+      const input = specificationInput(root, discovered.path, limits);
+      totalBytes += input.bytes;
+      if (totalBytes > limits.maxTotalBytes) {
+        throw new Error(`specification inputs exceed scan.maxTotalBytes (${limits.maxTotalBytes})`);
+      }
+      const document = loadSpec(input.file, {
+        ...limits,
+        root: input.root,
+        allowSwagger2: true,
+      });
+      const description = describeRenderableSpecification(
+        document,
+        `API documentation ${JSON.stringify(discovered.path)}`,
+      );
+      specifications.push({
+        ...metadata,
+        ...description,
+        status: "available",
+        bytes: input.bytes,
+        ...(retainDocuments ? { document } : {}),
+      });
+    } catch (error) {
+      specifications.push({
+        ...metadata,
+        status: "unavailable",
+        reason: safeDocumentationError(error, root),
+      });
+    }
+  }
+  const available = specifications.filter((item) => item.status === "available");
+  return {
+    specifications,
+    summary: {
+      discovered: specifications.length,
+      available: available.length,
+      unavailable: specifications.length - available.length,
+      openapi: available.filter((item) => item.format === "openapi").length,
+      swagger: available.filter((item) => item.format === "swagger").length,
+      reconciled: 0,
+      documentsRetained: retainDocuments === true,
+    },
+  };
+}
+
+function scopedJSDoc(discovery, packageId) {
+  return (discovery.documentation?.jsdoc || []).filter(
+    (file) => packageForPath(discovery, file) === packageId,
+  );
+}
+
+/**
+ * Reconcile a catalog entry only when one OpenAPI document maps to one package
+ * and one application. Multiple contracts in the same package deliberately
+ * remain independent because route ownership cannot be inferred safely.
+ */
+function reconcileUnambiguousSpecifications(report, options, catalog) {
+  if (!options.retainDocuments) return;
+  const deadline = Date.now() + scanLimits(options.scan).timeoutMs;
+  const candidates = catalog.specifications.filter(
+    (item) => item.status === "available" && item.format === "openapi",
+  );
+  if (candidates.length < 2) return;
+  const packageCounts = new Map();
+  for (const item of candidates) {
+    if (item.packageId)
+      packageCounts.set(item.packageId, (packageCounts.get(item.packageId) || 0) + 1);
+  }
+  const reportApplications = new Set((report.applications || []).map((item) => item.id));
+  for (const item of candidates) {
+    if (Date.now() >= deadline) {
+      item.reconciliation = { status: "not-attempted", reason: "catalog-timeout" };
+      continue;
+    }
+    if (!item.packageId || packageCounts.get(item.packageId) !== 1) {
+      item.reconciliation = { status: "not-attempted", reason: "ambiguous-route-ownership" };
+      continue;
+    }
+    const applications = (options.discovery.applications || []).filter(
+      (application) =>
+        application.packageId === item.packageId && reportApplications.has(application.id),
+    );
+    if (applications.length !== 1) {
+      item.reconciliation = { status: "not-attempted", reason: "ambiguous-application" };
+      continue;
+    }
+    const jsdoc = scopedJSDoc(options.discovery, item.packageId);
+    try {
+      const result = reconcileDocumentation(report, {
+        root: options.root,
+        scan: options.scan,
+        discovery: options.discovery,
+        applicationId: applications[0].id,
+        spec: item.path,
+        jsdoc,
+        disableAutoJSDoc: jsdoc.length === 0,
+      });
+      item.reconciliation = {
+        status: "merged",
+        applicationId: applications[0].id,
+        document: result.document,
+        report: result.report,
+      };
+      catalog.summary.reconciled++;
+    } catch (error) {
+      item.reconciliation = {
+        status: "needs-input",
+        reason: safeDocumentationError(error, options.root),
+      };
+    }
+  }
+}
+
 /**
  * Acquire, statically scan, and document one repository, then remove its
  * temporary source snapshot in a finally block. Target code and dependencies
@@ -496,27 +653,65 @@ function scanRepository(source, opts = {}) {
       command,
       routes: inventoryReport.routes.length,
     });
+    const retainDocuments = opts.retainSpecificationDocuments === true;
+    const catalog = catalogSpecifications(root, discovery, scan, retainDocuments);
     let documentation;
     const selected = opts.applicationId;
+    const discoveredOpenApiCandidates = discovery.documentation.specifications.filter((item) =>
+      ["openapi", "candidate", "openapi-module", "openapi-module-candidate"].includes(item.format),
+    );
+    const soleAvailableOpenApi = catalog.specifications.find(
+      (item) => item.status === "available" && item.format === "openapi",
+    );
+    const selectedSpec =
+      !opts.spec && discoveredOpenApiCandidates.length > 1 && catalog.summary.openapi === 1
+        ? soleAvailableOpenApi.path
+        : opts.spec;
     try {
       const result = reconcileDocumentation(inventoryReport, {
         root,
         scan,
         discovery,
         applicationId: selected,
-        spec: opts.spec,
+        spec: selectedSpec,
         jsdoc: opts.jsdoc,
       });
-      documentation = { status: "merged", document: result.document, report: result.report };
-    } catch (err) {
       documentation = {
-        status:
-          err.code === "APPLICATION_SELECTION_REQUIRED"
-            ? "needs-application-selection"
-            : "needs-input",
-        reason: err.message,
-        ...(Array.isArray(err.applicationIds) ? { applicationIds: err.applicationIds } : {}),
+        status: "merged",
+        document: result.document,
+        report: result.report,
+        specifications: catalog.specifications,
+        summary: catalog.summary,
       };
+    } catch (err) {
+      const multipleOpenApi = !selectedSpec && catalog.summary.openapi > 1;
+      if (multipleOpenApi && retainDocuments) {
+        reconcileUnambiguousSpecifications(
+          inventoryReport,
+          { root, scan, discovery, retainDocuments },
+          catalog,
+        );
+        documentation = {
+          status: "cataloged",
+          reason:
+            `${catalog.summary.available} API contracts were retained independently ` +
+            `(${catalog.summary.openapi} OpenAPI 3, ${catalog.summary.swagger} Swagger 2); ` +
+            "no canonical OpenAPI merge was selected. Use scan-repo --spec <path> to request one explicitly.",
+          specifications: catalog.specifications,
+          summary: catalog.summary,
+        };
+      } else {
+        documentation = {
+          status:
+            err.code === "APPLICATION_SELECTION_REQUIRED"
+              ? "needs-application-selection"
+              : "needs-input",
+          reason: safeDocumentationError(err, root),
+          specifications: catalog.specifications,
+          summary: catalog.summary,
+          ...(Array.isArray(err.applicationIds) ? { applicationIds: err.applicationIds } : {}),
+        };
+      }
     }
     progress({
       phase: "cleaning-up",

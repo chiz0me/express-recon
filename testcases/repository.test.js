@@ -104,6 +104,125 @@ test("scan-repo CLI emits portable provenance, discovery, inventory, and docs", 
   });
 });
 
+test("multiple API specifications are cataloged and persisted without an arbitrary merge", () => {
+  withRepository((root) => {
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-spec-catalog-"));
+    try {
+      fs.writeFileSync(
+        path.join(root, "docs", "secondary.json"),
+        JSON.stringify({
+          openapi: "3.0.3",
+          info: { title: "Secondary API", version: "1" },
+          paths: { "/secondary": { get: { responses: { 200: { description: "ok" } } } } },
+        }),
+      );
+      fs.writeFileSync(
+        path.join(root, "docs", "legacy.json"),
+        JSON.stringify({
+          swagger: "2.0",
+          info: { title: "Legacy API", version: "1" },
+          paths: { "/legacy": { get: { responses: { 200: { description: "ok" } } } } },
+        }),
+      );
+      git(root, ["add", "docs"]);
+      git(root, ["commit", "--quiet", "-m", "add specification catalog fixture"]);
+
+      const result = scanRepository(root, { retainSpecificationDocuments: true });
+      assert.equal(result.documentation.status, "cataloged");
+      assert.match(
+        result.documentation.reason,
+        /3 API contracts.*2 OpenAPI 3, 1 Swagger 2.*no canonical OpenAPI merge/,
+      );
+      assert.deepEqual(
+        {
+          available: result.documentation.summary.available,
+          openapi: result.documentation.summary.openapi,
+          swagger: result.documentation.summary.swagger,
+          reconciled: result.documentation.summary.reconciled,
+        },
+        { available: 3, openapi: 2, swagger: 1, reconciled: 0 },
+      );
+      assert.ok(
+        result.documentation.specifications
+          .filter((item) => item.format === "openapi")
+          .every(
+            (item) => item.document && item.reconciliation?.reason === "ambiguous-route-ownership",
+          ),
+      );
+
+      execFileSync("node", [CLI, "scan-repo", "--repo", root, "--out", output], {
+        encoding: "utf8",
+      });
+      const persisted = JSON.parse(fs.readFileSync(path.join(output, "repo-scan.json"), "utf8"));
+      assert.equal(persisted.documentation.status, "cataloged");
+      assert.equal(persisted.documentation.summary.retained, 3);
+      assert.ok(
+        persisted.documentation.specifications.every(
+          (item) => item.status === "retained" && !Object.hasOwn(item, "document"),
+        ),
+      );
+      for (const item of persisted.documentation.specifications) {
+        assert.ok(fs.statSync(path.join(output, item.artifact)).isFile(), item.artifact);
+      }
+      assert.equal(fs.existsSync(path.join(output, "openapi.json")), false);
+    } finally {
+      fs.rmSync(output, { recursive: true, force: true });
+    }
+  });
+});
+
+test("multi-package specification catalogs reconcile only one-to-one application ownership", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-spec-ownership-"));
+  try {
+    for (const name of ["accounts", "payments"]) {
+      const directory = path.join(root, "packages", name);
+      fs.mkdirSync(path.join(directory, "docs"), { recursive: true });
+      fs.writeFileSync(
+        path.join(directory, "package.json"),
+        JSON.stringify({ name, version: "1.0.0", dependencies: { express: "^5.0.0" } }),
+      );
+      fs.writeFileSync(
+        path.join(directory, "app.js"),
+        [
+          'const express = require("express");',
+          "const app = express();",
+          `app.get("/${name}", (_req, res) => res.send("ok"));`,
+          "module.exports = app;",
+        ].join("\n"),
+      );
+      fs.writeFileSync(
+        path.join(directory, "docs", "openapi.json"),
+        JSON.stringify({
+          openapi: "3.1.0",
+          info: { title: `${name} API`, version: "1" },
+          paths: {},
+        }),
+      );
+    }
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.test"]);
+    git(root, ["config", "user.name", "express-recon tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "multi-package fixture"]);
+
+    const result = scanRepository(root, { retainSpecificationDocuments: true });
+    assert.equal(result.documentation.status, "cataloged");
+    assert.equal(result.documentation.summary.reconciled, 2);
+    assert.ok(
+      result.documentation.specifications.every(
+        (item) =>
+          item.reconciliation?.status === "merged" &&
+          typeof item.reconciliation.applicationId === "string" &&
+          Object.keys(item.reconciliation.document.paths).some((route) =>
+            route.includes(path.basename(item.packageId.replace("package:", ""))),
+          ),
+      ),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("ignored symlinks make repository acquisition explicitly incomplete", () => {
   withRepository((root) => {
     const result = scanRepository(root, {

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const pkg = require("../package.json");
 const { getAbsoluteFSPath: swaggerUiPath } = require("swagger-ui-dist");
-const { loadSpec } = require("./docs");
+const { describeRenderableSpecification, loadSpec } = require("./docs");
 const { isFrameworkStatus } = require("./frameworks");
 const { SCRIPT, STYLES } = require("./html-assets");
 const {
@@ -16,6 +16,7 @@ const {
 
 const MAX_JSON_BYTES = 128 * 1024 * 1024;
 const MAX_OPENAPI_BYTES = 32 * 1024 * 1024;
+const MAX_SPECIFICATIONS_PER_REPOSITORY = 500;
 const INPUT_CANDIDATES = [
   "organization-inventory.json",
   "repo-scan.json",
@@ -78,9 +79,16 @@ function object(value) {
 
 function tone(value) {
   if (
-    ["express", "fastify", "nestjs", "multi-framework", "proven", "merged", "complete"].includes(
-      value,
-    )
+    [
+      "express",
+      "fastify",
+      "nestjs",
+      "multi-framework",
+      "proven",
+      "merged",
+      "cataloged",
+      "complete",
+    ].includes(value)
   )
     return "good";
   if (["inconclusive", "unknown", "needs-input", "needs-application-selection"].includes(value)) {
@@ -109,8 +117,9 @@ function notice(title, message, kind = "info") {
   return `<div class="notice${modifier}" role="status"><strong>${escapeHtml(title)}</strong>${escapeHtml(message)}</div>`;
 }
 
-function panel(title, body, description = "") {
-  return `<section class="panel"><div class="panel__head"><div><h2>${escapeHtml(title)}</h2>${description ? `<p class="panel__description">${escapeHtml(description)}</p>` : ""}</div></div>${body}</section>`;
+function panel(title, body, description = "", options = {}) {
+  const id = options.id ? ` id="${escapeHtml(options.id)}"` : "";
+  return `<section class="panel"${id}><div class="panel__head"><div><h2>${escapeHtml(title)}</h2>${description ? `<p class="panel__description">${escapeHtml(description)}</p>` : ""}</div></div>${body}</section>`;
 }
 
 function sourceLabel(source) {
@@ -253,6 +262,15 @@ function discoveryPanel(discoveryValue) {
   const discovery = object(discoveryValue);
   const packages = list(discovery.packages);
   const docs = object(discovery.documentation);
+  const specifications = list(docs.specifications);
+  const openapiSpecifications = specifications.filter((item) =>
+    ["openapi", "candidate", "openapi-module", "openapi-module-candidate"].includes(
+      object(item).format,
+    ),
+  ).length;
+  const swaggerSpecifications = specifications.filter((item) =>
+    ["swagger", "swagger-module"].includes(object(item).format),
+  ).length;
   const coverage = object(discovery.discoveryCoverage);
   if (!packages.length && !list(docs.specifications).length && !list(docs.jsdoc).length) return "";
   const cards = packages
@@ -282,8 +300,9 @@ function discoveryPanel(discoveryValue) {
       ${packages.length ? `<div class="cards">${cards}</div>` : ""}
       ${metrics([
         ["Packages", packages.length],
-        ["OpenAPI specifications", list(docs.specifications).length],
-        ["Swagger/JSDoc sources", list(docs.jsdoc).length],
+        ["OpenAPI specifications", openapiSpecifications],
+        ["Swagger specifications", swaggerSpecifications],
+        ["JSDoc sources", list(docs.jsdoc).length],
         ["Orphan routes", count(discovery.orphanRoutes)],
         ["Discovery coverage", completeness(coverage.complete)],
       ])}
@@ -292,14 +311,27 @@ function discoveryPanel(discoveryValue) {
   );
 }
 
-function documentationPanel(documentationValue, openApiHref = "") {
+function documentationPanel(documentationValue, apiReferences = []) {
   const documentation = object(documentationValue);
   if (!documentation.status) return "";
   const report = object(documentation.report);
   const summary = object(report.summary);
+  const catalogSummary = object(documentation.summary);
   const reason = documentation.reason
     ? `<p>${escapeHtml(documentation.reason)}</p>`
     : `<p class="empty">No additional documentation note.</p>`;
+  const references = list(apiReferences);
+  const referenceList = references.length
+    ? `<h3>API references</h3><ul class="plain-list">${references
+        .map((referenceValue) => {
+          const reference = object(referenceValue);
+          const detail = [reference.source, reference.format, reference.version]
+            .filter(Boolean)
+            .join(" · ");
+          return `<li><a href="${escapeHtml(reference.href)}">${escapeHtml(display(reference.label, "API reference"))}</a>${detail ? ` <span class="subtle">${escapeHtml(detail)}</span>` : ""}</li>`;
+        })
+        .join("")}</ul>`
+    : "";
   return panel(
     "Documentation reconciliation",
     `<div class="panel__body"><p>${badge(documentation.status)}</p>${reason}${
@@ -312,8 +344,18 @@ function documentationPanel(documentationValue, openApiHref = "") {
             ["Conflicts", count(summary.conflicts)],
           ])
         : ""
-    }${openApiHref ? `<p><a href="${escapeHtml(openApiHref)}">Browse OpenAPI reference</a></p>` : ""}</div>`,
+    }${
+      documentation.status === "cataloged"
+        ? metrics([
+            ["Available specifications", count(catalogSummary.available)],
+            ["OpenAPI", count(catalogSummary.openapi)],
+            ["Swagger", count(catalogSummary.swagger)],
+            ["Safely reconciled", count(catalogSummary.reconciled)],
+          ])
+        : ""
+    }${referenceList}</div>`,
     "Existing OpenAPI, Swagger/JSDoc, and route evidence",
+    { id: "api-specifications" },
   );
 }
 
@@ -494,7 +536,7 @@ function repositoryPage(scan, fallback, navigation = {}) {
     ...navigation,
     beforeRoutes:
       repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
-    afterRoutes: documentationPanel(scan.documentation, navigation.openApiHref),
+    afterRoutes: documentationPanel(scan.documentation, navigation.apiReferences),
   });
 }
 
@@ -532,21 +574,11 @@ function inputKind(value) {
   if (["inventory", "audit"].includes(value?.command) && Array.isArray(value.routes)) {
     return "routes";
   }
-  if (value?.swagger !== undefined) {
-    throw new Error("Unsupported HTML report input; Swagger 2 must be converted to OpenAPI 3");
-  }
-  if (value?.openapi !== undefined) {
-    if (!/^3\.\d+\.\d+(?:[-+].*)?$/.test(value.openapi)) {
-      throw new Error(`Unsupported HTML report input; OpenAPI version ${display(value.openapi)}`);
-    }
-    if (
-      typeof object(value.info).title !== "string" ||
-      !object(value.info).title.trim() ||
-      !value.paths ||
-      typeof value.paths !== "object" ||
-      Array.isArray(value.paths)
-    ) {
-      throw new Error("Unsupported HTML report input; OpenAPI 3 requires info.title and paths");
+  if (value?.swagger !== undefined || value?.openapi !== undefined) {
+    try {
+      describeRenderableSpecification(value, "HTML API specification input");
+    } catch (error) {
+      throw new Error(`Unsupported HTML report input; ${error.message}`);
     }
     return "openapi";
   }
@@ -558,7 +590,7 @@ function inputKind(value) {
 function readInputFile(file) {
   const extension = path.extname(file).toLowerCase();
   let value = [".yaml", ".yml"].includes(extension)
-    ? loadSpec(file, { maxFileBytes: MAX_OPENAPI_BYTES })
+    ? loadSpec(file, { maxFileBytes: MAX_OPENAPI_BYTES, allowSwagger2: true })
     : readJson(file);
   let kind = inputKind(value);
   if (kind === "openapi") {
@@ -568,7 +600,7 @@ function readInputFile(file) {
     // JSON reports use a larger limit, so validate a JSON OpenAPI document
     // through the same bounded, JSON-compatible tree checks as YAML input.
     if (extension === ".json") {
-      value = loadSpec(file, { maxFileBytes: MAX_OPENAPI_BYTES });
+      value = loadSpec(file, { maxFileBytes: MAX_OPENAPI_BYTES, allowSwagger2: true });
       kind = inputKind(value);
     }
   }
@@ -695,22 +727,20 @@ function referencedRepositoryScan(root, entry) {
   return scan;
 }
 
-function referencedOpenApi(root, entry) {
-  const artifacts = object(entry.artifacts);
-  if (!Object.hasOwn(artifacts, "openapi")) return null;
-  const reference = artifacts.openapi;
+function referencedApiSpecification(root, reference) {
   if (typeof reference !== "string" || !reference || path.isAbsolute(reference)) {
-    throw new Error("OpenAPI artifact path must be a non-empty relative path");
+    throw new Error("API specification artifact path must be a non-empty relative path");
   }
   const candidate = path.resolve(root, reference);
-  if (!within(root, candidate)) throw new Error("OpenAPI artifact escapes the input folder");
+  if (!within(root, candidate))
+    throw new Error("API specification artifact escapes the input folder");
   const realRoot = fs.realpathSync(root);
   const realCandidate = fs.realpathSync(candidate);
   if (!within(realRoot, realCandidate)) {
-    throw new Error("OpenAPI artifact symlink escapes the input folder");
+    throw new Error("API specification artifact symlink escapes the input folder");
   }
   const loaded = readInputFile(realCandidate);
-  if (loaded.kind !== "openapi") throw new Error("OpenAPI artifact has the wrong kind");
+  if (loaded.kind !== "openapi") throw new Error("API specification artifact has the wrong kind");
   return loaded.value;
 }
 
@@ -727,10 +757,104 @@ function embeddedOpenApi(scan) {
   return documentation.document;
 }
 
-function repositoryOpenApi(root, entry, scan) {
-  return Object.hasOwn(object(entry.artifacts), "openapi")
-    ? referencedOpenApi(root, entry)
-    : embeddedOpenApi(scan);
+function embeddedSpecification(document) {
+  if (inputKind(document) !== "openapi") {
+    throw new Error("embedded API specification has the wrong kind");
+  }
+  if (Buffer.byteLength(JSON.stringify(document)) > MAX_OPENAPI_BYTES) {
+    throw new Error(`embedded API specification exceeds ${MAX_OPENAPI_BYTES} bytes`);
+  }
+  return document;
+}
+
+function repositoryApiDescriptors(entry, scan) {
+  const artifacts = object(entry.artifacts);
+  const descriptors = [];
+  if (Object.hasOwn(artifacts, "openapi")) {
+    descriptors.push({
+      reference: artifacts.openapi,
+      label: "Reconciled API",
+      format: "openapi",
+    });
+  } else {
+    const document = embeddedOpenApi(scan);
+    if (document) descriptors.push({ document, label: "Reconciled API", format: "openapi" });
+  }
+  if (Object.hasOwn(artifacts, "specifications")) {
+    if (!Array.isArray(artifacts.specifications)) {
+      throw new Error("specification artifacts must be an array");
+    }
+    if (artifacts.specifications.length > MAX_SPECIFICATIONS_PER_REPOSITORY) {
+      throw new Error(`specification artifact count exceeds ${MAX_SPECIFICATIONS_PER_REPOSITORY}`);
+    }
+    for (const specificationValue of artifacts.specifications) {
+      const specification = object(specificationValue);
+      if (!specification.artifact) {
+        descriptors.push({
+          error: "specification artifact is missing its source path",
+          label: display(specification.title, specification.path),
+          source: specification.path,
+        });
+        continue;
+      }
+      descriptors.push({
+        reference: specification.artifact,
+        label: display(specification.title, specification.path),
+        source: specification.path,
+        format: specification.format,
+        version: specification.version,
+      });
+      const reconciliation = object(specification.reconciliation);
+      if (reconciliation.artifact) {
+        descriptors.push({
+          reference: reconciliation.artifact,
+          label: `${display(specification.title, specification.path)} (reconciled)`,
+          source: specification.path,
+          format: "openapi",
+          version: specification.version,
+        });
+      }
+    }
+  } else {
+    const specifications = list(object(scan?.documentation).specifications);
+    if (specifications.length > MAX_SPECIFICATIONS_PER_REPOSITORY) {
+      throw new Error(`embedded specification count exceeds ${MAX_SPECIFICATIONS_PER_REPOSITORY}`);
+    }
+    for (const specificationValue of specifications) {
+      const specification = object(specificationValue);
+      if (specification.artifact || specification.document) {
+        descriptors.push({
+          ...(specification.artifact
+            ? { reference: specification.artifact }
+            : { document: specification.document }),
+          label: display(specification.title, specification.path),
+          source: specification.path,
+          format: specification.format,
+          version: specification.version,
+        });
+      }
+      const reconciliation = object(specification.reconciliation);
+      if (reconciliation.artifact || reconciliation.document) {
+        descriptors.push({
+          ...(reconciliation.artifact
+            ? { reference: reconciliation.artifact }
+            : { document: reconciliation.document }),
+          label: `${display(specification.title, specification.path)} (reconciled)`,
+          source: specification.path,
+          format: "openapi",
+          version: specification.version,
+        });
+      }
+    }
+  }
+  return descriptors;
+}
+
+function descriptorDocument(root, descriptor) {
+  if (descriptor.error) throw new Error(descriptor.error);
+  return descriptor.reference
+    ? referencedApiSpecification(root, descriptor.reference)
+    : embeddedSpecification(descriptor.document);
 }
 
 function organizationDelta(input, warnings) {
@@ -788,6 +912,13 @@ function slug(value, fallback) {
   return normalized || fallback;
 }
 
+function apiDescriptorSlug(descriptor, fallback) {
+  const value = descriptor.source || descriptor.label;
+  const extension = path.posix.extname(String(value || ""));
+  const stem = extension ? String(value).slice(0, -extension.length) : value;
+  return slug(stem, fallback);
+}
+
 function organizationDetailLabel(status, evidenceValue) {
   if (isFrameworkStatus(status)) {
     const evidence = object(evidenceValue);
@@ -805,7 +936,7 @@ function organizationNoDetailLabel(status) {
   return "No detailed report";
 }
 
-function organizationRows(report, detailPages, openApiPages) {
+function organizationRows(report, detailPages, apiReferencePages) {
   return list(report.repositories)
     .map((value, index) => {
       const entry = object(value);
@@ -831,9 +962,17 @@ function organizationRows(report, detailPages, openApiPages) {
       const detailLabel =
         organizationDetailLabel(entry.status, evidence) ||
         (detailPages[index] ? "View changes" : "");
+      const references = list(apiReferencePages[index]);
+      const referenceLink = references.length
+        ? references.length === 1
+          ? `<a href="${escapeHtml(references[0].href)}">API reference</a>`
+          : detailPages[index]
+            ? `<a href="${escapeHtml(`${detailPages[index]}#api-specifications`)}">${references.length} API references</a>`
+            : `<a href="${escapeHtml(references[0].href)}">${references.length} API references</a>`
+        : "";
       const links = [
         detailPages[index] ? `<a href="${escapeHtml(detailPages[index])}">${detailLabel}</a>` : "",
-        openApiPages[index] ? `<a href="${escapeHtml(openApiPages[index])}">API reference</a>` : "",
+        referenceLink,
       ].filter(Boolean);
       const detail = links.length
         ? `<div class="stack">${links.join("")}</div>`
@@ -1035,7 +1174,7 @@ function organizationScopePanel(report) {
   );
 }
 
-function organizationPage(report, detailPages, openApiPages, warnings, delta) {
+function organizationPage(report, detailPages, apiReferencePages, warnings, delta) {
   const summary = object(report.summary);
   const coverage = object(report.coverage);
   const organization = object(report.organization);
@@ -1072,7 +1211,7 @@ function organizationPage(report, detailPages, openApiPages, warnings, delta) {
     : "";
   const statuses = entries.map((entry) => entry.status);
   const table = entries.length
-    ? `${filterControls("repositories-table", "Repository, status, error…", statuses)}<div class="table-wrap"><table id="repositories-table"><thead><tr><th>Repository</th><th>Status</th><th>Apps</th><th>Routes</th><th>Docs</th><th>Coverage</th><th>Details</th></tr></thead><tbody>${organizationRows(report, detailPages, openApiPages)}</tbody></table></div>`
+    ? `${filterControls("repositories-table", "Repository, status, error…", statuses)}<div class="table-wrap"><table id="repositories-table"><thead><tr><th>Repository</th><th>Status</th><th>Apps</th><th>Routes</th><th>Docs</th><th>Coverage</th><th>Details</th></tr></thead><tbody>${organizationRows(report, detailPages, apiReferencePages)}</tbody></table></div>`
     : `<div class="panel__body"><p class="empty">No repositories were recorded.</p></div>`;
   const body = [
     incomplete,
@@ -1091,6 +1230,9 @@ function organizationPage(report, detailPages, openApiPages, warnings, delta) {
       ["NestJS", count(summary.nestjsRepositories)],
       ["Applications", count(summary.applications)],
       ["Routes", count(summary.routes)],
+      ["API specifications", count(summary.apiSpecifications)],
+      ["Specification repositories", count(summary.specificationRepositories)],
+      ["Cataloged repositories", count(summary.catalogedRepositories)],
       ["Failed", count(summary.failedRepositories)],
       ["Inconclusive", count(summary.inconclusiveRepositories)],
       ["Incomplete route graphs", count(summary.incompleteRouteGraphs)],
@@ -1235,6 +1377,64 @@ function prepareOutput(output, kind) {
   return resolved;
 }
 
+function renderRepository(input, output, warnings, pages, assets) {
+  const references = [];
+  let descriptors = [];
+  try {
+    descriptors = repositoryApiDescriptors(input.value, input.value);
+  } catch (error) {
+    warnings.push(`API specifications: ${String(error.message).split(input.root).join(".")}`);
+  }
+  let swaggerUiWritten = false;
+  const title = repositoryTitle(input.value, "repository");
+  const used = new Set();
+  for (const [index, descriptor] of descriptors.entries()) {
+    try {
+      const document = descriptorDocument(input.root, descriptor);
+      const description = describeRenderableSpecification(document);
+      if (!swaggerUiWritten) {
+        copySwaggerUiAssets(output);
+        assets.push(...SWAGGER_UI_ASSETS);
+        swaggerUiWritten = true;
+      }
+      const base = `${slug(title, "repository")}--${apiDescriptorSlug(
+        descriptor,
+        `specification-${index + 1}`,
+      )}`;
+      let filename = `${base}.html`;
+      let suffix = 2;
+      while (used.has(filename.toLowerCase())) filename = `${base}-${suffix++}.html`;
+      used.add(filename.toLowerCase());
+      const configFilename = filename.replace(/\.html$/, ".js");
+      const pageReference = path.posix.join("openapi", filename);
+      const configReference = path.posix.join("openapi", configFilename);
+      references.push({
+        href: pageReference,
+        label: descriptor.label || description.title,
+        source: descriptor.source,
+        format: descriptor.format || description.format,
+        version: descriptor.version || description.version,
+      });
+      pages.push(pageReference);
+      assets.push(configReference);
+      writeFile(path.join(output, "openapi", configFilename), openApiConfigScript(document));
+      writeFile(
+        path.join(output, "openapi", filename),
+        openApiPage(document, { assetPrefix: "../", configSource: configFilename }),
+      );
+    } catch (error) {
+      const source = descriptor.source ? ` ${descriptor.source}` : "";
+      warnings.push(
+        `API specification${source}: ${String(error.message).split(input.root).join(".")}`,
+      );
+    }
+  }
+  writeFile(
+    path.join(output, "index.html"),
+    repositoryPage(input.value, "Repository report", { apiReferences: references }),
+  );
+}
+
 function renderOrganization(input, output, warnings, pages, assets, suppliedDelta = null) {
   const delta = suppliedDelta || organizationDelta(input, warnings);
   const changes = new Map(
@@ -1244,7 +1444,7 @@ function renderOrganization(input, output, warnings, pages, assets, suppliedDelt
     ]),
   );
   const detailPages = [];
-  const openApiPages = [];
+  const apiReferencePages = [];
   const usedDetails = new Set();
   const usedOpenApi = new Set();
   let swaggerUiWritten = false;
@@ -1275,23 +1475,42 @@ function renderOrganization(input, output, warnings, pages, assets, suppliedDelt
     }
 
     if (isFrameworkStatus(entry.status)) {
+      let descriptors = [];
       try {
-        const document = repositoryOpenApi(input.root, entry, scan);
-        if (document) {
+        descriptors = repositoryApiDescriptors(entry, scan);
+      } catch (error) {
+        warnings.push(`${name} API specifications: ${safeError(error)}`);
+      }
+      for (const [descriptorIndex, descriptor] of descriptors.entries()) {
+        try {
+          const document = descriptorDocument(input.root, descriptor);
           if (!swaggerUiWritten) {
             copySwaggerUiAssets(output);
             assets.push(...SWAGGER_UI_ASSETS);
             swaggerUiWritten = true;
           }
           const base = slug(repository.name || repository.fullName, `repository-${index + 1}`);
-          let filename = `${base}.html`;
+          const descriptorBase =
+            descriptorIndex === 0 && descriptor.label === "Reconciled API"
+              ? base
+              : `${base}--${apiDescriptorSlug(descriptor, `specification-${descriptorIndex + 1}`)}`;
+          let filename = `${descriptorBase}.html`;
           let suffix = 2;
-          while (usedOpenApi.has(filename.toLowerCase())) filename = `${base}-${suffix++}.html`;
+          while (usedOpenApi.has(filename.toLowerCase())) {
+            filename = `${descriptorBase}-${suffix++}.html`;
+          }
           usedOpenApi.add(filename.toLowerCase());
           const configFilename = filename.replace(/\.html$/, ".js");
           const pageReference = path.posix.join("openapi", filename);
           const configReference = path.posix.join("openapi", configFilename);
-          openApiPages[index] = pageReference;
+          const description = describeRenderableSpecification(document);
+          (apiReferencePages[index] ||= []).push({
+            href: pageReference,
+            label: descriptor.label || description.title,
+            source: descriptor.source,
+            format: descriptor.format || description.format,
+            version: descriptor.version || description.version,
+          });
           pages.push(pageReference);
           assets.push(configReference);
           writeFile(path.join(output, "openapi", configFilename), openApiConfigScript(document));
@@ -1299,9 +1518,10 @@ function renderOrganization(input, output, warnings, pages, assets, suppliedDelt
             path.join(output, "openapi", filename),
             openApiPage(document, { assetPrefix: "../", configSource: configFilename }),
           );
+        } catch (error) {
+          const source = descriptor.source ? ` ${descriptor.source}` : "";
+          warnings.push(`${name} API specification${source}: ${safeError(error)}`);
         }
-      } catch (error) {
-        warnings.push(`${name} OpenAPI: ${safeError(error)}`);
       }
     }
 
@@ -1320,13 +1540,16 @@ function renderOrganization(input, output, warnings, pages, assets, suppliedDelt
         assetPrefix: "../",
         backHref: "../index.html",
         delta: change,
-        openApiHref: openApiPages[index] ? `../${openApiPages[index]}` : "",
+        apiReferences: list(apiReferencePages[index]).map((reference) => ({
+          ...reference,
+          href: `../${reference.href}`,
+        })),
       }),
     );
   }
   writeFile(
     path.join(output, "index.html"),
-    organizationPage(input.value, detailPages, openApiPages, warnings, delta),
+    organizationPage(input.value, detailPages, apiReferencePages, warnings, delta),
   );
   if (delta) {
     writeFile(
@@ -1366,7 +1589,7 @@ function renderHtmlSite(inputPath, outputPath, options = {}) {
   if (input.kind === "organization") {
     delta = renderOrganization(input, output, warnings, pages, assets, suppliedDelta);
   } else if (input.kind === "repository") {
-    writeFile(path.join(output, "index.html"), repositoryPage(input.value, "Repository report"));
+    renderRepository(input, output, warnings, pages, assets);
   } else if (input.kind === "openapi") {
     writeFile(path.join(output, "assets", "openapi-config.js"), openApiConfigScript(input.value));
     writeFile(path.join(output, "index.html"), openApiPage(input.value));

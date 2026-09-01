@@ -87,9 +87,11 @@ function loadSpec(file, options = {}) {
     throw new Error(`API documentation ${file} must contain an object`);
   }
   validateDocumentationTree(value, `API documentation ${file}`);
-  if (value.swagger) {
+  if (value.swagger && (!options.allowSwagger2 || value.swagger !== "2.0")) {
     throw new Error(
-      `Swagger 2 document ${file} cannot be merged safely; convert it to OpenAPI 3 first`,
+      value.swagger === "2.0"
+        ? `Swagger 2 document ${file} cannot be merged safely; convert it to OpenAPI 3 first`
+        : `API documentation ${file} uses unsupported Swagger version ${value.swagger}`,
     );
   }
   if (value.openapi && !/^3\.\d+\.\d+(?:[-+].*)?$/.test(value.openapi)) {
@@ -102,6 +104,43 @@ function loadSpec(file, options = {}) {
     throw new Error(`API documentation ${file} has a non-object paths field`);
   }
   return value;
+}
+
+/**
+ * Validate the minimal contract required by the offline Swagger UI renderer.
+ * Swagger 2 is accepted for viewing even though reconciliation remains limited
+ * to OpenAPI 3, keeping display and merge trust decisions separate.
+ */
+function describeRenderableSpecification(value, label = "API documentation") {
+  const hasOpenApi = typeof value?.openapi === "string";
+  const hasSwagger = typeof value?.swagger === "string";
+  if (hasOpenApi && hasSwagger) {
+    throw new Error(`${label} cannot declare both openapi and swagger versions`);
+  }
+  let format;
+  let version;
+  if (hasOpenApi) {
+    if (!/^3\.\d+\.\d+(?:[-+].*)?$/.test(value.openapi)) {
+      throw new Error(`${label} uses unsupported OpenAPI version ${value.openapi}`);
+    }
+    format = "openapi";
+    version = value.openapi;
+  } else if (hasSwagger) {
+    if (value.swagger !== "2.0") {
+      throw new Error(`${label} uses unsupported Swagger version ${value.swagger}`);
+    }
+    format = "swagger";
+    version = value.swagger;
+  } else {
+    throw new Error(`${label} does not declare an OpenAPI or Swagger version`);
+  }
+  if (typeof value.info?.title !== "string" || !value.info.title.trim()) {
+    throw new Error(`${label} requires info.title`);
+  }
+  if (!value.paths || typeof value.paths !== "object" || Array.isArray(value.paths)) {
+    throw new Error(`${label} requires an object paths field`);
+  }
+  return { format, version, title: value.info.title.trim() };
 }
 
 function stripCommentLine(line) {
@@ -418,6 +457,7 @@ function autoSpec(root, opts, discovery, limits) {
 }
 
 function selectedJSDoc(root, opts, discovery, limits) {
+  if (opts.disableAutoJSDoc === true && !opts.jsdoc?.length) return [];
   const values = opts.jsdoc?.length ? opts.jsdoc : discovery.documentation.jsdoc;
   return [...new Set(values.map((value) => resolveInput(root, value, "--jsdoc", limits)))].sort();
 }
@@ -625,6 +665,7 @@ function reconcileDocumentation(report, opts = {}) {
 }
 
 module.exports = {
+  describeRenderableSpecification,
   jsdocFragments,
   loadSpec,
   operations,

@@ -214,15 +214,16 @@ equivalent integrity validation.
 ### `renderHtmlSite(inputPath, outputPath, options)`
 
 Renders an existing `routes.json`, `repo-scan.json`, organization inventory,
-OpenAPI 3 JSON/YAML document, or containing directory into an offline HTML site.
-OpenAPI inputs use packaged Swagger UI assets with request submission, remote
+OpenAPI 3 or Swagger 2 JSON/YAML document, or containing directory into an
+offline HTML site. API-specification inputs use packaged Swagger UI assets with request submission, remote
 validation, browser connections, and query-string configuration disabled. Pass
 `{ baseline: priorOrganizationPath }` to render organization change views
 without rescanning.
 
-Organization rendering also creates a Swagger UI page for every valid OpenAPI
-artifact referenced by a confirmed supported-framework entry. The pages share
-one local Swagger UI bundle; unsupported entries remain overview-only. Artifact
+Repository and organization rendering also create a Swagger UI page for every
+retained OpenAPI 3 or Swagger 2 artifact referenced by a confirmed
+supported-framework entry. The pages share one local Swagger UI bundle;
+unsupported entries remain overview-only. Artifact
 paths are lexically and real-path contained within the organization input.
 
 The renderer only replaces files named in its prior manifest and rejects a

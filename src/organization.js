@@ -425,6 +425,11 @@ function frameworkEvidence(scan) {
     specifications: scan.discovery?.documentation?.specifications?.length || 0,
     jsdocSources: scan.discovery?.documentation?.jsdoc?.length || 0,
     reconciliationStatus: scan.documentation?.status || null,
+    availableSpecifications: scan.documentation?.summary?.available || 0,
+    unavailableSpecifications: scan.documentation?.summary?.unavailable || 0,
+    openapiSpecifications: scan.documentation?.summary?.openapi || 0,
+    swaggerSpecifications: scan.documentation?.summary?.swagger || 0,
+    reconciledSpecifications: scan.documentation?.summary?.reconciled || 0,
   };
   return {
     detected: items.length > 0,
@@ -594,6 +599,7 @@ function initialStatus(repository, opts) {
 function aggregateSummary(entries, auditMode) {
   const count = (status) => entries.filter((entry) => entry.status === status).length;
   const supported = entries.filter((entry) => isFrameworkStatus(entry.status));
+  const documentation = (entry) => (entry.frameworks || entry.express || {}).documentation || {};
   const hasApplicationEvidence = (entry) => {
     const evidence = entry.frameworks || entry.express || {};
     if ((evidence.applicationCount || 0) > 0 || (evidence.routeCount || 0) > 0) return true;
@@ -630,6 +636,24 @@ function aggregateSummary(entries, auditMode) {
       (total, entry) => total + (entry.frameworks || entry.express).routeCount,
       0,
     ),
+    specificationRepositories: supported.filter(
+      (entry) => documentation(entry).availableSpecifications > 0,
+    ).length,
+    apiSpecifications: supported.reduce(
+      (total, entry) => total + (documentation(entry).availableSpecifications || 0),
+      0,
+    ),
+    openapiSpecifications: supported.reduce(
+      (total, entry) => total + (documentation(entry).openapiSpecifications || 0),
+      0,
+    ),
+    swaggerSpecifications: supported.reduce(
+      (total, entry) => total + (documentation(entry).swaggerSpecifications || 0),
+      0,
+    ),
+    catalogedRepositories: supported.filter(
+      (entry) => documentation(entry).reconciliationStatus === "cataloged",
+    ).length,
   };
   if (auditMode) {
     summary.auth = { public: 0, unknown: 0, proven: 0, accepted: 0, policyViolations: 0 };
@@ -811,6 +835,7 @@ async function scanOrganization(organization, opts = {}) {
           config: opts.config || {},
           scan: opts.scan || {},
           githubToken: token || undefined,
+          retainSpecificationDocuments: typeof opts.onRepository === "function",
         },
         (event) => {
           progress.emit({

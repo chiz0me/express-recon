@@ -60,6 +60,13 @@ OpenAPI wins over JSDoc, and JSDoc wins over generated placeholders. Review
 duplicate operations, and incomplete discovery/scan coverage. Use `--spec` when
 multiple specs exist; Swagger 2 must be converted before merging.
 
+For `scan-repo --out` or `scan-org`, treat documentation status `cataloged` as
+a successful inventory outcome: multiple valid contracts were retained under
+`specifications/` without guessing a canonical merge. Render the saved output
+folder to expose each OpenAPI 3 or Swagger 2 contract independently. Request a
+focused `scan-repo --spec <path>` only when the user needs one intentional
+canonical OpenAPI 3 merge; do not choose a spec merely to clear the status.
+
 If security should be added to generated operations, supply a strict config
 with `authMiddleware`, `openapi.securitySchemes`, and
 `openapi.securityByTag`. Never infer bearer, cookies, or API keys from a guard
@@ -160,6 +167,10 @@ Schema guidance:
   express-recon render --input <outDir>/openapi.json \
     --out <outDir>/api-reference
   ```
+
+  A saved repository or organization output directory can be passed as
+  `--input` instead; every retained OpenAPI 3 or Swagger 2 contract associated
+  with a supported-framework repository receives its own offline page.
 
   Keep both paths explicit in agent workflows so the chosen evidence and handoff
   location are visible, even though the CLI can safely derive a sibling `-html`

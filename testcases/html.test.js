@@ -335,7 +335,7 @@ test("OpenAPI JSON renders with packaged Swagger UI and offline-safe defaults", 
   });
 });
 
-test("OpenAPI YAML renders directly and malformed or unsupported contracts fail clearly", () => {
+test("OpenAPI and Swagger inputs render directly while malformed contracts fail clearly", () => {
   temporary("html-openapi-yaml", (root) => {
     const specification = path.join(root, "openapi.yaml");
     fs.writeFileSync(
@@ -362,9 +362,23 @@ test("OpenAPI YAML renders directly and malformed or unsupported contracts fail 
       /YAML API/,
     );
     assert.equal(inputKind(openApiDocument()), "openapi");
+    const swagger = {
+      swagger: "2.0",
+      info: { title: "Legacy", version: "1" },
+      paths: {},
+    };
+    assert.equal(inputKind(swagger), "openapi");
+    const swaggerFile = path.join(root, "swagger.json");
+    writeJson(swaggerFile, swagger);
+    const swaggerResult = renderHtmlSite(swaggerFile, path.join(root, "swagger-site"));
+    assert.match(
+      fs.readFileSync(path.join(root, "swagger-site", "assets", "openapi-config.js"), "utf8"),
+      /Legacy/,
+    );
+    assert.equal(swaggerResult.source.kind, "openapi");
     assert.throws(
-      () => inputKind({ swagger: "2.0", info: { title: "Legacy" }, paths: {} }),
-      /Swagger 2 must be converted/,
+      () => inputKind({ swagger: "1.2", info: { title: "Legacy" }, paths: {} }),
+      /Swagger version 1\.2/,
     );
     assert.throws(
       () => inputKind({ openapi: "2.0.0", info: { title: "Legacy" }, paths: {} }),
@@ -372,7 +386,7 @@ test("OpenAPI YAML renders directly and malformed or unsupported contracts fail 
     );
     assert.throws(
       () => inputKind({ openapi: "3.1.0", info: { title: "Missing paths" } }),
-      /requires info\.title and paths/,
+      /requires an object paths field/,
     );
     assert.throws(
       () => renderHtmlSite(specification, path.join(root, "baseline-site"), { baseline: root }),
@@ -494,6 +508,90 @@ test("repository reports without package target metadata use repository identity
     assert.equal(result.pages.length, 1);
     assert.match(html, /https:\/\/github\.com\/acme\/no-package/);
     assert.match(html, /No routes were recorded/);
+  });
+});
+
+test("repository folders render their retained specification catalog", () => {
+  temporary("html-repository-spec-catalog", (root) => {
+    const specification = openApiDocument({ info: { title: "Catalog API", version: "1" } });
+    writeJson(path.join(root, "specifications", "catalog.json"), specification);
+    writeJson(
+      path.join(root, "repo-scan.json"),
+      repositoryScan({
+        documentation: {
+          status: "cataloged",
+          reason: "The source contract was cataloged.",
+          summary: { available: 1, openapi: 1, swagger: 0, reconciled: 0 },
+          specifications: [
+            {
+              path: "docs/catalog.yaml",
+              format: "openapi",
+              version: "3.1.0",
+              title: "Catalog API",
+              status: "retained",
+              artifact: "specifications/catalog.json",
+            },
+          ],
+        },
+      }),
+    );
+
+    const output = path.join(root, "site");
+    const result = renderHtmlSite(root, output);
+    const overview = fs.readFileSync(result.output, "utf8");
+    assert.equal(result.pages.length, 2);
+    assert.match(overview, /Catalog API/);
+    assert.match(overview, /openapi\/acme-payments--docs-catalog\.html/);
+    assert.ok(fs.existsSync(path.join(output, "openapi", "acme-payments--docs-catalog.html")));
+  });
+});
+
+test("repository reports render bounded embedded specification catalogs", () => {
+  temporary("html-repository-embedded-spec-catalog", (root) => {
+    const source = openApiDocument({ info: { title: "Source API", version: "1" } });
+    const reconciled = openApiDocument({ info: { title: "Reconciled API", version: "2" } });
+    const legacy = {
+      swagger: "2.0",
+      info: { title: "Legacy API", version: "1" },
+      paths: {},
+    };
+    writeJson(
+      path.join(root, "repo-scan.json"),
+      repositoryScan({
+        documentation: {
+          status: "cataloged",
+          specifications: [
+            {
+              path: "docs/source.yaml",
+              format: "openapi",
+              version: "3.1.0",
+              title: "Source API",
+              document: source,
+              reconciliation: {
+                status: "merged",
+                document: reconciled,
+              },
+            },
+            {
+              path: "docs/legacy.yaml",
+              format: "swagger",
+              version: "2.0",
+              title: "Legacy API",
+              document: legacy,
+            },
+          ],
+        },
+      }),
+    );
+
+    const output = path.join(root, "site");
+    const result = renderHtmlSite(root, output);
+    const overview = fs.readFileSync(result.output, "utf8");
+    assert.equal(result.pages.length, 4);
+    assert.match(overview, /Source API/);
+    assert.match(overview, /Source API \(reconciled\)/);
+    assert.match(overview, /Legacy API/);
+    assert.equal(result.warnings.length, 0);
   });
 });
 
@@ -705,6 +803,113 @@ test("organization folders render supported-framework OpenAPI artifacts with one
     assert.equal(fs.existsSync(path.join(output, "openapi", "api.js")), false);
     assert.equal(fs.existsSync(path.join(output, "assets", "swagger-ui.css")), false);
     assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "not renderer-owned");
+  });
+});
+
+test("organization rendering catalogs every retained OpenAPI and Swagger specification", () => {
+  temporary("html-organization-spec-catalog", (root) => {
+    const repositoryDirectory = path.join(root, "repositories", "api");
+    const scanFile = path.join(repositoryDirectory, "repo-scan.json");
+    const primaryArtifact = "repositories/api/specifications/docs-primary.json";
+    const legacyArtifact = "repositories/api/specifications/docs-legacy.json";
+    const documentation = {
+      status: "cataloged",
+      reason: "Two API specifications were retained independently.",
+      summary: { available: 2, openapi: 1, swagger: 1, reconciled: 0 },
+      specifications: [
+        {
+          path: "docs/primary.yaml",
+          format: "openapi",
+          version: "3.1.0",
+          title: "Primary API",
+          status: "retained",
+          artifact: "specifications/docs-primary.json",
+        },
+        {
+          path: "docs/legacy.json",
+          format: "swagger",
+          version: "2.0",
+          title: "Legacy API",
+          status: "retained",
+          artifact: "specifications/docs-legacy.json",
+        },
+      ],
+    };
+    writeJson(scanFile, repositoryScan({ documentation }));
+    writeJson(path.join(root, primaryArtifact), openApiDocument());
+    writeJson(path.join(root, legacyArtifact), {
+      swagger: "2.0",
+      info: { title: "Legacy API", version: "1" },
+      paths: { "/legacy": { get: { responses: { 200: { description: "ok" } } } } },
+    });
+    writeJson(path.join(root, "organization-inventory.json"), {
+      kind: "github-organization-inventory",
+      organization: { login: "acme" },
+      coverage: { complete: true },
+      summary: { repositoriesScanned: 1, supportedRepositories: 1, expressRepositories: 1 },
+      repositories: [
+        {
+          repository: { name: "api", fullName: "acme/api" },
+          status: "express",
+          coverageComplete: true,
+          routeGraphComplete: true,
+          express: {
+            applicationCount: 1,
+            routeCount: 2,
+            documentation: { reconciliationStatus: "cataloged", specifications: 2 },
+          },
+          artifacts: {
+            repositoryScan: "repositories/api/repo-scan.json",
+            specifications: [
+              {
+                path: "docs/primary.yaml",
+                format: "openapi",
+                version: "3.1.0",
+                title: "Primary API",
+                status: "retained",
+                artifact: primaryArtifact,
+              },
+              {
+                path: "docs/legacy.json",
+                format: "swagger",
+                version: "2.0",
+                title: "Legacy API",
+                status: "retained",
+                artifact: legacyArtifact,
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const output = path.join(root, "site");
+    const result = renderHtmlSite(root, output);
+    const overview = fs.readFileSync(result.output, "utf8");
+    const detail = fs.readFileSync(path.join(output, "repositories", "api.html"), "utf8");
+    const manifest = JSON.parse(fs.readFileSync(path.join(output, "render-manifest.json"), "utf8"));
+
+    assert.equal(result.warnings.length, 0);
+    assert.match(overview, /2 API references/);
+    assert.match(overview, /repositories\/api\.html#api-specifications/);
+    assert.match(detail, /Primary API/);
+    assert.match(detail, /Legacy API/);
+    assert.match(detail, /\.\.\/openapi\/api--docs-primary\.html/);
+    assert.match(detail, /\.\.\/openapi\/api--docs-legacy\.html/);
+    assert.ok(fs.existsSync(path.join(output, "openapi", "api--docs-primary.html")));
+    assert.ok(fs.existsSync(path.join(output, "openapi", "api--docs-legacy.html")));
+    assert.match(
+      fs.readFileSync(path.join(output, "openapi", "api--docs-legacy.js"), "utf8"),
+      /swagger.*2\.0/,
+    );
+    assert.equal(
+      manifest.assets.filter((asset) => asset === "assets/swagger-ui-bundle.js").length,
+      1,
+    );
+    assert.deepEqual(manifest.pages.filter((page) => page.startsWith("openapi/")).sort(), [
+      "openapi/api--docs-legacy.html",
+      "openapi/api--docs-primary.html",
+    ]);
   });
 });
 

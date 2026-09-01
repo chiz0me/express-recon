@@ -198,6 +198,31 @@ function fileIntegrity(outDir, relative) {
   return { path: relative, bytes: stat.size, sha256: hash.digest("hex") };
 }
 
+function artifactPaths(artifacts) {
+  const paths = [];
+  for (const [name, value] of Object.entries(artifacts)) {
+    if (name !== "specifications") {
+      if (typeof value !== "string") throw new Error(`artifact ${name} must be a path`);
+      paths.push(value);
+      continue;
+    }
+    if (!Array.isArray(value)) throw new Error("specification artifacts must be an array");
+    for (const specification of value) {
+      if (!specification || typeof specification !== "object" || Array.isArray(specification)) {
+        throw new Error("specification artifact must be an object");
+      }
+      if (typeof specification.artifact !== "string") {
+        throw new Error("specification artifact is missing its source path");
+      }
+      paths.push(specification.artifact);
+      const reconciliation = specification.reconciliation;
+      if (reconciliation?.artifact !== undefined) paths.push(reconciliation.artifact);
+      if (reconciliation?.reportArtifact !== undefined) paths.push(reconciliation.reportArtifact);
+    }
+  }
+  return [...new Set(paths)].sort();
+}
+
 function checkpointEntry(payload, artifacts, outDir) {
   if (payload.coverageComplete !== true || !COMPLETE_REPOSITORY_STATUSES.has(payload.status)) {
     return null;
@@ -206,9 +231,7 @@ function checkpointEntry(payload, artifacts, outDir) {
   if (typeof commit !== "string" || !/^[a-f0-9]{40,64}$/.test(commit)) {
     throw new Error("Completed repository scan did not return a valid Git object id");
   }
-  const files = [...new Set(Object.values(artifacts))]
-    .sort()
-    .map((file) => fileIntegrity(outDir, file));
+  const files = artifactPaths(artifacts).map((file) => fileIntegrity(outDir, file));
   return {
     repository: payload.repository,
     status: payload.status,
@@ -328,7 +351,18 @@ function resumableEntries(checkpoint, outDir) {
     ) {
       throw new Error(`${label} is not a complete resumable entry`);
     }
-    const expectedPaths = Object.values(entry.artifacts).sort();
+    const documentation = entry.frameworks?.documentation || entry.express?.documentation || {};
+    if (
+      Number.isSafeInteger(documentation.specifications) &&
+      documentation.specifications > 0 &&
+      !Array.isArray(entry.artifacts.specifications)
+    ) {
+      diagnostics.push(
+        `${fullName}: saved evidence predates retained specification catalogs; repository will be scanned again`,
+      );
+      continue;
+    }
+    const expectedPaths = artifactPaths(entry.artifacts);
     const recordedPaths = entry.files.map((file) => file?.path).sort();
     if (
       expectedPaths.length !== recordedPaths.length ||

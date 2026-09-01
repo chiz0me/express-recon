@@ -24,24 +24,24 @@ code-derived skeleton:
 express-recon inventory --src . --format openapi --out .express-recon
 ```
 
-Render any completed OpenAPI 3 JSON/YAML document as a standalone reference with
-the packaged Swagger UI:
+Render any completed OpenAPI 3 or Swagger 2 JSON/YAML document as a standalone
+reference with the packaged Swagger UI:
 
 ```bash
 express-recon render --input .express-recon/openapi.json \
   --out .express-recon/api-reference
 ```
 
-Passing an organization scan folder renders every valid OpenAPI artifact tied
-to a confirmed supported-framework repository, as well as the organization overview and
-repository reports:
+Passing an organization scan folder renders every retained OpenAPI 3 or Swagger
+2 artifact tied to a confirmed supported-framework repository, as well as the
+organization overview and repository reports:
 
 ```bash
 express-recon render --input .express-recon/acme
 ```
 
 That command derives `.express-recon/acme-html`, writes per-repository API pages
-under `openapi/`, and shares one packaged Swagger UI bundle across them. A
+under `openapi/`, and shares one packaged Swagger UI bundle across them. An
 unsupported entry does not get an API page merely because its artifact folder
 contains an OpenAPI-looking file. With exactly one saved result under
 `.express-recon/`, `express-recon render` can also infer both paths; scripts and
@@ -94,11 +94,34 @@ unsupported computation fail closed with an incomplete discovery diagnostic.
 `--jsdoc` is repeatable; when omitted, all discovered annotation
 sources are used. Inputs must remain inside the scan root and obey configured
 count, byte, and timeout limits. Swagger 2 is detected but rejected because it
-cannot be merged safely; convert it to OpenAPI 3 first.
+cannot be merged safely; convert it to OpenAPI 3 before using it as the
+canonical reconciliation input. Saved Swagger 2 contracts can still be viewed
+offline with `render`.
 
 Top-level JSDoc `tags` arrays merge by tag name. Missing fields and distinct
 tags are retained; incompatible values on the same named tag remain authored
 conflicts.
+
+## Repository specification catalogs
+
+`scan-repo --out <dir>` and `scan-org` separate specification inventory from
+canonical reconciliation. When a repository contains multiple valid OpenAPI
+documents, express-recon does not pick one or combine unrelated APIs. It records
+the documentation status as `cataloged`, persists every valid OpenAPI 3 and
+Swagger 2 source under `specifications/`, and lets `render` build an offline API
+reference for each retained contract.
+
+A source contract is reconciled automatically only when its package contains
+exactly one discovered OpenAPI document and maps to exactly one detected
+application. Multiple contracts sharing a package/application remain
+independent because static route evidence cannot prove which contract owns a
+route. Use `scan-repo --spec <path>` when one document should intentionally be
+the canonical merged output. Swagger 2 is retained and rendered but never used
+as a merge base.
+
+Repository source snapshots are still removed after the scan. The retained
+specification artifacts are bounded parsed-data copies, not source checkouts,
+and organization checkpoints include their size and SHA-256 integrity records.
 
 ## Outputs and gates
 
@@ -235,8 +258,11 @@ coverage diagnostics.
 
 ### Multiple apps or specs found
 
-Run `discover`, choose an exact `applicationId`, and pass `--spec` if needed.
-Do not resolve ambiguity by using `all` unless collision reporting is the goal.
+For `docs`, run `discover`, choose an exact `applicationId`, and pass `--spec`
+if needed. For repository or organization scans with durable output, open the
+cataloged specifications in the rendered report; pass `--spec` to a focused
+`scan-repo` only when a canonical merged document is required. Do not resolve
+application ambiguity by using `all` unless collision reporting is the goal.
 
 ### Routes are missing
 

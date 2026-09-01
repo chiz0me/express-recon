@@ -183,6 +183,14 @@ security mapping through `--config` makes the embedded route report an `audit`;
 otherwise it is an `inventory`. The combined result keeps the compatibility
 field name `inventory`, whose own `command` identifies which was run.
 
+With `--out`, every valid discovered OpenAPI 3 or Swagger 2 contract is retained
+under `specifications/`. Multiple OpenAPI documents produce documentation status
+`cataloged` rather than an arbitrary canonical merge. A one-document/one-package/
+one-application mapping may be reconciled independently; contracts sharing an
+application remain separate. `--spec <path>` still selects an intentional
+canonical OpenAPI 3 merge for a focused repository scan. Swagger 2 can be
+rendered but is never a reconciliation base.
+
 Repository acquisition never accepts runtime/hybrid options, target boot
 options, embedded credentials, SSH/Git protocols, symlink materialization, or
 submodule traversal.
@@ -230,6 +238,14 @@ Scope and resource controls:
   alias for `--progress none`;
 - scan configuration and CLI include/exclude/ignore/test scope apply
   independently to every selected repository.
+
+Each completed repository report retains valid specification artifacts before
+its temporary source snapshot is removed. The compact organization entry points
+to those artifacts, and checkpoint integrity records cover them. `render` reads
+the catalog and creates one offline API-reference page per retained OpenAPI 3 or
+Swagger 2 document without rescanning or choosing a canonical specification.
+Aggregate summary fields count specification-bearing repositories, available
+OpenAPI/Swagger documents, and repositories left intentionally `cataloged`.
 
 The default uses each repository's `.express-reconignore`. A central CI owner
 can use `--no-ignore-file` or an absolute trusted `--ignore-file` to prevent a
@@ -359,6 +375,9 @@ On resume, the GitHub API is enumerated again. A recorded repository is reused
 only when its name/ID still matches and every expected artifact is a regular file
 with the recorded size and digest. Failed, inconclusive, absent, renamed,
 recreated, missing-artifact, and damaged-artifact repositories are scanned again.
+A pre-catalog checkpoint entry that reported discovered specifications but has
+no retained-specification artifact list is also rescanned; completed entries
+without documentation inputs remain reusable.
 A completed repository is not fetched, so its checkpointed commit remains the
 observation for that resumed run even if its default branch advanced.
 
@@ -425,7 +444,7 @@ express-recon render --baseline .express-recon/acme-before \
   --input .express-recon/acme-current \
   --out .express-recon/acme-changes-site
 
-# Render a standalone OpenAPI document with local Swagger UI assets.
+# Render a standalone OpenAPI 3 or Swagger 2 document with local Swagger UI assets.
 express-recon render --input .express-recon/docs/openapi.json \
   --out .express-recon/api-reference
 ```
@@ -436,8 +455,8 @@ current directory, `.express-recon/` itself, and immediate child directories of
 Exactly one candidate is required: no match or multiple saved outputs fail
 instead of triggering a recursive search or an arbitrary choice. Symbolic or
 non-regular auto-detected inputs are rejected. Pass `--input` to select a direct
-`routes.json`, `repo-scan.json`, `organization-inventory.json`, or OpenAPI 3
-JSON/YAML path, or any directory containing one.
+`routes.json`, `repo-scan.json`, `organization-inventory.json`, OpenAPI 3, or
+Swagger 2 JSON/YAML path, or any directory containing one.
 
 Within a selected directory, detection prefers the organization aggregate, then
 a repository scan, then a route report, followed by `openapi.json`,
@@ -463,13 +482,13 @@ The output contains:
   inconclusive scans with an available detailed artifact; definite unsupported,
   skipped, empty, and failed entries remain index-only;
 - local `assets/report.css` and `assets/report.js` with no CDN dependency;
-- for a standalone OpenAPI input, the packaged Swagger UI CSS/bundle, its
+- for a standalone OpenAPI 3 or Swagger 2 input, the packaged Swagger UI CSS/bundle, its
   license notices, and a safely serialized local configuration asset instead of
   report assets;
-- for an organization input, `openapi/<name>.html` plus a local configuration
-  script for each valid specification attached to a confirmed supported entry;
-  those pages share one packaged Swagger UI bundle, while unsupported entries
-  never produce API pages;
+- for a repository or organization input, `openapi/<name>.html` plus a local
+  configuration script for each retained OpenAPI 3 or Swagger 2 specification
+  attached to a confirmed supported entry; those pages share one packaged
+  Swagger UI bundle, while unsupported entries never produce API pages;
 - `organization-delta.json` plus overview metrics and per-repository route
   changes when the organization input contains baseline evidence; and
 - `render-manifest.json`, recording the source kind, generated pages, and
@@ -495,8 +514,8 @@ serialization. `supportedSubmitMethods` is empty, `tryItOutEnabled` and query
 configuration are disabled, credentials are not persisted, and the online
 validator is disabled. The page CSP sets `connect-src 'none'`, so server URLs and
 external `$ref` targets cannot be contacted. A self-contained/bundled spec is
-therefore required for complete offline schema rendering. Swagger 2 remains
-unsupported; convert it to OpenAPI 3 before rendering.
+therefore required for complete offline schema rendering. Swagger 2 is viewable
+but remains unsupported as a documentation-reconciliation base.
 
 HTML is a human review projection, not a new evidence schema. Automation and AI
 agents should continue consuming the original JSON contracts.
@@ -520,42 +539,42 @@ The command-specific sections above describe behavior and artifacts. This table
 is the complete option surface; unsupported command/option combinations fail
 instead of being ignored.
 
-| Option               | Commands                                                  | Purpose                                                                                                        |
-| -------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `--mode`             | `inventory`, `audit`, `suggest-auth`, `review-middleware` | Select `static`, `runtime`, or `hybrid`; defaults to `static`.                                                 |
-| `--src`              | Local discovery/inventory/audit/docs/review commands      | Set the source root; defaults to the current directory.                                                        |
-| `--app`              | Runtime/hybrid inventory, audit, suggestion, or review    | Select a trusted application module or `auto`.                                                                 |
-| `--allow-exec`       | Commands accepting `--app auto`                           | Confirm that automatic trusted target-code execution is allowed.                                               |
-| `--app-id`           | Hybrid inventory/audit, `docs`, `scan-repo`               | Select one application; `docs`/`scan-repo` also accept deliberate `all`.                                       |
-| `--spec`             | `docs`, `scan-repo`                                       | Select an existing OpenAPI 3 input.                                                                            |
-| `--jsdoc`            | `docs`, `scan-repo`                                       | Add an annotation source; repeatable.                                                                          |
-| `--review`           | `import-review`                                           | Read the exact middleware-review bundle being assessed.                                                        |
-| `--assessment`       | `import-review`                                           | Read the JSON/YAML assessment response.                                                                        |
-| `--input`            | `render`                                                  | Select a report/OpenAPI file or output directory; otherwise require one bounded auto-detected candidate.       |
-| `--repo`             | `scan-repo`                                               | Select a GitHub shorthand, HTTPS Git URL, or local Git repository.                                             |
-| `--org`              | `scan-org`                                                | Select the GitHub organization login.                                                                          |
-| `--ref`              | `scan-repo`                                               | Select a branch, tag, or commit; defaults to remote `HEAD`.                                                    |
-| `--max-repos`        | `scan-org`                                                | Bound selected repositories to 1–10,000; defaults to 100.                                                      |
-| `--concurrency`      | `scan-org`                                                | Process 1–8 source snapshots at once; defaults to 1.                                                           |
-| `--resume`           | `scan-org`                                                | Continue a compatible checkpoint in the selected or default output.                                            |
-| `--overwrite`        | `scan-org`                                                | Start fresh while replacing only owned/colliding artifacts.                                                    |
-| `--progress`         | `scan-org`                                                | Select `auto`, `plain`, `json`, or `none` stderr progress.                                                     |
-| `--no-progress`      | `scan-org`                                                | Alias for `--progress none`.                                                                                   |
-| `--include-archived` | `scan-org`                                                | Include archived repositories.                                                                                 |
-| `--include-forks`    | `scan-org`                                                | Include organization forks.                                                                                    |
-| `--config`           | All scanning commands except `render`                     | Load validated JS/JSON/YAML configuration.                                                                     |
-| `--format`           | Output-producing commands except `render`/`schema`        | Select a supported command-specific format.                                                                    |
-| `--out`              | Commands with file artifacts                              | Write artifacts to a directory; `render` derives `<input>-html` and `scan-org` derives `.express-recon/<org>`. |
-| `--baseline`         | `inventory`, `audit`, `scan-org`, `render`                | Compare a prior compatible report/output; organization scans use their selected/default output.                |
-| `--fail-on`          | `audit`, `docs`, `scan-org`                               | Exit 2 when a supported quality-gate status matches.                                                           |
-| `--include`          | Static/discovery/repository/organization commands         | Add a root-relative source allowlist glob; repeatable.                                                         |
-| `--exclude`          | Static/discovery/repository/organization commands         | Add a root-relative source exclusion glob; repeatable.                                                         |
-| `--ignore-file`      | Static/discovery/repository/organization commands         | Select a scope file, resolved from each scan root when relative.                                               |
-| `--no-ignore-file`   | Static/discovery/repository/organization commands         | Disable the configured/default scope file.                                                                     |
-| `--include-tests`    | Static/discovery/repository/organization commands         | Opt test paths into the scan.                                                                                  |
-| `--include-hidden`   | Static/discovery/repository/organization commands         | Opt hidden paths into the scan, excluding fixed VCS/vendor/build paths.                                        |
-| `--version`, `-V`    | Global                                                    | Print the installed package version without running a command.                                                 |
-| `--help`, `-h`       | Global                                                    | Print onboarding, command, option, trust, and exit-code help.                                                  |
+| Option               | Commands                                                  | Purpose                                                                                                            |
+| -------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--mode`             | `inventory`, `audit`, `suggest-auth`, `review-middleware` | Select `static`, `runtime`, or `hybrid`; defaults to `static`.                                                     |
+| `--src`              | Local discovery/inventory/audit/docs/review commands      | Set the source root; defaults to the current directory.                                                            |
+| `--app`              | Runtime/hybrid inventory, audit, suggestion, or review    | Select a trusted application module or `auto`.                                                                     |
+| `--allow-exec`       | Commands accepting `--app auto`                           | Confirm that automatic trusted target-code execution is allowed.                                                   |
+| `--app-id`           | Hybrid inventory/audit, `docs`, `scan-repo`               | Select one application; `docs`/`scan-repo` also accept deliberate `all`.                                           |
+| `--spec`             | `docs`, `scan-repo`                                       | Select an existing OpenAPI 3 input.                                                                                |
+| `--jsdoc`            | `docs`, `scan-repo`                                       | Add an annotation source; repeatable.                                                                              |
+| `--review`           | `import-review`                                           | Read the exact middleware-review bundle being assessed.                                                            |
+| `--assessment`       | `import-review`                                           | Read the JSON/YAML assessment response.                                                                            |
+| `--input`            | `render`                                                  | Select a report/API-specification file or output directory; otherwise require one bounded auto-detected candidate. |
+| `--repo`             | `scan-repo`                                               | Select a GitHub shorthand, HTTPS Git URL, or local Git repository.                                                 |
+| `--org`              | `scan-org`                                                | Select the GitHub organization login.                                                                              |
+| `--ref`              | `scan-repo`                                               | Select a branch, tag, or commit; defaults to remote `HEAD`.                                                        |
+| `--max-repos`        | `scan-org`                                                | Bound selected repositories to 1–10,000; defaults to 100.                                                          |
+| `--concurrency`      | `scan-org`                                                | Process 1–8 source snapshots at once; defaults to 1.                                                               |
+| `--resume`           | `scan-org`                                                | Continue a compatible checkpoint in the selected or default output.                                                |
+| `--overwrite`        | `scan-org`                                                | Start fresh while replacing only owned/colliding artifacts.                                                        |
+| `--progress`         | `scan-org`                                                | Select `auto`, `plain`, `json`, or `none` stderr progress.                                                         |
+| `--no-progress`      | `scan-org`                                                | Alias for `--progress none`.                                                                                       |
+| `--include-archived` | `scan-org`                                                | Include archived repositories.                                                                                     |
+| `--include-forks`    | `scan-org`                                                | Include organization forks.                                                                                        |
+| `--config`           | All scanning commands except `render`                     | Load validated JS/JSON/YAML configuration.                                                                         |
+| `--format`           | Output-producing commands except `render`/`schema`        | Select a supported command-specific format.                                                                        |
+| `--out`              | Commands with file artifacts                              | Write artifacts to a directory; `render` derives `<input>-html` and `scan-org` derives `.express-recon/<org>`.     |
+| `--baseline`         | `inventory`, `audit`, `scan-org`, `render`                | Compare a prior compatible report/output; organization scans use their selected/default output.                    |
+| `--fail-on`          | `audit`, `docs`, `scan-org`                               | Exit 2 when a supported quality-gate status matches.                                                               |
+| `--include`          | Static/discovery/repository/organization commands         | Add a root-relative source allowlist glob; repeatable.                                                             |
+| `--exclude`          | Static/discovery/repository/organization commands         | Add a root-relative source exclusion glob; repeatable.                                                             |
+| `--ignore-file`      | Static/discovery/repository/organization commands         | Select a scope file, resolved from each scan root when relative.                                                   |
+| `--no-ignore-file`   | Static/discovery/repository/organization commands         | Disable the configured/default scope file.                                                                         |
+| `--include-tests`    | Static/discovery/repository/organization commands         | Opt test paths into the scan.                                                                                      |
+| `--include-hidden`   | Static/discovery/repository/organization commands         | Opt hidden paths into the scan, excluding fixed VCS/vendor/build paths.                                            |
+| `--version`, `-V`    | Global                                                    | Print the installed package version without running a command.                                                     |
+| `--help`, `-h`       | Global                                                    | Print onboarding, command, option, trust, and exit-code help.                                                      |
 
 ## Environment variables
 
@@ -578,17 +597,17 @@ Existing regular artifact files may be replaced, but the CLI refuses symbolic
 links and non-regular files at generated artifact paths. Organization scans also
 reject unsafe `repositories/` output directories before GitHub enumeration.
 
-| Command                   | Artifact(s)                                                                                                                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `discover`                | `discovery.json`                                                                                                                                                                                                          |
-| `inventory` / `audit`     | `routes.json`, `routes.md`, and/or `openapi.json` according to `--format`                                                                                                                                                 |
-| `docs`                    | `openapi.json`, `docs-report.json`                                                                                                                                                                                        |
-| `review-middleware`       | `middleware-review.json`                                                                                                                                                                                                  |
-| `import-review`           | `middleware-suggestions.json`                                                                                                                                                                                             |
-| `scan-repo`               | `repo-scan.json`, `discovery.json`, `routes.json`; OpenAPI/docs report when mergeable                                                                                                                                     |
-| `scan-org`                | `organization-inventory.json`; optional bounded `organization-delta.json`; per-repo `repo-scan.json`, discovery, routes, and mergeable docs under `repositories/<name>/`; `organization-checkpoint.json` while incomplete |
-| `render`                  | `index.html`, local report and/or shared Swagger UI assets, `render-manifest.json`, optional copied organization delta, organization repository pages, and supported-framework API pages under `openapi/`                 |
-| `suggest-auth` / `schema` | JSON on stdout                                                                                                                                                                                                            |
+| Command                   | Artifact(s)                                                                                                                                                                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discover`                | `discovery.json`                                                                                                                                                                                                                      |
+| `inventory` / `audit`     | `routes.json`, `routes.md`, and/or `openapi.json` according to `--format`                                                                                                                                                             |
+| `docs`                    | `openapi.json`, `docs-report.json`                                                                                                                                                                                                    |
+| `review-middleware`       | `middleware-review.json`                                                                                                                                                                                                              |
+| `import-review`           | `middleware-suggestions.json`                                                                                                                                                                                                         |
+| `scan-repo`               | `repo-scan.json`, `discovery.json`, `routes.json`; retained API contracts under `specifications/`; canonical OpenAPI/docs report when mergeable                                                                                       |
+| `scan-org`                | `organization-inventory.json`; optional bounded `organization-delta.json`; per-repo scan, discovery, routes, specification catalogs, and mergeable docs under `repositories/<name>/`; `organization-checkpoint.json` while incomplete |
+| `render`                  | `index.html`, local report and/or shared Swagger UI assets, `render-manifest.json`, optional copied organization delta, repository pages, and one supported-framework API page per retained OpenAPI 3/Swagger 2 contract              |
+| `suggest-auth` / `schema` | JSON on stdout                                                                                                                                                                                                                        |
 
 `pretty` is terminal-oriented and is not written as an artifact. Supported
 inventory/audit formats are `pretty`, `json`, `md`, and `openapi`; formats may

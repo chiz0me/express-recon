@@ -83,7 +83,8 @@ Commands:
   scan-org      Enumerate API-visible repositories in one GitHub organization,
                 scan them statically, and build a framework-aware HTTP inventory.
   render        Generate a browsable offline HTML site from an existing report,
-                OpenAPI 3 JSON/YAML file, or output directory. Does not rescan.
+                OpenAPI 3 or Swagger 2 JSON/YAML file, or output directory.
+                Does not rescan.
   schema        Print the JSON Schema of the report contract and exit.
   help          Print this help text and exit.
 
@@ -105,7 +106,7 @@ Options:
                         auto-detected when omitted).
   --review <path>       middleware-review.json input for import-review.
   --assessment <path>   JSON/YAML assessment input for import-review.
-  --input <path>        OpenAPI 3 JSON/YAML, routes.json, repo-scan.json,
+  --input <path>        OpenAPI 3 JSON/YAML or Swagger 2, routes.json, repo-scan.json,
                         organization-inventory.json, or a directory containing a
                         conventional filename for one of them (render only).
                         Optional when exactly one input is discoverable in the
@@ -954,9 +955,123 @@ async function runImportReview(args) {
   return 0;
 }
 
+function specificationArtifactBase(specification, index, used) {
+  const source = String(specification.path || `specification-${index + 1}`);
+  const extension = path.posix.extname(source);
+  const stem = (extension ? source.slice(0, -extension.length) : source)
+    .normalize("NFKD")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+  const base = stem || `specification-${index + 1}`;
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate.toLowerCase())) candidate = `${base}-${suffix++}`;
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function persistSpecificationArtifacts(outDir, scan, options = {}) {
+  const documentation = scan.documentation || {};
+  const specifications = Array.isArray(documentation.specifications)
+    ? documentation.specifications
+    : [];
+  if (!specifications.length) return { scan, specifications: [] };
+  const directory = path.join(outDir, "specifications");
+  if (options.organization) ensureOrganizationOutputDirectory(directory);
+  else fs.mkdirSync(directory, { recursive: true });
+  const used = new Set();
+  const local = [];
+  const aggregate = [];
+  for (const [index, specification] of specifications.entries()) {
+    const { document, reconciliation, ...metadata } = specification;
+    const base = specificationArtifactBase(specification, index, used);
+    const localMetadata = { ...metadata };
+    const aggregateMetadata = { ...metadata };
+    if (document) {
+      const filename = `${base}.json`;
+      emit(JSON.stringify(document, null, 2), "openapi", directory, filename);
+      const localReference = path.posix.join("specifications", filename);
+      const aggregateReference = options.relativeDir
+        ? path.posix.join(options.relativeDir, localReference)
+        : localReference;
+      localMetadata.status = "retained";
+      localMetadata.artifact = localReference;
+      aggregateMetadata.status = "retained";
+      aggregateMetadata.artifact = aggregateReference;
+    }
+    if (reconciliation) {
+      const { document: reconciledDocument, report, ...reconciliationMetadata } = reconciliation;
+      localMetadata.reconciliation = { ...reconciliationMetadata };
+      aggregateMetadata.reconciliation = { ...reconciliationMetadata };
+      if (reconciledDocument) {
+        const filename = `${base}-reconciled.json`;
+        emit(JSON.stringify(reconciledDocument, null, 2), "openapi", directory, filename);
+        const localReference = path.posix.join("specifications", filename);
+        const aggregateReference = options.relativeDir
+          ? path.posix.join(options.relativeDir, localReference)
+          : localReference;
+        localMetadata.reconciliation.artifact = localReference;
+        aggregateMetadata.reconciliation.artifact = aggregateReference;
+      }
+      if (report) {
+        const filename = `${base}-docs-report.json`;
+        emit(JSON.stringify(report, null, 2), "json", directory, filename);
+        const localReference = path.posix.join("specifications", filename);
+        const aggregateReference = options.relativeDir
+          ? path.posix.join(options.relativeDir, localReference)
+          : localReference;
+        localMetadata.reconciliation.reportArtifact = localReference;
+        aggregateMetadata.reconciliation.reportArtifact = aggregateReference;
+      }
+    }
+    local.push(localMetadata);
+    aggregate.push(aggregateMetadata);
+  }
+  const retained = local.filter((item) => item.status === "retained").length;
+  return {
+    scan: {
+      ...scan,
+      documentation: {
+        ...documentation,
+        specifications: local,
+        summary: { ...documentation.summary, retained },
+      },
+    },
+    specifications: aggregate.filter((item) => item.artifact),
+  };
+}
+
+function writeRepositoryScanArtifacts(outDir, scan, options = {}) {
+  const persisted = persistSpecificationArtifacts(outDir, scan, options);
+  emit(JSON.stringify(persisted.scan, null, 2), "json", outDir, "repo-scan.json");
+  emit(JSON.stringify(scan.discovery, null, 2), "json", outDir, "discovery.json");
+  emit(JSON.stringify(scan.inventory, null, 2), "json", outDir, "routes.json");
+  const artifacts = options.relativeDir
+    ? {
+        repositoryScan: `${options.relativeDir}/repo-scan.json`,
+        discovery: `${options.relativeDir}/discovery.json`,
+        routes: `${options.relativeDir}/routes.json`,
+      }
+    : {};
+  if (Array.isArray(scan.documentation.specifications)) {
+    artifacts.specifications = persisted.specifications;
+  }
+  if (scan.documentation.status === "merged") {
+    emit(JSON.stringify(scan.documentation.document, null, 2), "openapi", outDir, "openapi.json");
+    emit(JSON.stringify(scan.documentation.report, null, 2), "json", outDir, "docs-report.json");
+    if (options.relativeDir) {
+      artifacts.openapi = `${options.relativeDir}/openapi.json`;
+      artifacts.documentationReport = `${options.relativeDir}/docs-report.json`;
+    }
+  }
+  return artifacts;
+}
+
 async function runScanRepository(args) {
   const config = loadConfig(args.config);
   const githubToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || undefined;
+  const outDir = args.out ? resolvePath(args.out) : null;
   const result = scanRepository(args.repo, {
     ref: args.ref,
     config,
@@ -965,27 +1080,11 @@ async function runScanRepository(args) {
     applicationId: args.appId,
     spec: args.spec,
     jsdoc: args.jsdoc,
+    retainSpecificationDocuments: Boolean(outDir),
   });
-  const outDir = args.out ? resolvePath(args.out) : null;
-  emit(JSON.stringify(result, null, 2), "json", outDir, "repo-scan.json");
   if (outDir) {
-    emit(JSON.stringify(result.discovery, null, 2), "json", outDir, "discovery.json");
-    emit(JSON.stringify(result.inventory, null, 2), "json", outDir, "routes.json");
-    if (result.documentation.status === "merged") {
-      emit(
-        JSON.stringify(result.documentation.document, null, 2),
-        "openapi",
-        outDir,
-        "openapi.json",
-      );
-      emit(
-        JSON.stringify(result.documentation.report, null, 2),
-        "json",
-        outDir,
-        "docs-report.json",
-      );
-    }
-  }
+    writeRepositoryScanArtifacts(outDir, result);
+  } else emit(JSON.stringify(result, null, 2), "json", null, "repo-scan.json");
   return 0;
 }
 
@@ -1358,21 +1457,10 @@ function writeRepositoryArtifacts(outDir, repository, scan) {
   ensureOrganizationOutputDirectory(repositoriesDir);
   const repoDir = path.join(repositoriesDir, artifactName);
   ensureOrganizationOutputDirectory(repoDir);
-  emit(JSON.stringify(scan, null, 2), "json", repoDir, "repo-scan.json");
-  emit(JSON.stringify(scan.discovery, null, 2), "json", repoDir, "discovery.json");
-  emit(JSON.stringify(scan.inventory, null, 2), "json", repoDir, "routes.json");
-  const artifacts = {
-    repositoryScan: `${relativeDir}/repo-scan.json`,
-    discovery: `${relativeDir}/discovery.json`,
-    routes: `${relativeDir}/routes.json`,
-  };
-  if (scan.documentation.status === "merged") {
-    emit(JSON.stringify(scan.documentation.document, null, 2), "openapi", repoDir, "openapi.json");
-    emit(JSON.stringify(scan.documentation.report, null, 2), "json", repoDir, "docs-report.json");
-    artifacts.openapi = `${relativeDir}/openapi.json`;
-    artifacts.documentationReport = `${relativeDir}/docs-report.json`;
-  }
-  return artifacts;
+  return writeRepositoryScanArtifacts(repoDir, scan, {
+    organization: true,
+    relativeDir,
+  });
 }
 
 async function executeScanOrganization(args, dependencies, reporter) {

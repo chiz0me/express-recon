@@ -624,10 +624,20 @@ test("organization scans isolate failures, classify incomplete negatives, and ho
     await new Promise((resolve) => setTimeout(resolve, 10));
     active--;
     if (source.endsWith("active-failure")) throw new Error("clone rejected token-for-test");
-    return scanResult(source, {
+    const scan = scanResult(source, {
       express: source.endsWith("active-express"),
       complete: !source.endsWith("active-partial"),
     });
+    if (source.endsWith("active-express")) {
+      scan.discovery.documentation.specifications = [
+        { path: "docs/openapi.json", format: "openapi", version: "3.1.0" },
+      ];
+      scan.documentation = {
+        status: "cataloged",
+        summary: { available: 1, openapi: 1, swagger: 0, reconciled: 0 },
+      };
+    }
+    return scan;
   };
   const result = await scanOrganization("acme", {
     token: "token-for-test",
@@ -656,6 +666,11 @@ test("organization scans isolate failures, classify incomplete negatives, and ho
   assert.equal(result.summary.emptyRepositories, 1);
   assert.equal(result.summary.applications, 1);
   assert.equal(result.summary.routes, 1);
+  assert.equal(result.summary.specificationRepositories, 1);
+  assert.equal(result.summary.apiSpecifications, 1);
+  assert.equal(result.summary.openapiSpecifications, 1);
+  assert.equal(result.summary.swaggerSpecifications, 0);
+  assert.equal(result.summary.catalogedRepositories, 1);
   assert.deepEqual(result.summary.auth, {
     public: 1,
     unknown: 0,
@@ -856,6 +871,41 @@ test("scan-org CLI orchestration streams detailed artifacts and writes a compact
             status: "merged",
             document: { openapi: "3.1.0", info: { title: "API", version: "1" }, paths: {} },
             report: { schemaVersion: "1.0", summary: {} },
+            summary: {
+              discovered: 2,
+              available: 2,
+              unavailable: 0,
+              openapi: 1,
+              swagger: 1,
+              reconciled: 0,
+              documentsRetained: true,
+            },
+            specifications: [
+              {
+                path: "docs/openapi.json",
+                format: "openapi",
+                version: "3.1.0",
+                title: "Source API",
+                status: "available",
+                document: {
+                  openapi: "3.1.0",
+                  info: { title: "Source API", version: "1" },
+                  paths: {},
+                },
+              },
+              {
+                path: "docs/swagger.json",
+                format: "swagger",
+                version: "2.0",
+                title: "Legacy API",
+                status: "available",
+                document: {
+                  swagger: "2.0",
+                  info: { title: "Legacy API", version: "1" },
+                  paths: {},
+                },
+              },
+            ],
           };
           const artifacts = await options.onRepository({
             repository: item,
@@ -879,6 +929,7 @@ test("scan-org CLI orchestration streams detailed artifacts and writes a compact
     );
     assert.equal(aggregate.repositories[0].scan, undefined);
     assert.equal(aggregate.repositories[0].artifacts.routes, "repositories/api/routes.json");
+    assert.equal(aggregate.repositories[0].artifacts.specifications.length, 2);
     assert.equal(aggregate.resume.repositoriesReused, 0);
     for (const file of [
       "repo-scan.json",
@@ -889,6 +940,17 @@ test("scan-org CLI orchestration streams detailed artifacts and writes a compact
     ]) {
       assert.ok(fs.existsSync(path.join(output, "repositories", "api", file)), file);
     }
+    for (const specification of aggregate.repositories[0].artifacts.specifications) {
+      assert.ok(fs.existsSync(path.join(output, specification.artifact)));
+    }
+    const persistedScan = JSON.parse(
+      fs.readFileSync(path.join(output, "repositories", "api", "repo-scan.json"), "utf8"),
+    );
+    assert.ok(
+      persistedScan.documentation.specifications.every(
+        (item) => item.status === "retained" && !Object.hasOwn(item, "document"),
+      ),
+    );
     assert.equal(fs.existsSync(path.join(output, "organization-checkpoint.json")), false);
     assert.doesNotMatch(
       fs.readFileSync(path.join(output, "organization-inventory.json"), "utf8"),

@@ -224,7 +224,7 @@ EXPRESS_RECON_CONTEXT=agent express-recon render \
 EXPRESS_RECON_CONTEXT=agent express-recon render \
   --baseline <priorOutDir> --input <currentOutDir> --out <htmlDir>
 
-# A standalone OpenAPI file needs no repository scan or model pass:
+# A standalone OpenAPI 3 or Swagger 2 file needs no repository scan or model pass:
 EXPRESS_RECON_CONTEXT=agent express-recon render \
   --input <openapi.json-or-yaml> --out <htmlDir>
 ```
@@ -244,13 +244,16 @@ for analysis. HTML generation itself consumes no inference tokens; opening or
 returning its contents to a model does. Organization sites generate detail
 pages only for confirmed supported repositories and diagnostics pages for
 inconclusive scans; definite unsupported and unscanned entries remain in the
-index without separate pages. Valid OpenAPI artifacts referenced by supported
-entries become per-repository Swagger UI pages with one shared local bundle;
-do not create API pages for unsupported entries. If the scan used
+index without separate pages. Retained OpenAPI 3 and Swagger 2 artifacts
+referenced by supported entries become per-repository Swagger UI pages. They use
+one shared local bundle; do not create API pages for unsupported entries. A
+`cataloged` documentation status means multiple valid contracts were preserved
+without guessing a canonical merge; it is not evidence that documentation was
+missing. If the scan used
 `--baseline`, the site also shows organization change metrics and bounded exact
 route changes without an additional model call.
 
-For an OpenAPI input, return the generated `index.html`; do not summarize the
+For an OpenAPI 3 or Swagger 2 input, return the generated `index.html`; do not summarize the
 generated Swagger UI bundle. The document is embedded locally, request execution
 and online validation are disabled, and the browser CSP blocks external `$ref`
 resolution, whether relative or remote. If complete schema expansion is required,

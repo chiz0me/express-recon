@@ -309,6 +309,15 @@ reports are written immediately under `repositories/<name>/`, while
 holding every detailed route report in memory, streaming it through stdout, or
 leaving source snapshots on disk. Pass `--out` to override the location.
 
+Valid OpenAPI 3 and Swagger 2 documents are retained as bounded parsed-data
+artifacts under each repository's `specifications/` directory before that source
+snapshot is deleted. If several OpenAPI documents share an application, the
+documentation status is `cataloged`: no canonical document is guessed or
+combined. `render` automatically creates a separate offline API reference for
+every retained contract. A focused `scan-repo --spec <path>` remains the way to
+request one intentional canonical OpenAPI 3 merge; Swagger 2 is viewable but not
+used as a merge base.
+
 Progress is enabled by default for `scan-org` and is always written to stderr,
 so durable JSON artifacts remain machine-readable. Interactive
 terminals get a live status line with processed/total, active repositories, and
@@ -332,7 +341,10 @@ after every complete repository. `--resume` verifies the checkpoint fingerprint
 and every recorded artifact's size and SHA-256 digest, reuses only complete
 results, and retries failed, inconclusive, missing, or damaged work. The
 checkpoint is kept while aggregate coverage is incomplete and removed after a
-complete aggregate has been written. Concurrency may change for a resume; the organization,
+complete aggregate has been written. Entries created before retained
+specification catalogs are selectively rescanned only when they had discovered
+documentation inputs; unrelated completed repositories remain reusable.
+Concurrency may change for a resume; the organization,
 checkpoint compatibility generation, repository cap, filters, config, and scan
 scope must still match. Explicitly compatible releases upgrade older checkpoints
 after their original fingerprint and artifact digests have been verified. During
@@ -446,8 +458,8 @@ Within an input directory, `render` prefers `organization-inventory.json`, then
 `repo-scan.json`, `routes.json`, and conventional `openapi.*`/`swagger.*` names.
 An organization becomes a compact overview plus one report page per confirmed
 supported-framework repository and one diagnostics page per inconclusive scan.
-Every valid OpenAPI artifact belonging to a supported entry also gets a stock
-Swagger UI page under `openapi/`; all such pages share one local bundle. Definite
+Every retained OpenAPI 3 or Swagger 2 artifact belonging to a supported entry
+also gets a stock Swagger UI page under `openapi/`; all such pages share one local bundle. Definite
 unsupported, skipped, empty, and failed entries remain visible in the overview
 without report or API pages. The renderer reads and releases selected artifacts
 individually instead of combining every route or specification into one enormous
@@ -455,8 +467,8 @@ page. When `organization-delta.json` is present, the overview adds change metric
 and repository transitions, and current repository pages show the bounded exact
 route changes retained for that repository.
 
-An individual OpenAPI 3 JSON/YAML file uses a packaged, stock Swagger UI rather
-than an express-recon-specific contract viewer. Its spec is embedded locally so
+An individual OpenAPI 3 or Swagger 2 JSON/YAML file uses a packaged, stock
+Swagger UI rather than an express-recon-specific contract viewer. Its spec is embedded locally so
 the site works through `file://`; no CDN is required. Request submission, query
 string configuration, credential persistence, and Swagger's online validator are
 disabled. The content security policy also blocks browser connections, so
