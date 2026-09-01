@@ -3,10 +3,41 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const pkg = require("../package.json");
+const { getAbsoluteFSPath: swaggerUiPath } = require("swagger-ui-dist");
+const { loadSpec } = require("./docs");
+const { isFrameworkStatus } = require("./frameworks");
 const { SCRIPT, STYLES } = require("./html-assets");
+const {
+  compareOrganizationReports,
+  loadOrganizationSnapshot,
+  referencedRepositoryScan: referencedComparisonScan,
+  snapshotFromReport,
+} = require("./organization-compare");
 
 const MAX_JSON_BYTES = 128 * 1024 * 1024;
-const INPUT_CANDIDATES = ["organization-inventory.json", "repo-scan.json", "routes.json"];
+const MAX_OPENAPI_BYTES = 32 * 1024 * 1024;
+const INPUT_CANDIDATES = [
+  "organization-inventory.json",
+  "repo-scan.json",
+  "routes.json",
+  "openapi.json",
+  "openapi.yaml",
+  "openapi.yml",
+  "swagger.json",
+  "swagger.yaml",
+  "swagger.yml",
+];
+const ORGANIZATION_DELTA_FILENAME = "organization-delta.json";
+const REPORT_ASSETS = ["assets/report.css", "assets/report.js"];
+const SWAGGER_UI_FILES = new Map([
+  ["swagger-ui.css", "assets/swagger-ui.css"],
+  ["swagger-ui-bundle.js", "assets/swagger-ui-bundle.js"],
+  ["swagger-ui-bundle.js.LICENSE.txt", "assets/swagger-ui-bundle.js.LICENSE.txt"],
+  ["LICENSE", "assets/swagger-ui-LICENSE.txt"],
+  ["NOTICE", "assets/swagger-ui-NOTICE.txt"],
+]);
+const SWAGGER_UI_ASSETS = [...SWAGGER_UI_FILES.values()];
+const OPENAPI_ASSETS = [...SWAGGER_UI_ASSETS, "assets/openapi-config.js"];
 
 function escapeHtml(value) {
   return String(value)
@@ -46,7 +77,12 @@ function object(value) {
 }
 
 function tone(value) {
-  if (["express", "proven", "merged", "complete"].includes(value)) return "good";
+  if (
+    ["express", "fastify", "nestjs", "multi-framework", "proven", "merged", "complete"].includes(
+      value,
+    )
+  )
+    return "good";
   if (["inconclusive", "unknown", "needs-input", "needs-application-selection"].includes(value)) {
     return "warn";
   }
@@ -84,7 +120,11 @@ function sourceLabel(source) {
 }
 
 function middlewareLabel(middlewares) {
-  const names = list(middlewares).map((item) => display(object(item).name, "<anonymous>"));
+  const names = list(middlewares).map((item) => {
+    const middleware = object(item);
+    const name = display(middleware.name, "<anonymous>");
+    return middleware.stage ? `${middleware.stage}:${name}` : name;
+  });
   return names.length ? names.join(" → ") : "—";
 }
 
@@ -110,6 +150,7 @@ function routeRows(report) {
       const route = object(routeValue);
       const auth = audit ? display(route.authStatus, "unknown") : "";
       const search = [
+        route.framework || "express",
         route.applicationId,
         route.method,
         route.path,
@@ -126,6 +167,7 @@ function routeRows(report) {
       const confidence = route.pathConfidence === "partial" ? badge("partial", "warn") : "";
       const accepted = route.accepted ? " " + badge("accepted", "info") : "";
       return `<tr data-search="${escapeHtml(search)}" data-status="${escapeHtml(auth)}">
+        <td>${badge(route.framework || "express")}</td>
         <td><span class="method">${escapeHtml(display(route.method))}</span></td>
         <td class="route-path"><div class="stack"><code>${escapeHtml(display(route.path))}</code><span>${confidence}</span></div></td>
         <td>${audit ? badge(auth) + accepted : badge("inventory", "info")}</td>
@@ -141,12 +183,12 @@ function routeTable(report) {
   const routes = list(report.routes);
   const statuses = report.command === "audit" ? routes.map((route) => route.authStatus) : [];
   const body = routes.length
-    ? `<div class="table-wrap"><table id="routes-table"><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Application</th><th>Source</th><th>Middleware chain</th></tr></thead><tbody>${routeRows(report)}</tbody></table></div>`
+    ? `<div class="table-wrap"><table id="routes-table"><thead><tr><th>Framework</th><th>Method</th><th>Path</th><th>Auth</th><th>Application</th><th>Source</th><th>Middleware chain</th></tr></thead><tbody>${routeRows(report)}</tbody></table></div>`
     : `<div class="panel__body"><p class="empty">No routes were recorded.</p></div>`;
   return panel(
     "Routes",
     routes.length
-      ? filterControls("routes-table", "Path, middleware, application…", statuses) + body
+      ? filterControls("routes-table", "Framework, path, middleware, application…", statuses) + body
       : body,
     `${routes.length} route${routes.length === 1 ? "" : "s"} in this report`,
   );
@@ -178,13 +220,15 @@ function applicationsPanel(applications) {
   const cards = items
     .map((value) => {
       const app = object(value);
-      return `<article class="card"><h3>${escapeHtml(display(app.name, app.id))}</h3><p><code>${escapeHtml(display(app.id))}</code></p><p>${escapeHtml(sourceLabel(app.source))} · ${count(app.routeCount)} routes</p></article>`;
+      const framework = app.framework || "express";
+      const adapter = app.adapter ? ` · ${app.adapter} adapter` : "";
+      return `<article class="card"><h3>${escapeHtml(display(app.name, app.id))}</h3><p>${badge(framework)}${escapeHtml(adapter)}</p><p><code>${escapeHtml(display(app.id))}</code></p><p>${escapeHtml(sourceLabel(app.source))} · ${count(app.routeCount)} routes</p></article>`;
     })
     .join("");
   return panel(
     "Applications",
     `<div class="panel__body"><div class="cards">${cards}</div></div>`,
-    `${items.length} Express application${items.length === 1 ? "" : "s"} identified`,
+    `${items.length} supported HTTP application${items.length === 1 ? "" : "s"} identified`,
   );
 }
 
@@ -214,8 +258,22 @@ function discoveryPanel(discoveryValue) {
   const cards = packages
     .map((value) => {
       const item = object(value);
+      const frameworks = list(item.frameworks)
+        .map((frameworkValue) => {
+          const framework = object(frameworkValue);
+          const classification = object(framework.classification);
+          const scopes = list(classification.scopes).join("/");
+          const detail = [scopes, classification.strength].filter(Boolean).join(", ");
+          return framework.name ? `${framework.name}${detail ? ` (${detail})` : ""}` : "";
+        })
+        .filter(Boolean);
       const expressVersions = list(object(item.express).versions).join(", ");
-      return `<article class="card"><h3>${escapeHtml(display(item.name, item.root))}</h3><p><code>${escapeHtml(display(item.root, "."))}</code></p><p>${escapeHtml(expressVersions ? `Express ${expressVersions}` : "Package discovered")}</p></article>`;
+      const frameworkText = frameworks.length
+        ? `Frameworks: ${frameworks.join(", ")}`
+        : expressVersions
+          ? `Express ${expressVersions}`
+          : "Package discovered";
+      return `<article class="card"><h3>${escapeHtml(display(item.name, item.root))}</h3><p><code>${escapeHtml(display(item.root, "."))}</code></p><p>${escapeHtml(frameworkText)}</p></article>`;
     })
     .join("");
   return panel(
@@ -234,7 +292,7 @@ function discoveryPanel(discoveryValue) {
   );
 }
 
-function documentationPanel(documentationValue) {
+function documentationPanel(documentationValue, openApiHref = "") {
   const documentation = object(documentationValue);
   if (!documentation.status) return "";
   const report = object(documentation.report);
@@ -254,7 +312,7 @@ function documentationPanel(documentationValue) {
             ["Conflicts", count(summary.conflicts)],
           ])
         : ""
-    }</div>`,
+    }${openApiHref ? `<p><a href="${escapeHtml(openApiHref)}">Browse OpenAPI reference</a></p>` : ""}</div>`,
     "Existing OpenAPI, Swagger/JSDoc, and route evidence",
   );
 }
@@ -306,6 +364,63 @@ function reportSummary(report) {
   return metrics(base);
 }
 
+function scriptLiteral(value) {
+  // The document is written to an external script so the page can retain a
+  // restrictive script-src policy. A JSON string is parsed at load time instead
+  // of emitted as an object literal so keys such as "__proto__" retain JSON
+  // semantics. HTML-significant characters cannot terminate the script.
+  return JSON.stringify(JSON.stringify(value)).replace(/[<>&\u2028\u2029]/g, (character) => {
+    const code = character.codePointAt(0).toString(16).padStart(4, "0");
+    return `\\u${code}`;
+  });
+}
+
+function openApiConfigScript(document) {
+  return `"use strict";
+
+const spec = JSON.parse(${scriptLiteral(document)});
+
+window.ui = SwaggerUIBundle({
+  spec,
+  dom_id: "#swagger-ui",
+  deepLinking: true,
+  displayOperationId: true,
+  docExpansion: "list",
+  filter: true,
+  persistAuthorization: false,
+  queryConfigEnabled: false,
+  supportedSubmitMethods: [],
+  tryItOutEnabled: false,
+  validatorUrl: null,
+  withCredentials: false,
+});
+`;
+}
+
+function openApiPage(document, options = {}) {
+  const title = object(document.info).title.trim();
+  const assetPrefix = options.assetPrefix || "";
+  const configSource = options.configSource || `${assetPrefix}assets/openapi-config.js`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light dark">
+  <meta name="generator" content="express-recon ${escapeHtml(pkg.version)}">
+  <title>${escapeHtml(title)} · express-recon</title>
+  <link rel="stylesheet" href="${escapeHtml(assetPrefix)}assets/swagger-ui.css">
+  <script src="${escapeHtml(assetPrefix)}assets/swagger-ui-bundle.js" defer></script>
+  <script src="${escapeHtml(configSource)}" defer></script>
+</head>
+<body>
+  <noscript>This offline OpenAPI reference requires JavaScript.</noscript>
+  <div id="swagger-ui"></div>
+</body>
+</html>\n`;
+}
+
 function layout({ title, eyebrow, lede, body, assetPrefix = "", backHref = "" }) {
   const brand = backHref
     ? `<a class="brand" href="${escapeHtml(backHref)}"><span class="brand__mark" aria-hidden="true"></span><span>express-recon</span></a>`
@@ -327,7 +442,7 @@ function layout({ title, eyebrow, lede, body, assetPrefix = "", backHref = "" })
     <div class="hero"><p class="eyebrow">${escapeHtml(eyebrow)}</p><h1>${escapeHtml(title)}</h1>${lede ? `<p class="lede">${escapeHtml(lede)}</p>` : ""}</div>
     ${body}
   </main>
-  <footer class="site-footer"><div class="shell">Generated from deterministic scan artifacts. No target code, network requests, or model calls are used to view this site.</div></footer>
+  <footer class="site-footer"><div class="shell">Generated from saved machine-readable artifacts. No target code, network requests, or model calls are used to view this site.</div></footer>
 </body>
 </html>\n`;
 }
@@ -377,8 +492,9 @@ function repositoryPage(scan, fallback, navigation = {}) {
   }
   return routeReportPage(report, repositoryTitle(scan, fallback), {
     ...navigation,
-    beforeRoutes: repositoryOverview(scan) + discoveryPanel(scan.discovery),
-    afterRoutes: documentationPanel(scan.documentation),
+    beforeRoutes:
+      repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
+    afterRoutes: documentationPanel(scan.documentation, navigation.openApiHref),
   });
 }
 
@@ -416,9 +532,47 @@ function inputKind(value) {
   if (["inventory", "audit"].includes(value?.command) && Array.isArray(value.routes)) {
     return "routes";
   }
+  if (value?.swagger !== undefined) {
+    throw new Error("Unsupported HTML report input; Swagger 2 must be converted to OpenAPI 3");
+  }
+  if (value?.openapi !== undefined) {
+    if (!/^3\.\d+\.\d+(?:[-+].*)?$/.test(value.openapi)) {
+      throw new Error(`Unsupported HTML report input; OpenAPI version ${display(value.openapi)}`);
+    }
+    if (
+      typeof object(value.info).title !== "string" ||
+      !object(value.info).title.trim() ||
+      !value.paths ||
+      typeof value.paths !== "object" ||
+      Array.isArray(value.paths)
+    ) {
+      throw new Error("Unsupported HTML report input; OpenAPI 3 requires info.title and paths");
+    }
+    return "openapi";
+  }
   throw new Error(
-    "Unsupported HTML report input; expected organization-inventory.json, repo-scan.json, or routes.json",
+    "Unsupported HTML report input; expected an OpenAPI 3 document, organization-inventory.json, repo-scan.json, or routes.json",
   );
+}
+
+function readInputFile(file) {
+  const extension = path.extname(file).toLowerCase();
+  let value = [".yaml", ".yml"].includes(extension)
+    ? loadSpec(file, { maxFileBytes: MAX_OPENAPI_BYTES })
+    : readJson(file);
+  let kind = inputKind(value);
+  if (kind === "openapi") {
+    if (fs.statSync(file).size > MAX_OPENAPI_BYTES) {
+      throw new Error(`OpenAPI HTML input exceeds ${MAX_OPENAPI_BYTES} bytes: ${file}`);
+    }
+    // JSON reports use a larger limit, so validate a JSON OpenAPI document
+    // through the same bounded, JSON-compatible tree checks as YAML input.
+    if (extension === ".json") {
+      value = loadSpec(file, { maxFileBytes: MAX_OPENAPI_BYTES });
+      kind = inputKind(value);
+    }
+  }
+  return { value, kind };
 }
 
 function resolveInput(input) {
@@ -440,8 +594,86 @@ function resolveInput(input) {
       );
     }
   }
-  const value = readJson(file);
-  return { file, root: path.dirname(file), value, kind: inputKind(value) };
+  const loaded = readInputFile(file);
+  return { file, root: path.dirname(file), ...loaded };
+}
+
+function directoryHasRenderInput(directory) {
+  for (const name of INPUT_CANDIDATES) {
+    try {
+      const candidate = path.join(directory, name);
+      const stat = fs.lstatSync(candidate);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error(
+          `render cannot auto-detect a non-regular or symbolic input candidate: ${candidate}; pass --input explicitly`,
+        );
+      }
+      return true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return false;
+}
+
+/**
+ * Find one unambiguous render root without recursively walking source or the
+ * per-repository organization artifacts. Explicit --input remains required
+ * when multiple saved outputs are present.
+ */
+function detectRenderInput(cwd = process.cwd()) {
+  const root = path.resolve(cwd);
+  const candidates = [];
+  if (directoryHasRenderInput(root)) candidates.push(root);
+
+  const reconRoot = path.join(root, ".express-recon");
+  if (fs.existsSync(reconRoot)) {
+    const stat = fs.lstatSync(reconRoot);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(
+        "render cannot auto-detect through a non-directory or symbolic .express-recon entry; pass --input explicitly",
+      );
+    }
+    if (directoryHasRenderInput(reconRoot)) candidates.push(reconRoot);
+    for (const entry of fs
+      .readdirSync(reconRoot, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const candidate = path.join(reconRoot, entry.name);
+      if (directoryHasRenderInput(candidate)) candidates.push(candidate);
+    }
+  }
+
+  if (candidates.length === 1) return candidates[0];
+  if (!candidates.length) {
+    throw new Error(
+      "render could not auto-detect an input in the current directory or immediate .express-recon children; pass --input <report-or-dir>",
+    );
+  }
+  const shown = candidates.slice(0, 8).map((candidate) => {
+    const relative = path.relative(root, candidate) || ".";
+    return JSON.stringify(relative.split(path.sep).join("/"));
+  });
+  const remainder =
+    candidates.length > shown.length ? ` and ${candidates.length - shown.length} more` : "";
+  throw new Error(
+    `render found multiple possible inputs (${shown.join(", ")}${remainder}); pass --input explicitly`,
+  );
+}
+
+/** Derive a sibling output directory while keeping scan artifacts untouched. */
+function defaultRenderOutput(inputPath) {
+  const input = path.resolve(inputPath);
+  let stat;
+  try {
+    stat = fs.statSync(input);
+  } catch (error) {
+    throw new Error(`Could not derive HTML output from ${input}: ${error.message}`);
+  }
+  if (stat.isDirectory()) return `${input}-html`;
+  const parsed = path.parse(input);
+  if (INPUT_CANDIDATES.includes(parsed.base)) return `${parsed.dir}-html`;
+  return path.join(parsed.dir, `${parsed.name || "render"}-html`);
 }
 
 function referencedRepositoryScan(root, entry) {
@@ -463,6 +695,90 @@ function referencedRepositoryScan(root, entry) {
   return scan;
 }
 
+function referencedOpenApi(root, entry) {
+  const artifacts = object(entry.artifacts);
+  if (!Object.hasOwn(artifacts, "openapi")) return null;
+  const reference = artifacts.openapi;
+  if (typeof reference !== "string" || !reference || path.isAbsolute(reference)) {
+    throw new Error("OpenAPI artifact path must be a non-empty relative path");
+  }
+  const candidate = path.resolve(root, reference);
+  if (!within(root, candidate)) throw new Error("OpenAPI artifact escapes the input folder");
+  const realRoot = fs.realpathSync(root);
+  const realCandidate = fs.realpathSync(candidate);
+  if (!within(realRoot, realCandidate)) {
+    throw new Error("OpenAPI artifact symlink escapes the input folder");
+  }
+  const loaded = readInputFile(realCandidate);
+  if (loaded.kind !== "openapi") throw new Error("OpenAPI artifact has the wrong kind");
+  return loaded.value;
+}
+
+function embeddedOpenApi(scan) {
+  const documentation = object(object(scan).documentation);
+  if (documentation.status !== "merged" || !documentation.document) return null;
+  if (inputKind(documentation.document) !== "openapi") {
+    throw new Error("embedded OpenAPI document has the wrong kind");
+  }
+  const serialized = JSON.stringify(documentation.document);
+  if (Buffer.byteLength(serialized) > MAX_OPENAPI_BYTES) {
+    throw new Error(`embedded OpenAPI document exceeds ${MAX_OPENAPI_BYTES} bytes`);
+  }
+  return documentation.document;
+}
+
+function repositoryOpenApi(root, entry, scan) {
+  return Object.hasOwn(object(entry.artifacts), "openapi")
+    ? referencedOpenApi(root, entry)
+    : embeddedOpenApi(scan);
+}
+
+function organizationDelta(input, warnings) {
+  const advertised = object(input.value.delta);
+  const file = path.join(input.root, ORGANIZATION_DELTA_FILENAME);
+  let delta = null;
+  if (fs.existsSync(file)) {
+    try {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error("organization-delta.json must be a regular file");
+      }
+      delta = readJson(file);
+    } catch (error) {
+      warnings.push(
+        `Organization delta unavailable: ${String(error.message).split(input.root).join(".")}`,
+      );
+    }
+  } else if (advertised.kind) {
+    delta = advertised;
+    if (advertised.artifact === ORGANIZATION_DELTA_FILENAME) {
+      warnings.push(
+        "Organization delta details are unavailable; rendering the compact aggregate summary.",
+      );
+    }
+  }
+  if (!delta) return null;
+  if (
+    delta.kind !== "github-organization-inventory-delta" ||
+    delta.organization?.login?.toLowerCase() !== input.value.organization?.login?.toLowerCase() ||
+    !delta.summary ||
+    !Array.isArray(delta.repositories)
+  ) {
+    warnings.push("Organization delta has an unexpected contract or organization and was ignored.");
+    return null;
+  }
+  const expectedScope = input.value.scope?.fingerprint;
+  if (
+    expectedScope &&
+    delta.current?.scopeFingerprint &&
+    expectedScope !== delta.current.scopeFingerprint
+  ) {
+    warnings.push("Organization delta does not match the current inventory scope and was ignored.");
+    return null;
+  }
+  return delta;
+}
+
 function slug(value, fallback) {
   const normalized = String(value || "")
     .normalize("NFKD")
@@ -472,47 +788,228 @@ function slug(value, fallback) {
   return normalized || fallback;
 }
 
-function organizationDetailLabel(status) {
-  if (status === "express") return "View report";
+function organizationDetailLabel(status, evidenceValue) {
+  if (isFrameworkStatus(status)) {
+    const evidence = object(evidenceValue);
+    return count(evidence.applicationCount) > 0 || count(evidence.routeCount) > 0
+      ? "View report"
+      : "View evidence";
+  }
   if (status === "inconclusive") return "View diagnostics";
   return "";
 }
 
 function organizationNoDetailLabel(status) {
-  if (status === "not-express") return "No Express report";
+  if (status === "not-express") return "No supported framework report";
   if (status === "inconclusive") return "No diagnostic artifact";
   return "No detailed report";
 }
 
-function organizationRows(report, detailPages) {
+function organizationRows(report, detailPages, openApiPages) {
   return list(report.repositories)
     .map((value, index) => {
       const entry = object(value);
       const repository = object(entry.repository);
-      const express = object(entry.express);
-      const documentation = object(express.documentation);
+      const evidence = Object.keys(object(entry.frameworks)).length
+        ? object(entry.frameworks)
+        : object(entry.express);
+      const documentation = object(evidence.documentation);
       const name = display(repository.fullName, repository.name);
       const status = display(entry.status, "unknown");
+      const roles = list(evidence.items)
+        .map((itemValue) => {
+          const item = object(itemValue);
+          const role = object(item.classification).role;
+          return item.name && role ? `${item.name}: ${role}` : "";
+        })
+        .filter(Boolean);
       const docsStatus = display(documentation.reconciliationStatus, "—");
-      const search = [name, status, docsStatus, entry.error]
+      const search = [name, status, ...roles, docsStatus, entry.error]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-      const detailLabel = organizationDetailLabel(entry.status);
-      const detail = detailPages[index]
-        ? `<a href="${escapeHtml(detailPages[index])}">${detailLabel}</a>`
+      const detailLabel =
+        organizationDetailLabel(entry.status, evidence) ||
+        (detailPages[index] ? "View changes" : "");
+      const links = [
+        detailPages[index] ? `<a href="${escapeHtml(detailPages[index])}">${detailLabel}</a>` : "",
+        openApiPages[index] ? `<a href="${escapeHtml(openApiPages[index])}">API reference</a>` : "",
+      ].filter(Boolean);
+      const detail = links.length
+        ? `<div class="stack">${links.join("")}</div>`
         : `<span class="subtle">${organizationNoDetailLabel(entry.status)}</span>`;
       return `<tr data-search="${escapeHtml(search)}" data-status="${escapeHtml(status)}">
         <td><div class="stack"><strong>${escapeHtml(name)}</strong>${entry.resumed ? `<span>${badge("resumed", "info")}</span>` : ""}${entry.error ? `<span class="subtle">${escapeHtml(entry.error)}</span>` : ""}</div></td>
-        <td>${badge(status)}</td>
-        <td>${count(express.applicationCount)}</td>
-        <td>${count(express.routeCount)}</td>
+        <td><div class="stack">${badge(status)}${roles.length ? `<span class="subtle">${escapeHtml(roles.join(", "))}</span>` : ""}</div></td>
+        <td>${count(evidence.applicationCount)}</td>
+        <td>${count(evidence.routeCount)}</td>
         <td>${escapeHtml(docsStatus)}</td>
-        <td>${badge(completeness(entry.coverageComplete))}</td>
+        <td>${badge(completeness(entry.coverageComplete === true && entry.routeGraphComplete !== false))}</td>
         <td>${detail}</td>
       </tr>`;
     })
     .join("");
+}
+
+function signed(value) {
+  if (!Number.isSafeInteger(value) || value === 0) return "0";
+  return value > 0 ? `+${value}` : String(value);
+}
+
+function deltaRouteSummary(entry) {
+  return object(entry.changes).routes?.summary || object(entry.routeChanges);
+}
+
+function deltaRouteCount(entry) {
+  const changes = object(entry.changes);
+  if (Number.isSafeInteger(changes.routeCountDelta)) return changes.routeCountDelta;
+  const before = entry.before ? count(entry.before.routes) : 0;
+  const after = entry.after ? count(entry.after.routes) : 0;
+  return after - before;
+}
+
+function deltaRepositoryRows(delta) {
+  return list(delta.repositories)
+    .map((value) => {
+      const entry = object(value);
+      const repository = object(entry.repository);
+      const before = object(entry.before);
+      const after = object(entry.after);
+      const routes = object(deltaRouteSummary(entry));
+      const name = display(repository.fullName, repository.name);
+      const transition = `${display(before.status, "not present")} → ${display(after.status, "not present")}`;
+      const search = [name, entry.change, transition].join(" ").toLowerCase();
+      return `<tr data-search="${escapeHtml(search)}" data-status="${escapeHtml(display(entry.change, "changed"))}">
+        <td><strong>${escapeHtml(name)}</strong></td>
+        <td>${badge(display(entry.change, "changed"), entry.change === "added" ? "good" : entry.change === "removed" ? "warn" : "info")}</td>
+        <td>${escapeHtml(transition)}</td>
+        <td><span class="mono">${escapeHtml(signed(deltaRouteCount(entry)))}</span></td>
+        <td>${count(routes.addedRoutes)}</td>
+        <td>${count(routes.removedRoutes)}</td>
+        <td>${count(routes.authRegressions)}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function organizationDeltaPanel(delta) {
+  if (!delta) return "";
+  const summary = object(delta.summary);
+  const entries = list(delta.repositories);
+  const coverage = object(delta.coverage);
+  const incomplete =
+    coverage.complete === false
+      ? notice(
+          "Incomplete change comparison",
+          `${count(coverage.exactComparisonFailures)} repository comparisons could not be completed. Treat missing changes as unknown, not unchanged.`,
+          "warn",
+        )
+      : "";
+  const compact =
+    delta.repositoriesTruncated === true || count(summary.repositoriesChanged) > entries.length
+      ? notice(
+          "Compact change summary",
+          `Showing ${entries.length} of ${count(summary.repositoriesChanged)} changed repositories. Open organization-delta.json for the bounded complete list.`,
+        )
+      : "";
+  const table = entries.length
+    ? `${filterControls(
+        "organization-delta-table",
+        "Repository or change…",
+        entries.map((entry) => entry.change),
+      )}<div class="table-wrap"><table id="organization-delta-table"><thead><tr><th>Repository</th><th>Change</th><th>Status</th><th>Route count</th><th>Added paths</th><th>Removed paths</th><th>Auth regressions</th></tr></thead><tbody>${deltaRepositoryRows(delta)}</tbody></table></div>`
+    : `<div class="panel__body"><p class="empty">No inventory changes were detected.</p></div>`;
+  return [
+    incomplete,
+    compact,
+    metrics([
+      ["Repositories added", count(summary.repositoriesAdded)],
+      ["Repositories removed", count(summary.repositoriesRemoved)],
+      ["Repositories changed", count(summary.repositoriesChanged)],
+      [
+        "Newly supported repositories",
+        count(summary.newlySupportedRepositories ?? summary.newlyExpressRepositories),
+      ],
+      [
+        "No longer supported",
+        count(summary.noLongerSupportedRepositories ?? summary.noLongerExpressRepositories),
+      ],
+      ["Added paths", count(summary.addedRoutes)],
+      ["Removed paths", count(summary.removedRoutes)],
+      ["Auth regressions", count(summary.authRegressions)],
+      ["Comparison coverage", completeness(coverage.complete)],
+    ]),
+    panel(
+      "Changes since baseline",
+      table,
+      `${entries.length} changed repository entr${entries.length === 1 ? "y" : "ies"}; exact path details are bounded in organization-delta.json`,
+    ),
+  ].join("");
+}
+
+function routeDeltaRows(routeComparison) {
+  const rows = [];
+  for (const [name, label, forcedTone] of [
+    ["authRegressions", "auth regression", "bad"],
+    ["addedRoutes", "added", "good"],
+    ["removedRoutes", "removed", "warn"],
+    ["authImprovements", "auth improvement", "good"],
+  ]) {
+    for (const value of list(object(routeComparison.details)[name])) {
+      const route = object(value);
+      const search = [
+        label,
+        route.method,
+        route.path,
+        route.applicationId,
+        sourceLabel(route.source),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      rows.push(`<tr data-search="${escapeHtml(search)}" data-status="${escapeHtml(label)}">
+        <td>${badge(label, forcedTone)}</td>
+        <td><span class="method">${escapeHtml(display(route.method))}</span></td>
+        <td class="route-path"><code>${escapeHtml(display(route.path))}</code></td>
+        <td><code>${escapeHtml(display(route.applicationId))}</code></td>
+        <td class="source"><code>${escapeHtml(sourceLabel(route.source))}</code></td>
+      </tr>`);
+    }
+  }
+  return rows.join("");
+}
+
+function routeDeltaPanel(entry) {
+  const comparison =
+    object(object(entry).changes).routes ||
+    (entry?.routeChanges ? { summary: entry.routeChanges } : null);
+  if (!comparison) return "";
+  const summary = object(comparison.summary);
+  const rows = routeDeltaRows(comparison);
+  const statuses = ["auth regression", "added", "removed", "auth improvement"];
+  const truncation = comparison.detailsTruncated
+    ? notice(
+        "Change details truncated",
+        "Counts are exact, but the machine-readable report retained only a bounded subset of route details.",
+        "warn",
+      )
+    : "";
+  return panel(
+    "Changes since baseline",
+    `<div class="panel__body">${metrics([
+      ["Added paths", count(summary.addedRoutes)],
+      ["Removed paths", count(summary.removedRoutes)],
+      ["Auth regressions", count(summary.authRegressions)],
+      ["Auth improvements", count(summary.authImprovements)],
+      ["New findings", count(summary.newFindings)],
+      ["Resolved findings", count(summary.resolvedFindings)],
+    ])}${truncation}</div>${
+      rows
+        ? `${filterControls("route-delta-table", "Changed path or application…", statuses)}<div class="table-wrap"><table id="route-delta-table"><thead><tr><th>Change</th><th>Method</th><th>Path</th><th>Application</th><th>Source</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : ""
+    }`,
+    "Exact route and configuration-relative auth changes for this repository",
+  );
 }
 
 function organizationScopePanel(report) {
@@ -538,11 +1035,26 @@ function organizationScopePanel(report) {
   );
 }
 
-function organizationPage(report, detailPages, warnings) {
+function organizationPage(report, detailPages, openApiPages, warnings, delta) {
   const summary = object(report.summary);
   const coverage = object(report.coverage);
   const organization = object(report.organization);
   const entries = list(report.repositories);
+  const supportedEntries = entries.filter((entry) => isFrameworkStatus(entry.status));
+  const derivedApplicationRepositories = supportedEntries.filter((entry) => {
+    const evidence = Object.keys(object(entry.frameworks)).length
+      ? object(entry.frameworks)
+      : object(entry.express);
+    return count(evidence.applicationCount) > 0 || count(evidence.routeCount) > 0;
+  }).length;
+  const applicationRepositories =
+    summary.applicationRepositories === undefined
+      ? derivedApplicationRepositories
+      : count(summary.applicationRepositories);
+  const dependencyOnlyRepositories =
+    summary.dependencyOnlyRepositories === undefined
+      ? supportedEntries.length - applicationRepositories
+      : count(summary.dependencyOnlyRepositories);
   const incomplete =
     coverage.complete === false
       ? notice(
@@ -553,14 +1065,14 @@ function organizationPage(report, detailPages, warnings) {
       : "";
   const warningNotice = warnings.length
     ? notice(
-        "Some detailed reports could not be rendered",
+        "Some detailed reports or API references could not be rendered",
         `${warnings.length} referenced artifact${warnings.length === 1 ? " was" : "s were"} unavailable or unsafe. The aggregate evidence remains visible.`,
         "warn",
       )
     : "";
   const statuses = entries.map((entry) => entry.status);
   const table = entries.length
-    ? `${filterControls("repositories-table", "Repository, status, error…", statuses)}<div class="table-wrap"><table id="repositories-table"><thead><tr><th>Repository</th><th>Status</th><th>Apps</th><th>Routes</th><th>Docs</th><th>Coverage</th><th>Details</th></tr></thead><tbody>${organizationRows(report, detailPages)}</tbody></table></div>`
+    ? `${filterControls("repositories-table", "Repository, status, error…", statuses)}<div class="table-wrap"><table id="repositories-table"><thead><tr><th>Repository</th><th>Status</th><th>Apps</th><th>Routes</th><th>Docs</th><th>Coverage</th><th>Details</th></tr></thead><tbody>${organizationRows(report, detailPages, openApiPages)}</tbody></table></div>`
     : `<div class="panel__body"><p class="empty">No repositories were recorded.</p></div>`;
   const body = [
     incomplete,
@@ -568,13 +1080,23 @@ function organizationPage(report, detailPages, warnings) {
     metrics([
       ["Repositories discovered", count(summary.repositoriesDiscovered) || entries.length],
       ["Repositories scanned", count(summary.repositoriesScanned)],
-      ["Express repositories", count(summary.expressRepositories)],
+      [
+        "Supported repositories",
+        count(summary.supportedRepositories ?? summary.expressRepositories),
+      ],
+      ["Application repositories", applicationRepositories],
+      ["Dependency-only repositories", dependencyOnlyRepositories],
+      ["Express", count(summary.expressRepositories)],
+      ["Fastify", count(summary.fastifyRepositories)],
+      ["NestJS", count(summary.nestjsRepositories)],
       ["Applications", count(summary.applications)],
       ["Routes", count(summary.routes)],
       ["Failed", count(summary.failedRepositories)],
       ["Inconclusive", count(summary.inconclusiveRepositories)],
+      ["Incomplete route graphs", count(summary.incompleteRouteGraphs)],
       ["Coverage", completeness(coverage.complete)],
     ]),
+    organizationDeltaPanel(delta),
     organizationScopePanel(report),
     panel(
       "Repositories",
@@ -585,7 +1107,7 @@ function organizationPage(report, detailPages, warnings) {
   return layout({
     title: display(organization.login, "Organization inventory"),
     eyebrow: "GitHub organization inventory",
-    lede: "Automatically discovered Express repositories and their static route evidence.",
+    lede: "Automatically discovered supported HTTP frameworks and their static route evidence.",
     body,
   });
 }
@@ -599,9 +1121,11 @@ function ownedOutputReference(reference) {
   return (
     reference === "index.html" ||
     reference === "render-manifest.json" ||
-    reference === "assets/report.css" ||
-    reference === "assets/report.js" ||
-    /^repositories\/[A-Za-z0-9._-]+\.html$/.test(reference)
+    reference === ORGANIZATION_DELTA_FILENAME ||
+    REPORT_ASSETS.includes(reference) ||
+    OPENAPI_ASSETS.includes(reference) ||
+    /^repositories\/[A-Za-z0-9._-]+\.html$/.test(reference) ||
+    /^openapi\/[A-Za-z0-9._-]+\.(?:html|js)$/.test(reference)
   );
 }
 
@@ -647,20 +1171,21 @@ function cleanPreviousOutput(output) {
   if (
     manifest.kind !== "express-recon-html-site" ||
     !Array.isArray(manifest.pages) ||
-    !Array.isArray(manifest.assets)
+    !Array.isArray(manifest.assets) ||
+    (manifest.data !== undefined && !Array.isArray(manifest.data))
   ) {
     throw new Error(`HTML report output has an incompatible render-manifest.json: ${output}`);
   }
   const owned = new Set([
     "index.html",
     "render-manifest.json",
-    "assets/report.css",
-    "assets/report.js",
+    ...REPORT_ASSETS,
     ...manifest.pages,
     ...manifest.assets,
+    ...list(manifest.data),
   ]);
   const generatedDirectories = [];
-  for (const directory of ["repositories", "assets"]) {
+  for (const directory of ["repositories", "openapi", "assets"]) {
     const candidate = path.join(output, directory);
     if (!fs.existsSync(candidate)) continue;
     const stat = fs.lstatSync(candidate);
@@ -680,42 +1205,112 @@ function cleanPreviousOutput(output) {
   }
 }
 
-function prepareOutput(output) {
+function copySwaggerUiAssets(output) {
+  const distribution = swaggerUiPath();
+  for (const [sourceName, outputReference] of SWAGGER_UI_FILES) {
+    const source = path.join(distribution, sourceName);
+    const stat = fs.lstatSync(source);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`Swagger UI distribution asset is not a regular file: ${sourceName}`);
+    }
+    const target = path.join(output, ...outputReference.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
+}
+
+function prepareOutput(output, kind) {
   const resolved = path.resolve(output);
   if (fs.existsSync(resolved) && !fs.statSync(resolved).isDirectory()) {
     throw new Error(`HTML report output is not a directory: ${resolved}`);
   }
   fs.mkdirSync(resolved, { recursive: true });
   cleanPreviousOutput(resolved);
-  writeFile(path.join(resolved, "assets", "report.css"), STYLES.trimStart());
-  writeFile(path.join(resolved, "assets", "report.js"), SCRIPT.trimStart());
+  if (kind === "openapi") {
+    copySwaggerUiAssets(resolved);
+  } else {
+    writeFile(path.join(resolved, "assets", "report.css"), STYLES.trimStart());
+    writeFile(path.join(resolved, "assets", "report.js"), SCRIPT.trimStart());
+  }
   return resolved;
 }
 
-function renderOrganization(input, output, warnings, pages) {
+function renderOrganization(input, output, warnings, pages, assets, suppliedDelta = null) {
+  const delta = suppliedDelta || organizationDelta(input, warnings);
+  const changes = new Map(
+    list(delta?.repositories).map((entry) => [
+      String(entry?.repository?.fullName || "").toLowerCase(),
+      entry,
+    ]),
+  );
   const detailPages = [];
-  const used = new Set();
+  const openApiPages = [];
+  const usedDetails = new Set();
+  const usedOpenApi = new Set();
+  let swaggerUiWritten = false;
+  const safeError = (error) => {
+    const realRoot = fs.realpathSync(input.root);
+    return String(error.message).split(input.root).join(".").split(realRoot).join(".");
+  };
   for (const [index, value] of list(input.value.repositories).entries()) {
     const entry = object(value);
-    if (!organizationDetailLabel(entry.status)) continue;
-    let scan;
-    try {
-      scan = referencedRepositoryScan(input.root, entry);
-    } catch (err) {
-      const realRoot = fs.realpathSync(input.root);
-      const safeMessage = String(err.message).split(input.root).join(".").split(realRoot).join(".");
-      warnings.push(
-        `${display(object(entry.repository).fullName, `repository ${index + 1}`)}: ${safeMessage}`,
-      );
-      continue;
-    }
-    if (!scan) continue;
     const repository = object(entry.repository);
+    const evidence = Object.keys(object(entry.frameworks)).length
+      ? object(entry.frameworks)
+      : object(entry.express);
+    const change = changes.get(String(repository.fullName || "").toLowerCase());
+    const name = display(repository.fullName, `repository ${index + 1}`);
+    const wantsDetail = Boolean(
+      organizationDetailLabel(entry.status, evidence) ||
+      change?.changes?.routes ||
+      change?.routeChanges,
+    );
+    let scan = null;
+    if (wantsDetail) {
+      try {
+        scan = referencedRepositoryScan(input.root, entry);
+      } catch (error) {
+        warnings.push(`${name}: ${safeError(error)}`);
+      }
+    }
+
+    if (isFrameworkStatus(entry.status)) {
+      try {
+        const document = repositoryOpenApi(input.root, entry, scan);
+        if (document) {
+          if (!swaggerUiWritten) {
+            copySwaggerUiAssets(output);
+            assets.push(...SWAGGER_UI_ASSETS);
+            swaggerUiWritten = true;
+          }
+          const base = slug(repository.name || repository.fullName, `repository-${index + 1}`);
+          let filename = `${base}.html`;
+          let suffix = 2;
+          while (usedOpenApi.has(filename.toLowerCase())) filename = `${base}-${suffix++}.html`;
+          usedOpenApi.add(filename.toLowerCase());
+          const configFilename = filename.replace(/\.html$/, ".js");
+          const pageReference = path.posix.join("openapi", filename);
+          const configReference = path.posix.join("openapi", configFilename);
+          openApiPages[index] = pageReference;
+          pages.push(pageReference);
+          assets.push(configReference);
+          writeFile(path.join(output, "openapi", configFilename), openApiConfigScript(document));
+          writeFile(
+            path.join(output, "openapi", filename),
+            openApiPage(document, { assetPrefix: "../", configSource: configFilename }),
+          );
+        }
+      } catch (error) {
+        warnings.push(`${name} OpenAPI: ${safeError(error)}`);
+      }
+    }
+
+    if (!scan) continue;
     const base = slug(repository.name || repository.fullName, `repository-${index + 1}`);
     let filename = `${base}.html`;
     let suffix = 2;
-    while (used.has(filename.toLowerCase())) filename = `${base}-${suffix++}.html`;
-    used.add(filename.toLowerCase());
+    while (usedDetails.has(filename.toLowerCase())) filename = `${base}-${suffix++}.html`;
+    usedDetails.add(filename.toLowerCase());
     const relative = path.posix.join("repositories", filename);
     detailPages[index] = relative;
     pages.push(relative);
@@ -724,28 +1319,62 @@ function renderOrganization(input, output, warnings, pages) {
       repositoryPage(scan, display(repository.fullName, repository.name), {
         assetPrefix: "../",
         backHref: "../index.html",
+        delta: change,
+        openApiHref: openApiPages[index] ? `../${openApiPages[index]}` : "",
       }),
     );
   }
-  writeFile(path.join(output, "index.html"), organizationPage(input.value, detailPages, warnings));
+  writeFile(
+    path.join(output, "index.html"),
+    organizationPage(input.value, detailPages, openApiPages, warnings, delta),
+  );
+  if (delta) {
+    writeFile(
+      path.join(output, ORGANIZATION_DELTA_FILENAME),
+      JSON.stringify(delta, null, 2) + "\n",
+    );
+  }
+  return delta;
 }
 
-function renderHtmlSite(inputPath, outputPath) {
+/**
+ * Render an existing route, repository, organization, or OpenAPI artifact as a
+ * fully offline HTML site. Owned files from a prior render may be replaced,
+ * while a non-empty unowned output directory is rejected.
+ */
+function renderHtmlSite(inputPath, outputPath, options = {}) {
   if (!inputPath) throw new Error("HTML report rendering requires an input path");
   if (!outputPath) throw new Error("HTML report rendering requires an output directory");
   const input = resolveInput(inputPath);
-  const output = prepareOutput(outputPath);
+  let suppliedDelta = null;
+  if (options.baseline) {
+    if (input.kind !== "organization") {
+      throw new Error("HTML --baseline comparison requires an organization inventory input");
+    }
+    const baseline = loadOrganizationSnapshot(options.baseline);
+    const current = snapshotFromReport(input.value, input.root);
+    suppliedDelta = compareOrganizationReports(baseline.report, input.value, {
+      loadBaselineScan: (entry) => referencedComparisonScan(baseline, entry),
+      loadCurrentScan: (entry) => referencedComparisonScan(current, entry),
+    });
+  }
+  const output = prepareOutput(outputPath, input.kind);
   const warnings = [];
   const pages = ["index.html"];
+  const assets = input.kind === "openapi" ? [...OPENAPI_ASSETS] : [...REPORT_ASSETS];
+  let delta = null;
   if (input.kind === "organization") {
-    renderOrganization(input, output, warnings, pages);
+    delta = renderOrganization(input, output, warnings, pages, assets, suppliedDelta);
   } else if (input.kind === "repository") {
     writeFile(path.join(output, "index.html"), repositoryPage(input.value, "Repository report"));
+  } else if (input.kind === "openapi") {
+    writeFile(path.join(output, "assets", "openapi-config.js"), openApiConfigScript(input.value));
+    writeFile(path.join(output, "index.html"), openApiPage(input.value));
   } else {
     const target = object(input.value.target);
     writeFile(
       path.join(output, "index.html"),
-      routeReportPage(input.value, display(target.name, "Express route report")),
+      routeReportPage(input.value, display(target.name, "HTTP route report")),
     );
   }
   const manifest = {
@@ -756,7 +1385,8 @@ function renderHtmlSite(inputPath, outputPath) {
     source: { kind: input.kind, file: path.basename(input.file) },
     entry: "index.html",
     pages,
-    assets: ["assets/report.css", "assets/report.js"],
+    assets,
+    data: delta ? [ORGANIZATION_DELTA_FILENAME] : [],
     warnings,
   };
   writeFile(path.join(output, "render-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
@@ -765,6 +1395,9 @@ function renderHtmlSite(inputPath, outputPath) {
 
 module.exports = {
   MAX_JSON_BYTES,
+  MAX_OPENAPI_BYTES,
+  defaultRenderOutput,
+  detectRenderInput,
   escapeHtml,
   inputKind,
   renderHtmlSite,

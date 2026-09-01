@@ -11,7 +11,7 @@ const ALL_VERBS = ["get", "post", "put", "patch", "delete", "head", "options", "
 const BODY_METHODS = new Set(["post", "put", "patch", "delete"]);
 
 /**
- * Convert an Express path to an OpenAPI path template, returning the template
+ * Convert a supported framework path to an OpenAPI path template, returning the template
  * and its ordered, unique path-parameter names. `:name`/`:name?` → `{name}`,
  * Express-5 `{name}` is kept, `*`/splats → `{wildcard}`, and an unresolved
  * `<dynamic>` segment → `{dynamic}`.
@@ -113,7 +113,7 @@ function buildResponses(io) {
  * Audit tags do not imply a protocol (a tag may mean a cookie session, HMAC,
  * mTLS, API key, or bearer token), so inventing a bearer scheme would publish a
  * materially incorrect contract. Multiple mapped schemes are placed in one
- * Security Requirement Object because chained Express guards are conjunctive.
+ * Security Requirement Object because chained configured guards are conjunctive.
  *
  * @returns {{security: object[]|undefined, unmappedTags: string[]}}
  */
@@ -157,12 +157,14 @@ function buildOperation(route, verb, opId, tag, isAudit, pathParams, openapi, us
   }
   op["x-express-recon"] = {
     applicationId: route.applicationId ?? null,
+    framework: route.framework || "express",
     source: route.source || null,
     authStatus: route.authStatus ?? null,
     authTags: route.tags || [],
     roles: route.roles || [],
     scopes: route.scopes || [],
     middlewares: route.middlewares.map((m) => m.name),
+    middlewareStages: route.middlewares.map((m) => m.stage || null),
     pathConfidence: route.pathConfidence,
     handlerResolved: route.io ? route.io.handlerResolved : null,
     handlerName: route.io ? (route.io.handlerName ?? null) : null,
@@ -270,6 +272,12 @@ function build(report) {
     schemaVersion: report.schemaVersion,
     command: report.command,
     mode: report.mode,
+    frameworks: [
+      ...new Set([
+        ...(report.applications || []).map((application) => application.framework || "express"),
+        ...report.routes.map((route) => route.framework || "express"),
+      ]),
+    ].sort(),
     schemasArePlaceholders: true,
     ...(duplicateOperations.length ? { duplicateOperations } : {}),
   };

@@ -4,7 +4,17 @@ const { fingerprintFinding } = require("./findings");
 
 const SEVERITIES = new Set(["high", "medium", "low"]);
 const AUTH_STATUSES = new Set(["proven", "public", "unknown"]);
-const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ALL"]);
+const METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+  "TRACE",
+  "ALL",
+]);
 const ARRAY_REQUIREMENTS = [
   "anyMiddleware",
   "allMiddleware",
@@ -20,6 +30,38 @@ const ARRAY_REQUIREMENTS = [
   "allScopes",
   "noScopes",
 ];
+// These lists define the data-only policy language. Name them explicitly so a
+// new accepted field cannot bypass documentation-coverage enforcement.
+const MATCH_KEYS = new Set([
+  "applicationIds",
+  "methods",
+  "paths",
+  "excludePaths",
+  "authStatuses",
+  "tags",
+  "roles",
+  "scopes",
+]);
+const REQUIREMENT_KEYS = new Set([
+  "auth",
+  ...ARRAY_REQUIREMENTS,
+  "roles",
+  "scopes",
+  "all",
+  "any",
+  "not",
+]);
+const EXCEPTION_KEYS = new Set(["id", "reason", "expires", "match"]);
+const POLICY_KEYS = new Set([
+  "id",
+  "description",
+  "severity",
+  "match",
+  "require",
+  "exceptions",
+  "message",
+  "recommendation",
+]);
 
 function plainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -42,20 +84,7 @@ function stringArray(value, label, { nonEmpty = false } = {}) {
 function normalizeMatch(match, label, { requireSelector = false } = {}) {
   const value = match || {};
   if (!plainObject(value)) throw new Error(`${label} must be an object`);
-  assertKnownKeys(
-    value,
-    new Set([
-      "applicationIds",
-      "methods",
-      "paths",
-      "excludePaths",
-      "authStatuses",
-      "tags",
-      "roles",
-      "scopes",
-    ]),
-    label,
-  );
+  assertKnownKeys(value, MATCH_KEYS, label);
   const methods = stringArray(value.methods, `${label}.methods`, { nonEmpty: true });
   if (methods) {
     for (const method of methods) {
@@ -97,11 +126,7 @@ function normalizeMatch(match, label, { requireSelector = false } = {}) {
 function normalizeRequirement(requirement, label, depth = 0) {
   if (!plainObject(requirement)) throw new Error(`${label} must be an object`);
   if (depth > 12) throw new Error(`${label} exceeds the maximum boolean-expression depth`);
-  assertKnownKeys(
-    requirement,
-    new Set(["auth", ...ARRAY_REQUIREMENTS, "roles", "scopes", "all", "any", "not"]),
-    label,
-  );
+  assertKnownKeys(requirement, REQUIREMENT_KEYS, label);
   if (requirement.auth !== undefined && requirement.auth !== true) {
     throw new Error(`${label}.auth currently supports only true`);
   }
@@ -146,7 +171,7 @@ function normalizeRequirement(requirement, label, depth = 0) {
 function normalizeException(exception, policyLabel, index) {
   const label = `${policyLabel}.exceptions[${index}]`;
   if (!plainObject(exception)) throw new Error(`${label} must be an object`);
-  assertKnownKeys(exception, new Set(["id", "reason", "expires", "match"]), label);
+  assertKnownKeys(exception, EXCEPTION_KEYS, label);
   const id = exception.id || `exception-${index + 1}`;
   if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
     throw new Error(`${label}.id must be a stable identifier`);
@@ -175,20 +200,7 @@ function normalizeException(exception, policyLabel, index) {
 function normalizePolicy(policy, index) {
   const label = `policies[${index}]`;
   if (!plainObject(policy)) throw new Error(`${label} must be an object`);
-  assertKnownKeys(
-    policy,
-    new Set([
-      "id",
-      "description",
-      "severity",
-      "match",
-      "require",
-      "exceptions",
-      "message",
-      "recommendation",
-    ]),
-    label,
-  );
+  assertKnownKeys(policy, POLICY_KEYS, label);
   if (typeof policy.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(policy.id)) {
     throw new Error(`${label}.id must contain only letters, numbers, ".", "_", or "-"`);
   }
@@ -225,6 +237,10 @@ function normalizePolicy(policy, index) {
   };
 }
 
+/**
+ * Validate and normalize the data-only policy language. Unknown fields and
+ * structurally empty requirements fail instead of being ignored.
+ */
 function normalizePolicies(policies) {
   if (policies === undefined) return [];
   if (!Array.isArray(policies)) throw new Error("policies must be an array");
@@ -449,6 +465,10 @@ function todayUtc(now) {
   return value.toISOString().slice(0, 10);
 }
 
+/**
+ * Evaluate normalized route policies against a classified registry and attach
+ * deterministic violation and exception evidence without mutating the input.
+ */
 function evaluatePolicies(registry, policies, options = {}) {
   const normalized = normalizePolicies(policies);
   const policyFindings = [];

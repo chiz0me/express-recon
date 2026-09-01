@@ -13,7 +13,9 @@ unprotected endpoint.
 ## Execution trust model
 
 Static mode parses JavaScript and TypeScript source without importing the target
-application. It is the appropriate mode for untrusted checkouts.
+application or its installed framework packages. Express, Fastify, and NestJS
+adapters share the same bounded AST traversal and fail-visible coverage model.
+It is the appropriate mode for untrusted checkouts.
 
 JavaScript/TypeScript OpenAPI modules are also handled without `require()` or
 dynamic import. A bounded AST interpreter accepts a deliberately small data-only
@@ -43,8 +45,9 @@ client and filesystem quotas.
 caller, then invokes the same `scan-repo` acquisition for each selected default
 branch. It is static-only. The default concurrency is one and the CLI caps it at
 eight. Each worker owns one bounded temporary snapshot, and `finally` removal
-runs before the report is returned. With `--out`, reports are persisted as each
-worker completes instead of retaining every detailed result in the aggregate.
+runs before the report is returned. The CLI persists reports as each worker
+completes instead of retaining every detailed result in the aggregate; `--out`
+overrides its safe default location.
 
 Organization checkpoints are atomically replaced after complete repository
 artifacts have been written. They contain commit IDs, compact inventory evidence,
@@ -59,6 +62,17 @@ All CLI artifact writers refuse an existing symbolic link or non-regular output
 target. Organization scans additionally validate their generated checkpoint,
 aggregate, and `repositories/` paths before enumeration, so reusing an output
 directory cannot redirect report writes through those paths.
+
+Organization baselines are parsed as bounded JSON and never execute code or
+contact their recorded repository URLs. Detailed `repositoryScan` references
+must be safe relative paths that remain inside the baseline directory after
+real-path resolution. `scan-org --baseline` rejects overlapping external
+baseline/output directories, caps retained route-change details and delta
+bytes, and keeps only a 256 MiB comparison-only baseline beside an incomplete
+checkpoint. That directory contains reports—not source snapshots—but may still
+reveal private repository names, routes, and source locations. It is removed
+only after a complete aggregate/delta is durable and otherwise needs the same
+access controls as checkpoint state.
 
 `GH_TOKEN`/`GITHUB_TOKEN` are read from the environment for API access and
 private Git fetches. The token is not accepted as a CLI argument, written to
@@ -79,6 +93,14 @@ repository. GitHub API rate exhaustion, pagination errors, repository caps, and
 per-repository failures remain visible and can be gated with
 `scan-org --fail-on incomplete`.
 
+The `scan-org` CLI always uses durable storage. If `--out` is omitted, the
+destination is `.express-recon/<lowercase-organization>` beneath the real current
+working directory. A symbolic or non-directory `.express-recon` entry is
+rejected, newly created output directories use owner-only permissions, and a
+nonempty destination still requires an explicit resume/overwrite decision in
+noninteractive contexts. This avoids putting detailed organization reports on
+stdout without turning a convenient default into overwrite authority.
+
 Remote scans honor a repository's `.express-reconignore` by default. That is
 convenient for repository-owned inventory but lets the repository choose its
 own in-scope files. A centrally governed organization audit should pass
@@ -92,18 +114,34 @@ to paths such as `.cursor/`, while `.git`, dependencies, and generated/build
 outputs remain excluded. Hidden paths can contain private configuration or
 tooling; enable this only when the scan goal requires those inputs.
 
-`render` treats report fields and repository metadata as untrusted text. It
-HTML-escapes values, uses fixed local CSS/JavaScript, adds a restrictive content
-security policy, and performs no browser-time fetches. Organization artifact
-references must remain within the input folder after both lexical and real-path
-resolution, so traversal and escaping symlinks are not followed. The resulting
-HTML still contains the same potentially sensitive repository names, routes,
-source locations, findings, and documentation evidence as its input. Protect
-and retain it like the original JSON; rendering is not redaction. Rerendering
-uses a validated prior manifest to replace only renderer-owned files and refuses
-nonempty, unowned output directories or unsafe generated symlinks.
+`render` treats report fields, repository metadata, and OpenAPI content as
+untrusted data. Report values are HTML-escaped; an OpenAPI document is serialized
+with HTML-significant characters escaped before stock Swagger UI reads it. Every
+site uses fixed local CSS/JavaScript, a restrictive content security policy, and
+no browser-time network fetches. OpenAPI request submission, query configuration,
+credential persistence, and online validation are disabled; `connect-src 'none'`
+also prevents server URLs or external `$ref` targets from being contacted.
+Organization artifact references must remain within the input folder after both
+lexical and real-path resolution, so traversal and escaping symlinks are not
+followed. This applies to repository reports and per-repository OpenAPI
+artifacts; API pages are generated only for entries already classified as a
+supported framework. Automatic CLI input discovery is deliberately bounded to the current
+directory, `.express-recon/`, and its immediate children, rejects symbolic input
+candidates, and refuses ambiguity instead of recursively walking the repository.
+The derived HTML destination is a sibling `-html` directory, never the evidence
+directory itself.
 
-The CLI's runtime and hybrid modes import the target application's entry point
+The resulting HTML still contains the same potentially sensitive repository
+names, routes, source locations, findings, and API contract content as its input.
+Protect and retain it like the original JSON/YAML; rendering is not redaction.
+Rerendering uses a validated prior manifest to replace only renderer-owned files
+and refuses nonempty, unowned output directories or unsafe generated symlinks.
+
+The packaged Swagger UI distribution declares Scarf installation analytics as a
+dependency. `package.json` sets `scarfSettings.enabled` to `false`, which disables
+that analytics path for express-recon and downstream installations.
+
+The CLI's Express-only runtime and hybrid modes import the target application's entry point
 inside a disposable child process. The parent enforces a timeout and output
 limit, and the worker contains target `process.exit()` calls, crashes, leaked
 timers, and module/prototype mutation. Its boot compatibility shim also stubs
@@ -118,8 +156,9 @@ trusted target code back into receiving it.
 
 `--app auto` does not weaken that boundary. It is available only for a trusted
 local scan, requires `--allow-exec`, and fails unless discovery finds exactly
-one app and one high-confidence entry. Remote repository scans never offer
-runtime, hybrid, or auto-entry execution.
+one Express app and one high-confidence entry. A uniquely detected Fastify or
+NestJS app fails before execution and remains static-only. Remote repository
+scans never offer runtime, hybrid, or auto-entry execution.
 
 Infrastructure stubbing patches CommonJS `Module._load`. It does not intercept
 native ESM dependency imports, so an ESM application can still import and use a

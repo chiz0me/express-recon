@@ -154,7 +154,8 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
         ),
       /valid Git object id/,
     );
-    const entry = checkpointEntry(payload("z-api"), artifacts, root);
+    const entry = checkpointEntry(payload("z-api", { routeGraphComplete: false }), artifacts, root);
+    assert.equal(entry.routeGraphComplete, false);
     let checkpoint = withCompleted(initialCheckpoint("acme", currentIdentity), entry);
     const earlier = { ...entry, repository: { ...entry.repository, fullName: "acme/a-api" } };
     checkpoint = withCompleted(checkpoint, earlier);
@@ -170,6 +171,7 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
 
     const loaded = loadCheckpoint(file, "ACME", currentIdentity, root);
     assert.equal(loaded.entries.length, 1);
+    assert.equal(loaded.entries[0].routeGraphComplete, false);
     assert.deepEqual(loaded.diagnostics, []);
 
     fs.appendFileSync(path.join(root, "repositories", "z-api", "routes.json"), "damaged");
@@ -205,7 +207,26 @@ test("compatible legacy checkpoints are integrity-checked and upgraded", () => {
   try {
     const artifacts = writeArtifacts(root, "api");
     const entry = checkpointEntry(payload("api"), artifacts, root);
-    const legacy = withCompleted(initialCheckpoint("acme", currentIdentity), entry);
+    const negativeArtifacts = writeArtifacts(root, "worker");
+    const negative = checkpointEntry(
+      payload("worker", {
+        status: "not-express",
+        express: {
+          detected: false,
+          packageCount: 0,
+          packages: [],
+          applicationCount: 0,
+          routeCount: 0,
+          documentation: {},
+        },
+      }),
+      negativeArtifacts,
+      root,
+    );
+    const legacy = withCompleted(
+      withCompleted(initialCheckpoint("acme", currentIdentity), entry),
+      negative,
+    );
     legacy.toolVersion = "0.7.1";
     delete legacy.compatibilityVersion;
     legacy.fingerprint = legacyFingerprint(legacy.toolVersion, legacy.scope);
@@ -217,6 +238,8 @@ test("compatible legacy checkpoints are integrity-checked and upgraded", () => {
     assert.equal(loaded.checkpoint.compatibilityVersion, CHECKPOINT_COMPATIBILITY_VERSION);
     assert.equal(loaded.checkpoint.fingerprint, currentIdentity.fingerprint);
     assert.equal(loaded.entries.length, 1);
+    assert.equal(loaded.checkpoint.completed.length, 1);
+    assert.match(loaded.diagnostics[0], /newly supported frameworks/);
 
     legacy.toolVersion = "0.5.0";
     legacy.fingerprint = legacyFingerprint(legacy.toolVersion, legacy.scope);

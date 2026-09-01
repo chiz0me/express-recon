@@ -339,9 +339,9 @@ function registerTools(server) {
   server.registerTool(
     "discover_repository",
     {
-      title: "Discover Express applications and API docs",
+      title: "Discover HTTP applications and API docs",
       description:
-        "Statically identify package scopes, separate Express applications, high-confidence runtime entry candidates, existing OpenAPI documents, and swagger-jsdoc sources. Never executes target code.",
+        "Statically identify package scopes, separate Express, Fastify, and NestJS applications, high-confidence entries, existing OpenAPI documents, and swagger-jsdoc sources. Never executes target code.",
       inputSchema: {
         dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
         ...scanInput,
@@ -359,9 +359,9 @@ function registerTools(server) {
   server.registerTool(
     "inventory_routes",
     {
-      title: "Inventory Express routes",
+      title: "Inventory HTTP routes",
       description:
-        "Statically list every Express route, HTTP method, middleware chain, and source file/line under a directory. No security judgment, no code execution.",
+        "Statically list supported Express, Fastify, and NestJS routes, HTTP methods, lifecycle middleware, and source locations. No security judgment or target-code execution.",
       inputSchema: {
         dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
         ...scanInput,
@@ -392,7 +392,7 @@ function registerTools(server) {
   server.registerTool(
     "audit_routes",
     {
-      title: "Audit Express route auth coverage",
+      title: "Audit HTTP route auth coverage",
       description:
         "Statically classify each route as proven/public/review against an auth-middleware allowlist and return findings (public routes, per-verb auth gaps, opaque middleware). Provide authMiddleware as a map of middleware name or dotted callee (e.g. 'passport.authenticate') to a tag.",
       inputSchema: {
@@ -474,7 +474,7 @@ function registerTools(server) {
     {
       title: "Generate an OpenAPI 3.1 spec",
       description:
-        "Statically audit a repo and emit an OpenAPI 3.1 skeleton for its Express routes. Security is emitted only when an auth tag is explicitly mapped to a supplied OpenAPI security scheme; middleware names never imply bearer auth.",
+        "Statically audit a repo and emit an OpenAPI 3.1 skeleton for supported Express, Fastify, and NestJS routes. Security is emitted only when an auth tag is explicitly mapped to a supplied OpenAPI security scheme; middleware names never imply bearer auth.",
       inputSchema: {
         dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
         authMiddleware: authMiddlewareInput,
@@ -533,7 +533,7 @@ function registerTools(server) {
     {
       title: "Reconcile OpenAPI, swagger-jsdoc, and route inventory",
       description:
-        "Merge a unique/selected OpenAPI 3 document, swagger-jsdoc blocks, and one statically discovered Express application. Authored OpenAPI wins, JSDoc fills gaps, generated inventory fills the rest; returns drift and conflict evidence.",
+        "Merge a unique/selected OpenAPI 3 document, swagger-jsdoc blocks, and one statically discovered supported application. Authored OpenAPI wins, JSDoc fills gaps, generated inventory fills the rest; returns drift and conflict evidence.",
       inputSchema: {
         dir: z.string().describe("Absolute or cwd-relative repo directory to scan"),
         applicationId: z
@@ -626,7 +626,7 @@ function registerTools(server) {
   server.registerTool(
     "query_audit",
     {
-      title: "Query a paginated Express security audit",
+      title: "Query a paginated route security audit",
       description:
         "Return a compact summary or a filtered, cursor-paginated page of routes/findings from a static audit.",
       inputSchema: {
@@ -636,7 +636,9 @@ function registerTools(server) {
         limit: z.number().int().min(1).max(500).optional(),
         cursor: z.string().optional(),
         methods: z
-          .array(z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ALL"]))
+          .array(
+            z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "ALL"]),
+          )
           .optional(),
         paths: stringList.optional().describe("Route path globs"),
         authStatuses: z.array(z.enum(["proven", "public", "unknown"])).optional(),
@@ -688,7 +690,7 @@ function registerTools(server) {
   server.registerTool(
     "validate_policies",
     {
-      title: "Validate Express security policies",
+      title: "Validate route security policies",
       description:
         "Validate and normalize policies without scanning a repository or executing target code.",
       inputSchema: {

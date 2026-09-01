@@ -24,7 +24,7 @@ Paths are resolved from the current working directory unless stated otherwise.
 
 ### `discover`
 
-Find package scopes, Express applications, stable app IDs, runtime entry
+Find package scopes, Express/Fastify/NestJS applications, stable app IDs, entry
 candidates, OpenAPI/Swagger documents, and swagger-jsdoc sources without
 executing target code.
 
@@ -34,9 +34,13 @@ express-recon discover --src . --out .express-recon
 
 Important output fields:
 
-- `packages[]`: nearest package roots and Express dependency information.
-- `applications[]`: separate Express roots, source, route count, owning package,
-  and entry candidates.
+- `packages[]`: nearest package roots plus declared framework packages. Each
+  declaration records its `package.json` field, version range, `direct: true`,
+  normalized `scope` (`runtime`, `optional`, `peer`, or `development`), and
+  signal `strength`. Runtime/optional declarations are strong presence signals;
+  peer and development declarations do not prove a runnable application.
+- `applications[]`: separate application roots, `framework`, underlying
+  `adapter`, source, route count, owning package, and entry candidates.
 - `recommendedEntry`: populated only when one candidate is high-confidence.
 - `documentation`: discovered specifications and JSDoc source files.
 - `discoveryCoverage` and `scanCoverage`: repository traversal and route-analysis
@@ -56,7 +60,8 @@ coverage without `authStatus`, findings, or other security judgment.
 express-recon inventory --src . --format json,md --out .express-recon
 ```
 
-`--mode` may be `static`, `runtime`, or `hybrid`. Runtime/hybrid requires
+`--mode` may be `static`, `runtime`, or `hybrid`. Static mode supports Express,
+Fastify, and NestJS. Runtime/hybrid is currently Express-only and requires
 `--app <entry>`; `--app auto` also requires `--allow-exec`.
 
 ### `audit`
@@ -184,20 +189,25 @@ submodule traversal.
 
 ### `scan-org`
 
-Enumerate API-visible repositories in a GitHub organization and build a static
-Express inventory from the existing per-repository pipeline:
+Enumerate API-visible repositories in a GitHub organization and build a static,
+framework-aware inventory from the existing per-repository pipeline:
 
 ```bash
-express-recon scan-org --org acme --out .express-recon/acme \
+express-recon scan-org --org acme \
   --concurrency 2 --max-repos 500 --fail-on incomplete
+# Writes .express-recon/acme by default.
 
 # Continue an interrupted/incomplete run. Concurrency may be changed.
-express-recon scan-org --org acme --out .express-recon/acme \
+express-recon scan-org --org acme \
   --concurrency 4 --max-repos 500 --fail-on incomplete --resume
 
-# JSON Lines progress for a log collector; results still go to --out/stdout.
-express-recon scan-org --org acme --out .express-recon/acme \
+# JSON Lines progress for a log collector; results remain in the default output.
+express-recon scan-org --org acme \
   --progress json 2>scan-progress.jsonl
+
+# Compare current default branches with a separate completed inventory.
+express-recon scan-org --org acme --baseline .express-recon/acme-before \
+  --out .express-recon/acme-current --max-repos 500 --fail-on incomplete
 ```
 
 Scope and resource controls:
@@ -210,9 +220,12 @@ Scope and resource controls:
 - disabled and empty repositories are recorded but not fetched;
 - `--max-repos` defaults to 100 and accepts 1–10,000;
 - `--concurrency` defaults to 1 and accepts 1–8;
-- `--resume` requires `--out` and continues a compatible checkpoint;
-- `--overwrite` requires `--out` and starts fresh while preserving unrelated
-  files in that directory;
+- output defaults to `.express-recon/<lowercase-organization>` under the current
+  directory; `--out` overrides it;
+- `--resume` continues a compatible checkpoint in the selected/default output;
+- `--overwrite` starts fresh while preserving unrelated files in that output;
+- `--baseline` accepts a separate prior organization report file or output
+  directory with a compatible organization and scan scope;
 - `--progress` accepts `auto`, `plain`, `json`, or `none`; `--no-progress` is an
   alias for `--progress none`;
 - scan configuration and CLI include/exclude/ignore/test scope apply
@@ -235,11 +248,52 @@ Each selected repository is fetched at its remote default (`HEAD`).
 
 Every repository snapshot is removed by the per-repository scanner's `finally`
 block before its result is returned. At concurrency `N`, at most `N` bounded
-snapshots are active in normal operation. With `--out`, each full result is
-written immediately under `repositories/<name>/` and released; the aggregate
-`organization-inventory.json` contains compact evidence, summaries, statuses,
-coverage, and relative artifact paths. Without `--out`, detailed scans remain
-embedded so stdout is self-contained and memory use grows with the organization.
+snapshots are active in normal operation. Each full result is written immediately
+under `repositories/<name>/` in the selected/default output and released; the
+aggregate `organization-inventory.json` contains compact evidence, summaries,
+statuses, coverage, and relative artifact paths. Detailed scans are never
+collected into one CLI stdout payload.
+
+#### Baseline change reports
+
+`--baseline <prior-output>` reads the prior aggregate before enumeration and
+rejects a different organization, repository cap, archived/fork selection,
+configuration hash, scan hash, or scope fingerprint. The baseline directory
+must be separate from and non-nested with the selected/default output,
+preventing a fresh scan from overwriting evidence while it is being compared.
+Baseline comparison does not change scan evidence or the checkpoint fingerprint,
+so the same baseline may be supplied when resuming an interrupted current run.
+
+After scanning, common complete repositories are compared one at a time from
+their saved `repo-scan.json` route reports. The resulting
+`organization-delta.json` records:
+
+- repositories added, removed, newly supported, no longer supported, newly
+  Express, or no longer Express;
+- repository status, application-count, route-count, and documentation-status
+  transitions;
+- exact added and removed paths for repositories present in both inventories;
+- configuration-relative authentication regressions/improvements and finding
+  count changes; and
+- explicit comparison coverage and bounded diagnostics for missing, damaged,
+  or scope-incompatible detailed artifacts.
+
+Added or removed repositories remain repository lifecycle changes: their whole
+route sets are not mislabeled as newly created or deleted code. Exact counts are
+retained, while route detail objects are capped at 100 per repository and 5,000
+overall. The delta artifact has a 32 MiB output limit; if necessary, retained
+details are dropped before counts. `organization-inventory.json` embeds only the
+delta summary and first 20 changed repository summaries so CI and agents can
+triage without loading the full delta. A subsequent scan without `--baseline`
+removes a prior generated delta instead of presenting stale changes.
+
+Before scanning, the CLI persists a comparison-only copy under
+`comparison-baseline/`, containing the prior aggregate and only the detailed
+`repo-scan.json` files needed for future comparisons. It is capped at 256 MiB.
+If the current scan is interrupted or incomplete, that directory stays beside
+the checkpoint and a later `--resume` discovers it automatically; after a
+complete aggregate and delta are written, it is removed. This preserves the
+original comparison across retries without retaining source snapshots.
 
 #### Progress and CI logs
 
@@ -252,16 +306,16 @@ fatal scan operation ends with a `scan-failed` JSON event rather than an
 additional unstructured stderr line.
 
 `EXPRESS_RECON_CONTEXT=agent` is the explicit integration contract for an AI
-agent command runner. It requires `scan-org --out <dir>` before enumeration and
-changes the implicit progress mode to `none`, keeping detailed reports and
-routine progress out of model context. `EXPRESS_RECON_CONTEXT=ci` selects plain
-progress, while `interactive` retains TTY/non-TTY auto-selection. An explicit
-`--progress` or `--no-progress` always wins. The context affects presentation
-and storage safeguards only; it is not scan evidence and does not change scope
-fingerprints.
+agent command runner. It keeps the durable default output and changes the
+implicit progress mode to `none`, keeping detailed reports and routine progress
+out of model context without another required flag. `EXPRESS_RECON_CONTEXT=ci`
+selects plain progress, while `interactive` retains TTY/non-TTY auto-selection.
+Explicit `--out`, `--progress`, or `--no-progress` values always win. The context
+affects presentation and storage safeguards only; it is not scan evidence and
+does not change scope fingerprints.
 
-When `--out` is nonempty, an interactive TTY asks for `resume`, `overwrite`, or
-`cancel` before enumeration or writes; cancel is the default. CI, agent,
+When the selected/default output is nonempty, an interactive TTY asks for
+`resume`, `overwrite`, or `cancel` before enumeration or writes; cancel is the default. CI, agent,
 non-TTY, and JSON-progress runs never prompt because they may not have a human
 input channel and stderr may be machine-readable. They fail closed with the
 exact `--resume`/`--overwrite` choices instead. `--overwrite` replaces
@@ -274,15 +328,15 @@ repository identity, selected `index`, `processed`/`total`, `active`, `failed`,
 `concurrency`, phase, status, duration, route/application counts, or safe error
 text. Event names are:
 
-| Event | Meaning |
-| --- | --- |
-| `enumeration-started`, `enumeration-page`, `enumeration-completed`, `enumeration-failed` | GitHub listing lifecycle, API-page visibility, and selected/resumed/pending totals |
-| `repository-skipped`, `repository-resumed` | Work intentionally omitted or reused from a verified checkpoint |
-| `repository-started`, `repository-phase` | Active work and `acquiring`, `discovering`, `inventorying`, `documenting`, or `cleaning-up` phase |
-| `repository-completed`, `repository-failed` | Terminal result with monotonic processed/failure counters |
-| `checkpoint-written` | CLI `--out` artifacts and the atomically replaced checkpoint are durable |
-| `resume-warning`, `gate-triggered` | Damaged resume work was rejected, or `--fail-on incomplete` matched |
-| `scan-finished`, `scan-failed` | Aggregate terminal state or fatal command failure |
+| Event                                                                                    | Meaning                                                                                           |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `enumeration-started`, `enumeration-page`, `enumeration-completed`, `enumeration-failed` | GitHub listing lifecycle, API-page visibility, and selected/resumed/pending totals                |
+| `repository-skipped`, `repository-resumed`                                               | Work intentionally omitted or reused from a verified checkpoint                                   |
+| `repository-started`, `repository-phase`                                                 | Active work and `acquiring`, `discovering`, `inventorying`, `documenting`, or `cleaning-up` phase |
+| `repository-completed`, `repository-failed`                                              | Terminal result with monotonic processed/failure counters                                         |
+| `checkpoint-written`                                                                     | CLI output artifacts and the atomically replaced checkpoint are durable                           |
+| `resume-warning`, `gate-triggered`                                                       | Damaged resume work was rejected, or `--fail-on incomplete` matched                               |
+| `scan-finished`, `scan-failed`                                                           | Aggregate terminal state or fatal command failure                                                 |
 
 The phase stream is honest boundary progress, not transfer-byte progress or an
 ETA. In particular, a slow Git fetch stays at `acquiring` until Git finishes or
@@ -293,8 +347,8 @@ pipeline.
 
 #### Resume and checkpoints
 
-`--resume` and `--overwrite` are mutually exclusive and require `--out`. On a
-fresh or explicit overwrite run, the CLI creates
+`--resume` and `--overwrite` are mutually exclusive and operate on the explicit
+or default output. On a fresh or explicit overwrite run, the CLI creates
 `organization-checkpoint.json` before enumeration and atomically replaces it
 after each repository whose acquisition, discovery, and source analysis are all
 complete. The checkpoint records compact repository evidence, commit IDs,
@@ -312,9 +366,11 @@ The checkpoint fingerprint binds the checkpoint compatibility generation,
 organization, `--max-repos`, archived/fork filters, configuration, and effective
 scan scope. Explicitly compatible releases can resume older checkpoints after
 validating both the legacy fingerprint and every artifact digest; the checkpoint
-is then upgraded atomically. A scanner change that invalidates prior evidence
-increments the compatibility generation and rejects the checkpoint instead of
-mixing incompatible results. `--concurrency` and the current token are
+is then upgraded atomically. On migration to framework-aware scans, positive
+legacy Express entries remain reusable but legacy negative entries are removed
+from the checkpoint and scanned again. A scanner change that invalidates prior
+evidence increments the compatibility generation and rejects the checkpoint
+instead of mixing incompatible results. `--concurrency` and the current token are
 deliberately not fingerprinted: concurrency does not change evidence, and every
 resume is still restricted to repositories visible during its fresh API
 enumeration. Run with `--overwrite` for a new scan of current default branches
@@ -325,15 +381,27 @@ deleted only after a complete `organization-inventory.json` is successfully
 written. A repository cap itself cannot be repaired by resume; start a fresh run
 with `--overwrite` and a larger `--max-repos` value.
 
-Repository statuses are `express`, `not-express`, `inconclusive`, `failed`,
-`empty`, `skipped-archived`, `skipped-fork`, `skipped-disabled`, or
-`skipped-limit`. A repository is `not-express` only when acquisition, discovery,
-and source scanning are complete. Incomplete negative evidence is
-`inconclusive`, preventing a false organization-level non-Express conclusion.
+Repository statuses are `express`, `fastify`, `nestjs`, `multi-framework`,
+`not-express`, `inconclusive`, `failed`, `empty`, `skipped-archived`,
+`skipped-fork`, `skipped-disabled`, or `skipped-limit`. The legacy
+`not-express` spelling is retained for artifact compatibility and means no
+supported framework was detected only when acquisition, discovery, and source
+scanning are complete. Incomplete negative evidence is `inconclusive`.
+
+Each detected framework also has a separate `classification` so status does not
+overstate what package evidence proves. Roles are `application`,
+`platform-adapter`, `route-provider`, `runtime-dependency`, `peer-dependency`,
+`development-dependency`, or `dependency-only`. The classification includes its
+confidence, contributing signals, and counts of direct dependency declarations
+by `package.json` field. Aggregate summaries therefore report
+`applicationRepositories` separately from `dependencyOnlyRepositories`, and the
+HTML renderer labels a dependency-only detail page as evidence rather than an
+application report.
 
 `--fail-on incomplete` exits `2` when API pagination, the repository limit, a
-repository failure/inconclusive result, or per-repository coverage makes the
-aggregate incomplete. Filters for archived/fork repositories are intentional
+repository failure/inconclusive result, per-repository source coverage, a
+partial or opaque route graph, or a requested baseline comparison makes the
+evidence incomplete. Filters for archived/fork repositories are intentional
 scope choices and do not by themselves make coverage incomplete.
 
 Supplying auth/policy/OpenAPI configuration applies the same configuration to
@@ -346,23 +414,64 @@ insufficient evidence.
 Render existing machine-readable artifacts as a browsable offline HTML site:
 
 ```bash
+# From a repository with exactly one saved output under .express-recon/.
+express-recon render
+
 express-recon render --input .express-recon/acme \
   --out .express-recon/acme-site
+
+# Reconstruct change views from two already-saved organization outputs.
+express-recon render --baseline .express-recon/acme-before \
+  --input .express-recon/acme-current \
+  --out .express-recon/acme-changes-site
+
+# Render a standalone OpenAPI document with local Swagger UI assets.
+express-recon render --input .express-recon/docs/openapi.json \
+  --out .express-recon/api-reference
 ```
 
-Both options are required. `--input` accepts a direct `routes.json`,
-`repo-scan.json`, or `organization-inventory.json` path, or a directory containing
-one. Directory detection prefers the organization aggregate, then a repository
-scan, then a route report. `render` never scans source, acquires a repository,
-executes target code, contacts the network, or invokes a model.
+Both paths are optional in the CLI. Without `--input`, `render` examines only the
+current directory, `.express-recon/` itself, and immediate child directories of
+`.express-recon/`. A candidate directory must contain a conventional input file.
+Exactly one candidate is required: no match or multiple saved outputs fail
+instead of triggering a recursive search or an arbitrary choice. Symbolic or
+non-regular auto-detected inputs are rejected. Pass `--input` to select a direct
+`routes.json`, `repo-scan.json`, `organization-inventory.json`, or OpenAPI 3
+JSON/YAML path, or any directory containing one.
+
+Within a selected directory, detection prefers the organization aggregate, then
+a repository scan, then a route report, followed by `openapi.json`,
+`openapi.yaml`, `openapi.yml`, `swagger.json`, `swagger.yaml`, and `swagger.yml`.
+Without `--out`, a directory input renders to the sibling `<input>-html`; a
+direct conventional filename renders from its parent to `<parent>-html`; any
+other direct filename renders beside it as `<stem>-html`. Explicit paths are
+recommended in CI even though either option can be omitted independently.
+Conventional files from one input folder share the same derived site; use
+`--out` to retain multiple views at once.
+`render` never scans source, acquires a repository, executes target code,
+contacts the network, or invokes a model.
+
+Optional `--baseline` accepts a prior organization report or output directory
+and computes the same bounded delta while rendering, so two existing scans can
+be compared without another GitHub request. It is rejected for repository or
+single-route/OpenAPI inputs.
 
 The output contains:
 
 - `index.html`, with route/repository search and status filtering;
-- `repositories/<name>.html` for confirmed Express repositories and
-  inconclusive scans with an available detailed artifact; definite non-Express,
+- `repositories/<name>.html` for confirmed supported repositories and
+  inconclusive scans with an available detailed artifact; definite unsupported,
   skipped, empty, and failed entries remain index-only;
-- local `assets/report.css` and `assets/report.js` with no CDN dependency; and
+- local `assets/report.css` and `assets/report.js` with no CDN dependency;
+- for a standalone OpenAPI input, the packaged Swagger UI CSS/bundle, its
+  license notices, and a safely serialized local configuration asset instead of
+  report assets;
+- for an organization input, `openapi/<name>.html` plus a local configuration
+  script for each valid specification attached to a confirmed supported entry;
+  those pages share one packaged Swagger UI bundle, while unsupported entries
+  never produce API pages;
+- `organization-delta.json` plus overview metrics and per-repository route
+  changes when the organization input contains baseline evidence; and
 - `render-manifest.json`, recording the source kind, generated pages, and
   non-fatal artifact warnings.
 
@@ -380,8 +489,22 @@ site copied into a CI artifact remains usable through `file://`. Missing, unsafe
 or damaged per-repository artifacts produce an aggregate warning rather than
 hiding the remaining organization evidence. Root input errors exit `1`.
 
+OpenAPI pages use stock Swagger UI. express-recon embeds the parsed document as a
+local JavaScript object; HTML-significant characters are escaped during
+serialization. `supportedSubmitMethods` is empty, `tryItOutEnabled` and query
+configuration are disabled, credentials are not persisted, and the online
+validator is disabled. The page CSP sets `connect-src 'none'`, so server URLs and
+external `$ref` targets cannot be contacted. A self-contained/bundled spec is
+therefore required for complete offline schema rendering. Swagger 2 remains
+unsupported; convert it to OpenAPI 3 before rendering.
+
 HTML is a human review projection, not a new evidence schema. Automation and AI
 agents should continue consuming the original JSON contracts.
+
+### `help`
+
+Prints the same complete help text as `--help`/`-h` and exits `0`. `--version`
+and `-V` print only the installed package version.
 
 ### `schema`
 
@@ -391,24 +514,81 @@ Print the report JSON Schema to stdout:
 express-recon schema > express-recon-report.schema.json
 ```
 
+## CLI option index
+
+The command-specific sections above describe behavior and artifacts. This table
+is the complete option surface; unsupported command/option combinations fail
+instead of being ignored.
+
+| Option               | Commands                                                  | Purpose                                                                                                        |
+| -------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `--mode`             | `inventory`, `audit`, `suggest-auth`, `review-middleware` | Select `static`, `runtime`, or `hybrid`; defaults to `static`.                                                 |
+| `--src`              | Local discovery/inventory/audit/docs/review commands      | Set the source root; defaults to the current directory.                                                        |
+| `--app`              | Runtime/hybrid inventory, audit, suggestion, or review    | Select a trusted application module or `auto`.                                                                 |
+| `--allow-exec`       | Commands accepting `--app auto`                           | Confirm that automatic trusted target-code execution is allowed.                                               |
+| `--app-id`           | Hybrid inventory/audit, `docs`, `scan-repo`               | Select one application; `docs`/`scan-repo` also accept deliberate `all`.                                       |
+| `--spec`             | `docs`, `scan-repo`                                       | Select an existing OpenAPI 3 input.                                                                            |
+| `--jsdoc`            | `docs`, `scan-repo`                                       | Add an annotation source; repeatable.                                                                          |
+| `--review`           | `import-review`                                           | Read the exact middleware-review bundle being assessed.                                                        |
+| `--assessment`       | `import-review`                                           | Read the JSON/YAML assessment response.                                                                        |
+| `--input`            | `render`                                                  | Select a report/OpenAPI file or output directory; otherwise require one bounded auto-detected candidate.       |
+| `--repo`             | `scan-repo`                                               | Select a GitHub shorthand, HTTPS Git URL, or local Git repository.                                             |
+| `--org`              | `scan-org`                                                | Select the GitHub organization login.                                                                          |
+| `--ref`              | `scan-repo`                                               | Select a branch, tag, or commit; defaults to remote `HEAD`.                                                    |
+| `--max-repos`        | `scan-org`                                                | Bound selected repositories to 1–10,000; defaults to 100.                                                      |
+| `--concurrency`      | `scan-org`                                                | Process 1–8 source snapshots at once; defaults to 1.                                                           |
+| `--resume`           | `scan-org`                                                | Continue a compatible checkpoint in the selected or default output.                                            |
+| `--overwrite`        | `scan-org`                                                | Start fresh while replacing only owned/colliding artifacts.                                                    |
+| `--progress`         | `scan-org`                                                | Select `auto`, `plain`, `json`, or `none` stderr progress.                                                     |
+| `--no-progress`      | `scan-org`                                                | Alias for `--progress none`.                                                                                   |
+| `--include-archived` | `scan-org`                                                | Include archived repositories.                                                                                 |
+| `--include-forks`    | `scan-org`                                                | Include organization forks.                                                                                    |
+| `--config`           | All scanning commands except `render`                     | Load validated JS/JSON/YAML configuration.                                                                     |
+| `--format`           | Output-producing commands except `render`/`schema`        | Select a supported command-specific format.                                                                    |
+| `--out`              | Commands with file artifacts                              | Write artifacts to a directory; `render` derives `<input>-html` and `scan-org` derives `.express-recon/<org>`. |
+| `--baseline`         | `inventory`, `audit`, `scan-org`, `render`                | Compare a prior compatible report/output; organization scans use their selected/default output.                |
+| `--fail-on`          | `audit`, `docs`, `scan-org`                               | Exit 2 when a supported quality-gate status matches.                                                           |
+| `--include`          | Static/discovery/repository/organization commands         | Add a root-relative source allowlist glob; repeatable.                                                         |
+| `--exclude`          | Static/discovery/repository/organization commands         | Add a root-relative source exclusion glob; repeatable.                                                         |
+| `--ignore-file`      | Static/discovery/repository/organization commands         | Select a scope file, resolved from each scan root when relative.                                               |
+| `--no-ignore-file`   | Static/discovery/repository/organization commands         | Disable the configured/default scope file.                                                                     |
+| `--include-tests`    | Static/discovery/repository/organization commands         | Opt test paths into the scan.                                                                                  |
+| `--include-hidden`   | Static/discovery/repository/organization commands         | Opt hidden paths into the scan, excluding fixed VCS/vendor/build paths.                                        |
+| `--version`, `-V`    | Global                                                    | Print the installed package version without running a command.                                                 |
+| `--help`, `-h`       | Global                                                    | Print onboarding, command, option, trust, and exit-code help.                                                  |
+
+## Environment variables
+
+| Variable                | Behavior                                                                                                             |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `EXPRESS_RECON_CONTEXT` | `agent`, `ci`, `interactive`, or `auto`; changes safe organization progress/output defaults but never scan evidence. |
+| `GH_TOKEN`              | Preferred GitHub API and private-fetch token for repository/organization scans.                                      |
+| `GITHUB_TOKEN`          | Fallback when `GH_TOKEN` is unset.                                                                                   |
+| `EXPRESS_RECON_DRY`     | Set to `1` automatically inside the trusted runtime worker before importing the target app.                          |
+
+Tokens are sent through scoped process environment/configuration rather than
+rendered in command arguments or reports. Explicit CLI progress flags override
+context defaults.
+
 ## Artifacts and exit codes
 
-With `--out`, directories are created as needed.
+Commands accepting `--out` create directories as needed. `scan-org` also creates
+its default `.express-recon/<lowercase-organization>` hierarchy when omitted.
 Existing regular artifact files may be replaced, but the CLI refuses symbolic
 links and non-regular files at generated artifact paths. Organization scans also
 reject unsafe `repositories/` output directories before GitHub enumeration.
 
-| Command | Artifact(s) |
-| --- | --- |
-| `discover` | `discovery.json` |
-| `inventory` / `audit` | `routes.json`, `routes.md`, and/or `openapi.json` according to `--format` |
-| `docs` | `openapi.json`, `docs-report.json` |
-| `review-middleware` | `middleware-review.json` |
-| `import-review` | `middleware-suggestions.json` |
-| `scan-repo` | `repo-scan.json`, `discovery.json`, `routes.json`; OpenAPI/docs report when mergeable |
-| `scan-org` | `organization-inventory.json`; per-repo `repo-scan.json`, discovery, routes, and mergeable docs under `repositories/<name>/`; `organization-checkpoint.json` while incomplete |
-| `render` | `index.html`, local CSS/JavaScript, `render-manifest.json`, and organization repository pages |
-| `suggest-auth` / `schema` | JSON on stdout |
+| Command                   | Artifact(s)                                                                                                                                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discover`                | `discovery.json`                                                                                                                                                                                                          |
+| `inventory` / `audit`     | `routes.json`, `routes.md`, and/or `openapi.json` according to `--format`                                                                                                                                                 |
+| `docs`                    | `openapi.json`, `docs-report.json`                                                                                                                                                                                        |
+| `review-middleware`       | `middleware-review.json`                                                                                                                                                                                                  |
+| `import-review`           | `middleware-suggestions.json`                                                                                                                                                                                             |
+| `scan-repo`               | `repo-scan.json`, `discovery.json`, `routes.json`; OpenAPI/docs report when mergeable                                                                                                                                     |
+| `scan-org`                | `organization-inventory.json`; optional bounded `organization-delta.json`; per-repo `repo-scan.json`, discovery, routes, and mergeable docs under `repositories/<name>/`; `organization-checkpoint.json` while incomplete |
+| `render`                  | `index.html`, local report and/or shared Swagger UI assets, `render-manifest.json`, optional copied organization delta, organization repository pages, and supported-framework API pages under `openapi/`                 |
+| `suggest-auth` / `schema` | JSON on stdout                                                                                                                                                                                                            |
 
 `pretty` is terminal-oriented and is not written as an artifact. Supported
 inventory/audit formats are `pretty`, `json`, `md`, and `openapi`; formats may
@@ -416,11 +596,11 @@ be comma-separated.
 
 Exit codes:
 
-| Code | Meaning |
-| ---: | --- |
-| `0` | Command completed and no requested gate matched. |
-| `1` | Invalid CLI/config input or operational failure. |
-| `2` | Command completed, but at least one `--fail-on` condition matched. |
+| Code | Meaning                                                            |
+| ---: | ------------------------------------------------------------------ |
+|  `0` | Command completed and no requested gate matched.                   |
+|  `1` | Invalid CLI/config input or operational failure.                   |
+|  `2` | Command completed, but at least one `--fail-on` condition matched. |
 
 Diagnostics go to stderr and remain in machine reports where applicable. JSON
 and OpenAPI stdout remain parseable even when a gate exits `2`. `scan-org`
@@ -435,17 +615,40 @@ the invoking user's permissions. Unknown fields fail instead of being ignored.
 
 Top-level keys:
 
-| Key | Purpose |
-| --- | --- |
-| `authMiddleware` | Confirmed middleware-to-auth grant mapping. |
-| `authWrappers` | Wrappers proven to always execute/preserve their inner middleware. |
-| `acceptedPublic` | Reviewed intentionally unauthenticated routes. |
-| `policies` | Deterministic route requirements and expiring exceptions. |
-| `openapi` | Explicit security schemes and auth-tag mappings. |
-| `scan` | Scope and resource limits. |
-| `boot` | Trusted runtime/hybrid worker settings. |
+| Key              | Purpose                                                            |
+| ---------------- | ------------------------------------------------------------------ |
+| `authMiddleware` | Confirmed middleware-to-auth grant mapping.                        |
+| `authWrappers`   | Wrappers proven to always execute/preserve their inner middleware. |
+| `acceptedPublic` | Reviewed intentionally unauthenticated routes.                     |
+| `policies`       | Deterministic route requirements and expiring exceptions.          |
+| `openapi`        | Explicit security schemes and auth-tag mappings.                   |
+| `scan`           | Scope and resource limits.                                         |
+| `boot`           | Trusted runtime/hybrid worker settings.                            |
 
 A top-level JSON/YAML array is shorthand for `{ policies: [...] }`.
+
+### Complete configuration field index
+
+These are all accepted configuration keys. Paths containing `[]` describe each
+array item; `<name>` is a user-selected middleware key. Unknown keys at any
+validated level fail closed.
+
+| Area                 | Accepted fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Top level            | `acceptedPublic`, `authMiddleware`, `authWrappers`, `boot`, `openapi`, `policies`, `scan`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Auth grant           | `authMiddleware.<name>.tag`, `authMiddleware.<name>.tags`, `authMiddleware.<name>.roles`, `authMiddleware.<name>.scopes`                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Accepted-public item | `acceptedPublic[].applicationId`, `acceptedPublic[].method`, `acceptedPublic[].path`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| OpenAPI              | `openapi.securityByTag`, `openapi.securitySchemes`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Scan                 | `scan.exclude`, `scan.ignoreFile`, `scan.include`, `scan.includeHidden`, `scan.maxFileBytes`, `scan.maxFiles`, `scan.maxTotalBytes`, `scan.timeoutMs`                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Runtime boot         | `boot.env`, `boot.inheritEnv`, `boot.maxOutputBytes`, `boot.sandbox`, `boot.settleMs`, `boot.stubModules`, `boot.timeoutMs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Policy               | `policies[].id`, `policies[].description`, `policies[].severity`, `policies[].match`, `policies[].require`, `policies[].exceptions`, `policies[].message`, `policies[].recommendation`                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Policy selector      | `policies[].match.applicationIds`, `policies[].match.methods`, `policies[].match.paths`, `policies[].match.excludePaths`, `policies[].match.authStatuses`, `policies[].match.tags`, `policies[].match.roles`, `policies[].match.scopes`                                                                                                                                                                                                                                                                                                                                                            |
+| Policy requirement   | `policies[].require.auth`, `policies[].require.anyMiddleware`, `policies[].require.allMiddleware`, `policies[].require.noMiddleware`, `policies[].require.middlewareOrder`, `policies[].require.anyTag`, `policies[].require.allTags`, `policies[].require.noTags`, `policies[].require.anyRole`, `policies[].require.allRoles`, `policies[].require.noRoles`, `policies[].require.anyScope`, `policies[].require.allScopes`, `policies[].require.noScopes`, `policies[].require.roles`, `policies[].require.scopes`, `policies[].require.all`, `policies[].require.any`, `policies[].require.not` |
+| Policy exception     | `policies[].exceptions[].id`, `policies[].exceptions[].reason`, `policies[].exceptions[].expires`, `policies[].exceptions[].match`                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+`roles` and `scopes` in a requirement are concise aliases for `allRoles` and
+`allScopes`. Nested `all`, `any`, and `not` values use the same complete
+requirement field set, with a maximum expression depth of 12.
 
 ### Authentication grants
 
@@ -485,6 +688,8 @@ acceptedPublic:
 Accepted routes remain `authStatus: public` and gain `accepted: true`; their
 `public-route` finding and `--fail-on public` match are suppressed. An entry
 that no longer matches a public route emits a `stale-baseline` finding.
+Accepted-public and policy method selectors support `GET`, `POST`, `PUT`,
+`PATCH`, `DELETE`, `HEAD`, `OPTIONS`, `TRACE`, and `ALL`.
 
 ### OpenAPI security mapping
 
@@ -602,7 +807,7 @@ incomplete result into a clean bill of health by filtering out its diagnostics.
 
 ## Runtime boot options
 
-Runtime/hybrid is for trusted local code only.
+Runtime/hybrid is Express-only and for trusted local code only.
 
 ```yaml
 boot:
@@ -641,14 +846,27 @@ target code and should be exceptional.
 are `schemaVersion`, `tool`, `toolVersion`, `command`, `mode`, `applications`,
 `routes`, and `globalMiddleware`.
 
+Complete top-level field index:
+
+| Field                                                                                                   | Presence                                                                                                         |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`, `tool`, `toolVersion`, `command`, `mode`, `applications`, `routes`, `globalMiddleware` | Required on every route report.                                                                                  |
+| `target`, `configHash`, `diagnostics`, `routeGraph`, `scanCoverage`, `openapi`                          | Included when the corresponding target, configuration, uncertainty, graph, coverage, or OpenAPI evidence exists. |
+| `summary`, `policies`, `policyExceptions`, `findings`                                                   | Audit-only judgment and policy evidence.                                                                         |
+| `delta`                                                                                                 | Included when a compatible `--baseline` is supplied.                                                             |
+
 Important fields:
 
 - `configHash`: SHA-256 of canonical analysis config, without embedding config.
-- `applications[]`: stable ID, source, route count, and global middleware.
+- `applications[]`: stable ID, `framework`, underlying `adapter` (`express`,
+  `fastify`, or `unknown`), source, route count, and global lifecycle middleware.
+- `routes[].framework`: `express`, `fastify`, or `nestjs` for current scans.
 - `routes[].applicationId`: app identity or `null` for unresolved/orphan routes.
 - `routes[].source`: repository-relative file and line when known.
 - `routes[].io`: best-effort request/response/handler hints from static analysis.
 - `routes[].pathConfidence`: `full` or `partial`.
+- `routes[].middlewares[].stage`: optional lifecycle role (`middleware`, `hook`,
+  `guard`, `interceptor`, `pipe`, or `filter`) when the source API proves it.
 - `routes[].authStatus`, tags, roles, scopes, and `authEvidence`: audit only.
 - `routes[].presence` and `observations`: hybrid evidence (`both`,
   `static-only`, `runtime-only`) without discarding either scanner's view.
@@ -657,23 +875,24 @@ Important fields:
   include/exclude values, test selection, ignore-file presence/rule count/content
   hash, built-in exclusions, and an effective-scope fingerprint. Absolute ignore
   paths are represented as `<external>/<basename>` rather than leaked.
-- `routeGraph`: whether every emitted route was assigned to an app plus counts
-  for orphan/registrar routes and evidence for possible opaque route-provider
-  mounts. A false `complete` value prevents documentation-only operations from
-  being asserted stale without further evidence.
+- `routeGraph`: whether every emitted route was assigned to an app and resolved
+  to a full path, plus `orphanRoutes`, `partialRoutes`, `registrarRoutes`, and
+  evidence for possible opaque route-provider mounts. A false `complete` value
+  prevents documentation-only operations from being asserted stale without
+  further evidence and matches `--fail-on incomplete`.
 - `summary`, `findings`, normalized `policies`, and applied
   `policyExceptions`: audit only.
 - `delta`: comparison with `--baseline`.
 
 Finding types:
 
-| Finding | Meaning |
-| --- | --- |
-| `public-route` | No configured authentication guard matched. |
-| `opaque-middleware` | A possible guard is opaque; manual review required. |
-| `per-verb-gap` | Methods on the same app/path have different auth states. |
-| `stale-baseline` | An accepted-public entry no longer matches a public route. |
-| `policy-violation` | A configured route requirement failed. |
+| Finding             | Meaning                                                    |
+| ------------------- | ---------------------------------------------------------- |
+| `public-route`      | No configured authentication guard matched.                |
+| `opaque-middleware` | A possible guard is opaque; manual review required.        |
+| `per-verb-gap`      | Methods on the same app/path have different auth states.   |
+| `stale-baseline`    | An accepted-public entry no longer matches a public route. |
+| `policy-violation`  | A configured route requirement failed.                     |
 
 Every current finding carries `ruleId`, stable `fingerprint`, severity,
 confidence, app identity, detail, and recommendation. Fingerprints intentionally
@@ -709,33 +928,86 @@ readable for compatibility but cannot prove scope comparability.
 ### Static mode
 
 Static mode parses `.js`, `.jsx`, `.cjs`, `.mjs`, `.ts`, `.tsx`, `.mts`, and
-`.cts` with no type-check or build. It resolves:
+`.cts` with no type-check, dependency installation, framework import, or build.
+Because transpiler-based projects commonly place JSX in `.js`, a failed `.js`
+parse is retried with JSX grammar before coverage is marked incomplete. All
+adapters share the same file/byte/time limits and common route contract.
+TypeScript `.d.ts`, `.d.mts`, and `.d.cts` declaration files are excluded
+because they cannot register runtime routes.
 
-- separate `express()` roots and `express.Router()` bindings;
+Express resolution includes:
+
+- separate `express()` roots and `express.Router()` bindings, including
+  route-less listening apps, immutable aliases of `require`, and inline
+  `require("express")()` factories;
 - `app.METHOD()`, `router.METHOD()`, `route().all().get()` chains, and arrays of
   literal paths;
-- cross-file mounts and middleware registration order;
+- cross-file mounts, resolvable direct registrar calls, and middleware
+  registration order;
 - same-file string constants, concatenation, and template paths;
 - `require`, ESM import, package `#imports`, nearest-package `tsconfig` paths and
-  `baseUrl`, and common barrel re-exports;
+  `baseUrl`, NodeNext `.js` specifiers targeting TypeScript source, and common
+  barrel re-exports;
 - path-scoped middleware, configured transparent wrappers, and one-hop
   controller handler hints.
 
-It retains partial evidence for dynamic/data-driven registration, registrar
-functions, computed/regex paths or scopes, unresolved dependency injection,
-bare-package routers, and unsupported resolution chains. `tsconfig extends`
-chains are not followed. Regex/computed guard scopes are conservatively treated
-as host-wide rather than used to prove a route public.
+Fastify resolution includes:
+
+- `fastify()`/`Fastify()` roots and shorthand methods including `trace`;
+- `route({ method, url, handler })`, including static method/path arrays;
+- local, imported, CommonJS, ESM, and `fastify-plugin`-wrapped plugins;
+- nested `register()` prefixes, direct functions receiving a local Fastify
+  instance, call-site propagation for imported plugin arguments, encapsulated
+  request-stage hooks, registration order, duplicate source-site suppression,
+  and `fastify-plugin` transparency (including its ignored prefix rule);
+- known hook/decorator-only packages such as the Fastify CORS and Helmet plugins
+  do not make route coverage opaque, while unknown or route-providing plugins
+  remain fail-visible;
+- `onRequest`, `preParsing`, `preValidation`, and `preHandler` evidence at
+  plugin and per-route scope; and
+- handler request/response hints where the function is statically resolvable.
+
+NestJS resolution includes:
+
+- official `@nestjs/common`/`@nestjs/core` decorators, `NestFactory.create()`,
+  default or named module exports, module/controller graphs, NodeNext source
+  resolution, and Express versus Fastify platform adapters;
+- repository-local workspace package imports and statically returned
+  `register()`/`forRoot()` dynamic-module metadata;
+- controller and method paths, static arrays, global prefixes, and
+  `RouterModule.register()` prefixes;
+- global/controller/method guards, interceptors, pipes, and filters, including
+  `APP_GUARD`, `APP_INTERCEPTOR`, `APP_PIPE`, and `APP_FILTER` providers;
+- `MiddlewareConsumer.apply().exclude().forRoutes()` for static controller,
+  path, and `RequestMethod` scopes; and
+- decorated request fields, `HttpCode`, default response codes, and returned
+  object keys as bounded handler hints.
+
+The scanner retains partial or opaque evidence for dynamic/data-driven
+registration, registrar functions, computed paths/scopes, unresolved dependency
+injection, bare-package routers/plugins, Nest host/version routing and global
+prefix exclusions, and unsupported resolution chains. A dynamic Nest middleware
+scope becomes opaque `unknown` middleware so it cannot falsely prove a route
+public or authenticated. `tsconfig extends` chains are not followed. Express
+regex/computed guard scopes are conservatively treated as host-wide rather than
+used to prove a route public. Standalone Fastify plugin routes without a local
+root are retained as partial evidence when the function uses a conventional
+`fastify`/`server`/`instance` parameter, a `*Plugin` name, or another
+Fastify-specific API; otherwise an ambiguous `(app) => app.get(...)` registrar
+keeps the legacy Express interpretation. A generic `.route()` call alone is not
+Fastify evidence, which avoids classifying browser-automation APIs such as
+`page.route()` as server routes.
 
 ### Runtime mode
 
-Runtime walks the app that actually booted and can observe dynamic registration.
-Source and mount paths are strongest when instrumentation captured the
-registration. Pure runtime has no static `scanCoverage`.
+Runtime is Express-only. It walks the trusted app that actually booted and can
+observe dynamic registration. Source and mount paths are strongest when
+instrumentation captured the registration. Pure runtime has no static
+`scanCoverage`.
 
 ### Hybrid mode
 
-Hybrid combines static breadth/source hints with runtime wiring. It matches by
+Hybrid is Express-only and combines static breadth/source hints with runtime wiring. It matches by
 application identity, exact route, registration source, or unambiguous partial
 suffix. Runtime middleware/auth is authoritative only for a confirmed pair.
 Ambiguous duplicate paths, shared-router sources, or unsourced observations stay
@@ -747,6 +1019,10 @@ separate instead of being assigned to the first app.
 const recon = require("express-recon");
 ```
 
+The [complete library API](./api.md) documents the signature, return contract,
+and trust boundary of every public export. The overview below highlights how
+the main primitives compose.
+
 Primary exports:
 
 - `discover(root, options)`
@@ -755,6 +1031,7 @@ Primary exports:
 - `suggestAuth(registry)`
 - `buildReport(registry, metadata)`
 - `compareReports(before, after)`
+- `compareOrganizationReports(before, after, loaders)`
 - `reconcileDocumentation(report, options)`
 - `createMiddlewareReview(report, options)`
 - `applyMiddlewareAssessments(bundle, assessment)`
@@ -767,8 +1044,10 @@ Primary exports:
 - `REPORT_SCHEMA`, `MIDDLEWARE_ASSESSMENT_SCHEMA`, and `formatters`
 
 `inventory()`/`audit()` options use `mode: "static" | "runtime" | "hybrid"`.
-Static/hybrid requires `src`. Direct runtime library use accepts an already
-loaded `app`, which has already executed in the caller. CLI-style worker use is:
+Static mode supports Express, Fastify, and NestJS and requires `src`. Hybrid
+also requires `src`, but hybrid/runtime observation is Express-only. Direct
+runtime library use accepts an already loaded Express `app`, which has already
+executed in the caller. CLI-style worker use is:
 
 ```js
 const runtimeRegistry = await recon.executeRuntime("./src/app.js", {
@@ -791,8 +1070,11 @@ Raw registries use absolute source paths internally. Pass `sourceRoot` to
 `maxRepositories`, `concurrency`, `includeArchived`, `includeForks`, shared
 `config`/`scan` settings, and streaming/resume controls:
 
-- `onRepository({ repository, status, express, coverageComplete, scan })` can
-  persist a completed detailed scan immediately;
+- `onRepository({ repository, status, frameworks, express, coverageComplete, routeGraphComplete, scan })`
+  can persist a completed detailed scan immediately. `express` remains as a
+  compatibility projection; `frameworks` is the framework-neutral evidence;
+  the two completeness fields distinguish readable source from a fully resolved
+  route graph;
 - `onProgress(event)` synchronously observes the versioned organization events
   listed under [Progress and CI logs](#progress-and-ci-logs), including
   repository phases and monotonic counters;
@@ -801,8 +1083,8 @@ Raw registries use absolute source paths internally. Pass `sourceRoot` to
   requires `retainScans: false`; matching repositories are not reacquired.
 
 Concurrency defaults to one and is capped at eight. The callback runs after the
-repository snapshot has already been removed. CLI `--out` uses both streaming
-controls; library callers should do the same for large organizations. The
+repository snapshot has already been removed. The CLI's selected/default output
+uses both streaming controls; library callers should do the same for large organizations. The
 organization contract has its own `kind` and schema version and is not described
 by `REPORT_SCHEMA`, which applies to individual route inventory/audit reports.
 An exception from `onProgress` disables that observer, adds a redacted
@@ -814,14 +1096,23 @@ The CLI owns checkpoint persistence, compatibility fingerprints, and artifact
 integrity validation; library callers supplying `resumeEntries` must provide
 equivalent validation themselves.
 
+`compareOrganizationReports()` compares two aggregate contracts. Supply
+`loadBaselineScan(entry)` and `loadCurrentScan(entry)` callbacks to enable exact
+route comparison for common complete supported repositories; callbacks should
+return the corresponding `repository-scan` object. Without loaders, aggregate
+repository/status/count changes are still returned, while required exact
+comparisons are marked incomplete instead of silently treated as unchanged.
+
 `renderHtmlSite()` is synchronous and returns the render manifest plus the
 absolute `index.html` path. It accepts the same file or directory inputs as the
 CLI `render` command and writes a deterministic, offline site without changing
-the input artifacts.
+the input artifacts. Pass `{ baseline: priorPath }` as its third argument to
+compare two organization outputs while rendering.
 
 ## Related guides
 
 - [README and quickstart](../README.md)
+- [Complete library API](./api.md)
 - [AI agent guide](./ai-agent-guide.md)
 - [OpenAPI guide](./openapi.md)
 - [Security model](../SECURITY.md)

@@ -1,0 +1,251 @@
+# Copy to .github/workflows/express-recon-org.yml in a private, access-controlled
+# inventory repository. See README.md in this example directory before enabling.
+name: Scheduled API organization inventory
+
+on:
+  schedule:
+    - cron: "17 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      organization:
+        description: GitHub organization login (defaults to repository owner or variable)
+        required: false
+        type: string
+      max_repositories:
+        description: Maximum eligible repositories to scan
+        required: false
+        default: "500"
+        type: string
+      concurrency:
+        description: Concurrent repository snapshots (1-8)
+        required: false
+        default: "2"
+        type: string
+      fresh:
+        description: Ignore saved state and start a current-HEAD inventory
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: express-recon-org-${{ inputs.organization || vars.EXPRESS_RECON_ORG || github.repository_owner }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      organization: ${{ steps.settings.outputs.organization }}
+      report_ready: ${{ steps.validate_state.outputs.report_ready }}
+      scan_exit_code: ${{ steps.scan_org.outputs.exit_code }}
+      summary_artifact_name: express-recon-org-summary-${{ github.run_id }}
+    steps:
+      - name: Check out the trusted inventory controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate scan settings
+        id: settings
+        env:
+          ORG_VALUE: ${{ inputs.organization || vars.EXPRESS_RECON_ORG || github.repository_owner }}
+          MAX_REPOSITORIES_VALUE: ${{ inputs.max_repositories || vars.EXPRESS_RECON_MAX_REPOS || '500' }}
+          CONCURRENCY_VALUE: ${{ inputs.concurrency || vars.EXPRESS_RECON_CONCURRENCY || '2' }}
+          FRESH_VALUE: ${{ inputs.fresh || 'false' }}
+          CONFIG_FILE: recon.org.config.json
+          IGNORE_FILE: .express-recon-org-ignore
+        run: node .github/scripts/express-recon-org-state.mjs settings
+
+      - name: Resolve the latest compatible state artifact
+        id: previous_state
+        env:
+          ACTIONS_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_ID: ${{ github.run_id }}
+          FRESH: ${{ steps.settings.outputs.fresh }}
+          STATE_ARTIFACT_NAME: ${{ steps.settings.outputs.state_artifact_name }}
+        run: node .github/scripts/express-recon-org-state.mjs resolve-state
+
+      - name: Restore resumable organization reports
+        if: steps.previous_state.outputs.found == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.previous_state.outputs.artifact_id }}
+          path: previous-results
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.previous_state.outputs.run_id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+
+      - name: Select resume or fresh overwrite
+        id: state_action
+        env:
+          STATE_DIR: ${{ github.workspace }}/org-results
+          RESTORED_DIR: ${{ github.workspace }}/previous-results
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          FRESH: ${{ steps.settings.outputs.fresh }}
+        run: node .github/scripts/express-recon-org-state.mjs prepare-state
+
+      - name: Install the pinned scanner
+        run: npm ci --ignore-scripts
+
+      - name: Scan the organization with streamed progress
+        id: scan_org
+        shell: bash
+        env:
+          # A dedicated read-only token is needed for private repositories in
+          # the target organization. github.token remains the public fallback.
+          GH_TOKEN: ${{ secrets.EXPRESS_RECON_GH_TOKEN || github.token }}
+          EXPRESS_RECON_CONTEXT: ci
+          BASELINE_INPUT: ${{ steps.state_action.outputs.baseline_input }}
+        run: |
+          set +e
+          baseline_args=()
+          if [[ -n "$BASELINE_INPUT" ]]; then
+            baseline_args=(--baseline "$BASELINE_INPUT")
+          fi
+          node_modules/.bin/express-recon scan-org \
+            --org "${{ steps.settings.outputs.organization }}" \
+            --out org-results \
+            --max-repos "${{ steps.settings.outputs.max_repositories }}" \
+            --concurrency "${{ steps.settings.outputs.concurrency }}" \
+            --config recon.org.config.json \
+            --ignore-file "$GITHUB_WORKSPACE/.express-recon-org-ignore" \
+            --progress plain \
+            --fail-on incomplete \
+            "${baseline_args[@]}" \
+            "${{ steps.state_action.outputs.scan_action }}" \
+            2> >(tee scan-progress.log >&2)
+          scan_exit_code=$?
+          set -e
+          echo "exit_code=$scan_exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Validate bounded resumable state
+        id: validate_state
+        if: always()
+        env:
+          STATE_DIR: ${{ github.workspace }}/org-results
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          ORGANIZATION: ${{ steps.settings.outputs.organization }}
+        run: node .github/scripts/express-recon-org-state.mjs validate-state
+
+      - name: Persist raw reports for a later resume
+        if: always() && steps.validate_state.outputs.state_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.settings.outputs.state_artifact_name }}
+          path: org-results
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+          include-hidden-files: false
+
+      - name: Upload compact aggregate for the notification job
+        if: always() && steps.validate_state.outputs.report_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: express-recon-org-summary-${{ github.run_id }}
+          path: org-results/organization-inventory.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
+          include-hidden-files: false
+
+      - name: Render the offline HTML inventory
+        if: always() && steps.validate_state.outputs.report_ready == 'true'
+        run: >-
+          node_modules/.bin/express-recon render
+          --input org-results
+          --out org-site
+
+      - name: Validate the bounded review bundle
+        id: validate_review
+        if: always() && steps.validate_state.outputs.report_ready == 'true'
+        env:
+          SITE_DIR: ${{ github.workspace }}/org-site
+          AGGREGATE_FILE: ${{ github.workspace }}/org-results/organization-inventory.json
+          PROGRESS_FILE: ${{ github.workspace }}/scan-progress.log
+        run: node .github/scripts/express-recon-org-state.mjs validate-review
+
+      - name: Upload HTML inventory and progress log
+        if: always() && steps.validate_review.outputs.review_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: express-recon-org-report-${{ steps.settings.outputs.organization }}-${{ github.run_id }}
+          path: |
+            org-site
+            org-results/organization-inventory.json
+            scan-progress.log
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+          include-hidden-files: false
+
+      - name: Enforce operational and completeness results
+        if: always()
+        shell: bash
+        run: |
+          scan_exit_code="${{ steps.scan_org.outputs.exit_code }}"
+          if [[ ! "$scan_exit_code" =~ ^[012]$ ]]; then
+            echo "express-recon did not produce a valid exit code" >&2
+            exit 1
+          fi
+          exit "$scan_exit_code"
+
+  notify:
+    needs: scan
+    if: always() && needs.scan.outputs.organization != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the trusted notifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/express-recon-org-slack.mjs
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Download the compact aggregate
+        id: summary_download
+        if: needs.scan.outputs.report_ready == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.scan.outputs.summary_artifact_name }}
+          path: summary
+          digest-mismatch: error
+
+      - name: Notify Slack about incomplete or failed scans
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.EXPRESS_RECON_SLACK_WEBHOOK_URL }}
+          REPOSITORY: ${{ github.repository }}
+          ORGANIZATION: ${{ needs.scan.outputs.organization }}
+          RUN_ID: ${{ github.run_id }}
+          REPORT_READY: ${{ needs.scan.outputs.report_ready == 'true' && steps.summary_download.outcome == 'success' }}
+          SCAN_EXIT_CODE: ${{ needs.scan.outputs.scan_exit_code }}
+          SCAN_JOB_RESULT: ${{ needs.scan.result }}
+          NOTIFY_SUCCESS: ${{ vars.EXPRESS_RECON_NOTIFY_SUCCESS || 'false' }}
+          NOTIFY_CHANGES: ${{ vars.EXPRESS_RECON_NOTIFY_CHANGES || 'true' }}
+        run: >-
+          node .github/scripts/express-recon-org-slack.mjs
+          summary/organization-inventory.json

@@ -339,6 +339,11 @@ function within(root, file) {
   return value === "" || (value !== ".." && !value.startsWith(".." + path.sep));
 }
 
+/**
+ * Materialize a bounded, non-executing source snapshot for one Git ref.
+ * Callers own the returned temporary directory and must remove `temp`; prefer
+ * scanRepository() when only the completed report is needed.
+ */
 function acquireRepository(source, opts = {}) {
   const repository = normalizeRepository(source);
   const remoteGitConfig = githubGitConfig(repository, opts.githubToken);
@@ -435,6 +440,11 @@ function repositoryProgress(callback, source) {
   };
 }
 
+/**
+ * Acquire, statically scan, and document one repository, then remove its
+ * temporary source snapshot in a finally block. Target code and dependencies
+ * are never executed or installed.
+ */
 function scanRepository(source, opts = {}) {
   const scan = { ...opts.config?.scan, ...opts.scan };
   const progress = repositoryProgress(opts.onProgress, source);

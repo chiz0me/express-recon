@@ -215,7 +215,10 @@ function walk(app) {
   const router = getRootRouter(app);
   const { routes, globals } = walkRouter(router, "", [], false);
   const applicationId = "runtime:default";
-  for (const route of routes) route.applicationId = applicationId;
+  for (const route of routes) {
+    route.applicationId = applicationId;
+    route.framework = "express";
+  }
   const globalMiddleware = globals.map((g) => g.mw);
   return {
     routes,
@@ -224,6 +227,8 @@ function walk(app) {
       {
         id: applicationId,
         name: "runtime application",
+        framework: "express",
+        adapter: "express",
         source: null,
         routeCount: routes.length,
         globalMiddleware,

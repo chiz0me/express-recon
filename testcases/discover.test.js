@@ -334,3 +334,43 @@ test("discovery applies .express-reconignore to packages, apps, specs, and JSDoc
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("package discovery exposes direct dependency scope and classification strength", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-dependency-signals-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "framework-signals",
+        dependencies: { express: "^5.0.0" },
+        peerDependencies: { "@nestjs/common": "^11.0.0" },
+        devDependencies: { fastify: "^5.0.0" },
+      }),
+    );
+
+    const result = discover(root);
+    const frameworks = Object.fromEntries(
+      result.packages[0].frameworks.map((framework) => [framework.name, framework]),
+    );
+    assert.deepEqual(frameworks.express.classification, {
+      signal: "package-json-direct-dependency",
+      direct: true,
+      strength: "strong",
+      scopes: ["runtime"],
+    });
+    assert.deepEqual(frameworks.express.packages[0], {
+      package: "express",
+      field: "dependencies",
+      range: "^5.0.0",
+      direct: true,
+      scope: "runtime",
+      strength: "strong",
+    });
+    assert.equal(frameworks.nestjs.classification.strength, "supporting");
+    assert.equal(frameworks.nestjs.packages[0].scope, "peer");
+    assert.equal(frameworks.fastify.classification.strength, "weak");
+    assert.equal(frameworks.fastify.packages[0].scope, "development");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

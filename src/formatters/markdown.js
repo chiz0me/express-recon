@@ -18,7 +18,7 @@ function compareRoutes(a, b) {
 }
 
 function mwNames(middlewares) {
-  return middlewares.map((m) => m.name).join(" → ") || "—";
+  return middlewares.map((m) => (m.stage ? `${m.stage}:${m.name}` : m.name)).join(" → ") || "—";
 }
 
 function sourceLabel(s) {
@@ -46,10 +46,10 @@ function pathCell(r) {
 function renderTable(routes, audit) {
   const sorted = routes.slice().sort(compareRoutes);
   const cols = audit
-    ? ["Application", "Method", "Path", "Auth", "Source", "Middlewares"]
-    : ["Application", "Method", "Path", "Source", "Middlewares"];
+    ? ["Framework", "Application", "Method", "Path", "Auth", "Source", "Middlewares"]
+    : ["Framework", "Application", "Method", "Path", "Source", "Middlewares"];
   const body = sorted.map((r) => {
-    const base = [r.applicationId || "—", r.method, pathCell(r)];
+    const base = [r.framework || "express", r.applicationId || "—", r.method, pathCell(r)];
     if (audit) base.push(r.accepted ? "public (accepted)" : r.authStatus);
     base.push(sourceLabel(r.source), mwNames(r.middlewares));
     return renderRow(base);
@@ -183,7 +183,7 @@ function deltaSections(delta) {
 
 function format(report) {
   const audit = report.command === "audit";
-  const sections = [`# Express route ${audit ? "audit" : "inventory"}`, ""];
+  const sections = [`# HTTP route ${audit ? "audit" : "inventory"}`, ""];
   if (audit) sections.push(...auditSections(report));
   else sections.push(`Total routes: **${report.routes.length}**`, "");
   if (report.delta) sections.push(...deltaSections(report.delta));

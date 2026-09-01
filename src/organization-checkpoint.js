@@ -4,13 +4,14 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const pkg = require("../package.json");
+const { COMPLETE_REPOSITORY_STATUSES } = require("./frameworks");
 
 const CHECKPOINT_FILENAME = "organization-checkpoint.json";
 const CHECKPOINT_KIND = "github-organization-scan-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = "1.0";
 // Bump this whenever previously completed repository evidence is no longer safe
 // to reuse. Add only audited pre-generation releases to the legacy allowlist.
-const CHECKPOINT_COMPATIBILITY_VERSION = "1";
+const CHECKPOINT_COMPATIBILITY_VERSION = "2";
 const LEGACY_COMPATIBLE_TOOL_VERSIONS = new Set(["0.6.0", "0.7.0", "0.7.1", "0.7.2"]);
 const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
@@ -198,7 +199,7 @@ function fileIntegrity(outDir, relative) {
 }
 
 function checkpointEntry(payload, artifacts, outDir) {
-  if (payload.coverageComplete !== true || !["express", "not-express"].includes(payload.status)) {
+  if (payload.coverageComplete !== true || !COMPLETE_REPOSITORY_STATUSES.has(payload.status)) {
     return null;
   }
   const commit = payload.scan.repository?.commit;
@@ -213,7 +214,10 @@ function checkpointEntry(payload, artifacts, outDir) {
     status: payload.status,
     scanned: true,
     express: payload.express,
+    ...(payload.frameworks ? { frameworks: payload.frameworks } : {}),
     coverageComplete: true,
+    routeGraphComplete:
+      payload.routeGraphComplete ?? payload.scan.inventory?.routeGraph?.complete !== false,
     command: payload.scan.inventory?.command || "inventory",
     auditSummary: payload.scan.inventory?.summary || null,
     commit,
@@ -312,8 +316,9 @@ function resumableEntries(checkpoint, outDir) {
     }
     names.add(fullName.toLowerCase());
     if (
-      !["express", "not-express"].includes(entry.status) ||
+      !COMPLETE_REPOSITORY_STATUSES.has(entry.status) ||
       entry.coverageComplete !== true ||
+      (entry.routeGraphComplete !== undefined && typeof entry.routeGraphComplete !== "boolean") ||
       !entry.express ||
       !["inventory", "audit"].includes(entry.command) ||
       !entry.artifacts ||
@@ -357,6 +362,9 @@ function resumableEntries(checkpoint, outDir) {
 function loadCheckpoint(file, organization, identity, outDir) {
   const source = readCheckpointFile(file);
   const compatibility = validateCheckpointShape(source, organization, identity);
+  const unsafeLegacyEntries = compatibility.legacy
+    ? source.completed.filter((entry) => entry.status !== "express")
+    : [];
   const checkpoint = compatibility.legacy
     ? {
         ...source,
@@ -364,9 +372,17 @@ function loadCheckpoint(file, organization, identity, outDir) {
         compatibilityVersion: identity.compatibilityVersion,
         fingerprint: identity.fingerprint,
         scope: identity.scope,
+        // A legacy positive Express result remains useful. A legacy negative
+        // predates the Fastify/NestJS adapters and must be scanned again.
+        completed: source.completed.filter((entry) => entry.status === "express"),
       }
     : source;
   const resume = resumableEntries(checkpoint, outDir);
+  if (unsafeLegacyEntries.length) {
+    resume.diagnostics.unshift(
+      `${unsafeLegacyEntries.length} legacy non-Express checkpoint entr${unsafeLegacyEntries.length === 1 ? "y was" : "ies were"} invalidated so newly supported frameworks can be discovered`,
+    );
+  }
   return {
     checkpoint,
     migratedFromToolVersion: compatibility.legacy ? source.toolVersion : null,

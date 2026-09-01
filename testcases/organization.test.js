@@ -16,6 +16,7 @@ const {
 } = require("../src/organization");
 const { githubGitConfig, normalizeRepository } = require("../src/repository");
 const {
+  defaultOrganizationOutput,
   normalizeOrganizationOutputChoice,
   resolveExecutionContext,
   resolveOrganizationOutputArgs,
@@ -184,29 +185,19 @@ test("execution context selects safe organization progress defaults with explici
   );
 });
 
-test("agent execution context requires streamed output and stays quiet by default", async () => {
-  let scans = 0;
-  await assert.rejects(
-    runScanOrganization(
-      { org: "acme", progress: "auto", provided: new Set() },
-      {
-        environment: { EXPRESS_RECON_CONTEXT: "agent" },
-        async scanOrganization() {
-          scans++;
-          return emptyOrganizationResult();
-        },
-      },
-    ),
-    /requires scan-org --out <dir>/,
-  );
-  assert.equal(scans, 0);
-
-  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-agent-context-"));
+test("agent organization scans use a durable default output and stay quiet", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-agent-context-"));
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  const output = path.join(fs.realpathSync(workspace), ".express-recon", "acme");
   let stderr = "";
+  let scans = 0;
   try {
+    assert.equal(defaultOrganizationOutput("AcMe", workspace), output);
     const code = await runScanOrganization(
-      { org: "acme", out: output, progress: "auto", provided: new Set() },
+      { org: "AcMe", progress: "auto", provided: new Set() },
       {
+        cwd: workspace,
         environment: { EXPRESS_RECON_CONTEXT: "agent" },
         progressStream: {
           write(value) {
@@ -214,8 +205,10 @@ test("agent execution context requires streamed output and stays quiet by defaul
             return true;
           },
         },
-        async scanOrganization() {
+        async scanOrganization(_organization, options) {
           scans++;
+          assert.equal(options.retainScans, false);
+          assert.equal(typeof options.onRepository, "function");
           return emptyOrganizationResult();
         },
       },
@@ -224,8 +217,117 @@ test("agent execution context requires streamed output and stays quiet by defaul
     assert.equal(scans, 1);
     assert.equal(stderr, "");
     assert.ok(fs.existsSync(path.join(output, "organization-inventory.json")));
+
+    await assert.rejects(
+      runScanOrganization(
+        { org: "acme", progress: "auto", provided: new Set() },
+        {
+          cwd: workspace,
+          environment: { EXPRESS_RECON_CONTEXT: "agent" },
+          async scanOrganization() {
+            scans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /--overwrite.*No files were changed/,
+    );
+    assert.equal(scans, 1);
+
+    const overwritten = await runScanOrganization(
+      {
+        org: "acme",
+        overwrite: true,
+        progress: "auto",
+        provided: new Set(["--overwrite"]),
+      },
+      {
+        cwd: workspace,
+        environment: { EXPRESS_RECON_CONTEXT: "agent" },
+        async scanOrganization() {
+          scans++;
+          return emptyOrganizationResult();
+        },
+      },
+    );
+    assert.equal(overwritten, 0);
+    assert.equal(scans, 2);
   } finally {
-    fs.rmSync(output, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("default organization output refuses a symbolic .express-recon root", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-default-link-"));
+  const workspace = path.join(root, "workspace");
+  const blockedWorkspace = path.join(root, "blocked-workspace");
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(blockedWorkspace);
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(workspace, ".express-recon"), "dir");
+  fs.writeFileSync(path.join(blockedWorkspace, ".express-recon"), "not a directory");
+  try {
+    assert.throws(() => defaultOrganizationOutput("acme", workspace), /symbolic \.express-recon/);
+    assert.throws(
+      () => defaultOrganizationOutput("acme", blockedWorkspace),
+      /non-directory.*\.express-recon/,
+    );
+    assert.throws(
+      () => defaultOrganizationOutput("acme", path.join(root, "missing")),
+      /Could not resolve the scan-org working directory/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the default organization output supports checkpoint resume without --out", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-default-resume-"));
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  const output = defaultOrganizationOutput("acme", workspace);
+  let scans = 0;
+  try {
+    await assert.rejects(
+      runScanOrganization(
+        { org: "acme", progress: "none", provided: new Set(["--progress"]) },
+        {
+          cwd: workspace,
+          environment: { EXPRESS_RECON_CONTEXT: "agent" },
+          async scanOrganization() {
+            scans++;
+            throw new Error("interrupted after checkpoint creation");
+          },
+        },
+      ),
+      /interrupted after checkpoint creation/,
+    );
+    assert.ok(fs.existsSync(path.join(output, "organization-checkpoint.json")));
+
+    const code = await runScanOrganization(
+      {
+        org: "acme",
+        progress: "none",
+        resume: true,
+        provided: new Set(["--progress", "--resume"]),
+      },
+      {
+        cwd: workspace,
+        environment: { EXPRESS_RECON_CONTEXT: "agent" },
+        async scanOrganization(_organization, options) {
+          scans++;
+          assert.deepEqual(options.resumeEntries, []);
+          return emptyOrganizationResult();
+        },
+      },
+    );
+    assert.equal(code, 0);
+    assert.equal(scans, 2);
+    assert.ok(fs.existsSync(path.join(output, "organization-inventory.json")));
+    assert.equal(fs.existsSync(path.join(output, "organization-checkpoint.json")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -328,6 +430,29 @@ test("scan-org refuses unsafe generated output directories before enumeration", 
     );
     assert.equal(scans, 0);
     assert.deepEqual(fs.readdirSync(outside), []);
+
+    const linkedOutput = path.join(root, "linked-output");
+    fs.symlinkSync(outside, linkedOutput, "dir");
+    await assert.rejects(
+      runScanOrganization(
+        {
+          org: "acme",
+          out: linkedOutput,
+          overwrite: true,
+          progress: "auto",
+          provided: new Set(["--overwrite"]),
+        },
+        {
+          environment: { EXPRESS_RECON_CONTEXT: "agent" },
+          async scanOrganization() {
+            scans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /scan output is not a directory/,
+    );
+    assert.equal(scans, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -362,6 +487,7 @@ test("scan-org interactive overwrite starts fresh without deleting unrelated fil
     assert.equal(scans, 1);
     assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
     assert.ok(fs.existsSync(path.join(output, "organization-inventory.json")));
+    fs.writeFileSync(path.join(output, "organization-delta.json"), "stale\n");
 
     const overwritten = await runScanOrganization(
       {
@@ -385,6 +511,7 @@ test("scan-org interactive overwrite starts fresh without deleting unrelated fil
     assert.equal(overwritten, 0);
     assert.equal(scans, 2);
     assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+    assert.equal(fs.existsSync(path.join(output, "organization-delta.json")), false);
   } finally {
     fs.rmSync(output, { recursive: true, force: true });
   }
@@ -772,6 +899,133 @@ test("scan-org CLI orchestration streams detailed artifacts and writes a compact
   }
 });
 
+test("scan-org baseline writes bounded organization and exact route deltas", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-baseline-"));
+  const before = path.join(root, "before");
+  const current = path.join(root, "current");
+  fs.mkdirSync(before);
+  fs.mkdirSync(current);
+  const run = (output, routes, runOptions = {}) =>
+    runScanOrganization(
+      {
+        org: "acme",
+        out: output,
+        ...(runOptions.baseline ? { baseline: runOptions.baseline } : {}),
+        ...(runOptions.resume ? { resume: true } : {}),
+        includeArchived: false,
+        includeForks: false,
+        includeTests: false,
+      },
+      {
+        environment: {},
+        async scanOrganization(_organization, options) {
+          const item = { id: 1, name: "api", fullName: "acme/api" };
+          const scan = scanResult("acme/api", { express: true });
+          scan.repository.commit = String.fromCharCode(96 + routes.length).repeat(40);
+          scan.inventory.routes = routes;
+          scan.inventory.summary.routes = routes.length;
+          const express = { ...resumeEvidence(), routeCount: routes.length };
+          const artifacts = await options.onRepository({
+            repository: item,
+            status: "express",
+            express,
+            coverageComplete: true,
+            scan,
+          });
+          return {
+            schemaVersion: "1.0",
+            tool: "express-recon",
+            toolVersion: "0.8.0",
+            kind: "github-organization-inventory",
+            organization: { login: "acme" },
+            coverage: { complete: runOptions.complete !== false },
+            summary: { repositoriesResumed: 0, routes: routes.length },
+            repositories: [
+              {
+                repository: item,
+                status: "express",
+                commit: scan.repository.commit,
+                coverageComplete: true,
+                express,
+                artifacts,
+              },
+            ],
+          };
+        },
+      },
+    );
+  try {
+    const stable = {
+      applicationId: "app:src/app.js#app",
+      method: "GET",
+      path: "/health",
+      authStatus: "public",
+      middlewares: [],
+      tags: [],
+      roles: [],
+      scopes: [],
+    };
+    assert.equal(await run(before, [stable]), 0);
+    let overlapScans = 0;
+    await assert.rejects(
+      runScanOrganization(
+        {
+          org: "acme",
+          out: before,
+          baseline: before,
+          overwrite: true,
+          progress: "none",
+          provided: new Set(["--baseline", "--out", "--overwrite", "--progress"]),
+        },
+        {
+          environment: {},
+          async scanOrganization() {
+            overlapScans++;
+            return emptyOrganizationResult();
+          },
+        },
+      ),
+      /baseline directory and --out must be separate/,
+    );
+    assert.equal(overlapScans, 0);
+    assert.equal(
+      await run(current, [stable, { ...stable, method: "POST", path: "/accounts" }], {
+        baseline: before,
+        complete: false,
+      }),
+      0,
+    );
+    assert.ok(fs.existsSync(path.join(current, "comparison-baseline")));
+    assert.ok(fs.existsSync(path.join(current, "organization-checkpoint.json")));
+    assert.equal(
+      await run(
+        current,
+        [
+          stable,
+          { ...stable, method: "POST", path: "/accounts" },
+          { ...stable, method: "DELETE", path: "/accounts/:id" },
+        ],
+        { resume: true },
+      ),
+      0,
+    );
+    const delta = JSON.parse(
+      fs.readFileSync(path.join(current, "organization-delta.json"), "utf8"),
+    );
+    const aggregate = JSON.parse(
+      fs.readFileSync(path.join(current, "organization-inventory.json"), "utf8"),
+    );
+    assert.equal(delta.summary.addedRoutes, 2);
+    assert.equal(delta.repositories[0].changes.routes.details.addedRoutes[0].path, "/accounts");
+    assert.equal(aggregate.delta.summary.addedRoutes, 2);
+    assert.equal(aggregate.delta.artifact, "organization-delta.json");
+    assert.equal(aggregate.delta.repositories.length, 1);
+    assert.equal(fs.existsSync(path.join(current, "comparison-baseline")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("scan-org JSON progress reports durable checkpoints without contaminating artifacts", async () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-progress-"));
   let stderr = "";
@@ -877,32 +1131,37 @@ test("scan-org JSON progress reports durable checkpoints without contaminating a
 });
 
 test("scan-org JSON progress turns operational failures into redacted JSONL", async () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-json-failure-"));
   let stderr = "";
-  await assert.rejects(
-    runScanOrganization(
-      { org: "acme", progress: "json", includeArchived: false, includeForks: false },
-      {
-        environment: { GH_TOKEN: "token-for-test" },
-        progressStream: {
-          write(value) {
-            stderr += value;
-            return true;
+  try {
+    await assert.rejects(
+      runScanOrganization(
+        { org: "acme", out: output, progress: "json", includeArchived: false, includeForks: false },
+        {
+          environment: { GH_TOKEN: "token-for-test" },
+          progressStream: {
+            write(value) {
+              stderr += value;
+              return true;
+            },
+          },
+          async scanOrganization() {
+            throw new Error("GitHub rejected token-for-test");
           },
         },
-        async scanOrganization() {
-          throw new Error("GitHub rejected token-for-test");
-        },
-      },
-    ),
-    /token-for-test/,
-  );
-  const events = stderr
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  assert.equal(events.at(-1).event, "scan-failed");
-  assert.match(events.at(-1).error, /\[REDACTED\]/);
-  assert.doesNotMatch(stderr, /token-for-test/);
+      ),
+      /token-for-test/,
+    );
+    const events = stderr
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(events.at(-1).event, "scan-failed");
+    assert.match(events.at(-1).error, /\[REDACTED\]/);
+    assert.doesNotMatch(stderr, /token-for-test/);
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+  }
 });
 
 test("scan-org progress and quiet modes preserve incomplete CI gates", async () => {
@@ -1137,7 +1396,7 @@ test("library resume entries fail closed and repository identity changes force a
     [[null], /must be an object/],
     [[{ ...valid, repository: { fullName: "invalid" } }], /fullName is invalid/],
     [[{ ...valid, status: "failed" }], /not a complete resumable/],
-    [[{ ...valid, express: null }], /express must be an object/],
+    [[{ ...valid, express: null }], /must contain framework evidence/],
     [[{ ...valid, express: { detected: false } }], /does not match its status/],
     [[{ ...valid, command: "review" }], /command must be inventory or audit/],
     [[{ ...valid, commit: "bad" }], /commit must be a Git object id/],
@@ -1191,8 +1450,6 @@ test("organization and CLI limits fail before making a GitHub request", () => {
     ["scan-org"],
     ["scan-org", "--org", "acme", "--max-repos", "0"],
     ["scan-org", "--org", "invalid/name", "--out", "unused"],
-    ["scan-org", "--org", "acme", "--resume"],
-    ["scan-org", "--org", "acme", "--overwrite"],
     ["scan-org", "--org", "acme", "--out", "unused", "--resume", "--resume"],
     ["scan-org", "--org", "acme", "--out", "unused", "--overwrite", "--overwrite"],
     ["scan-org", "--org", "acme", "--out", "unused", "--resume", "--overwrite"],
@@ -1206,11 +1463,4 @@ test("organization and CLI limits fail before making a GitHub request", () => {
     assert.equal(result.status, 1, `${args.join(" ")} unexpectedly succeeded`);
     assert.ok(result.stderr.trim());
   }
-
-  const agentWithoutOutput = spawnSync(process.execPath, [CLI, "scan-org", "--org", "acme"], {
-    encoding: "utf8",
-    env: { ...process.env, EXPRESS_RECON_CONTEXT: "agent" },
-  });
-  assert.equal(agentWithoutOutput.status, 1);
-  assert.match(agentWithoutOutput.stderr, /requires scan-org --out <dir>/);
 });

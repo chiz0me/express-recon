@@ -71,6 +71,27 @@ test("--fail-on incomplete exits 2 when static source coverage has failures", ()
   assert.equal(JSON.parse(result.stdout).scanCoverage.complete, false);
 });
 
+test("--fail-on incomplete exits 2 when the static route graph is unresolved", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-opaque-cli-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      [
+        'const Fastify = require("fastify");',
+        "const app = Fastify();",
+        "app.route(buildRouteOptions());",
+      ].join("\n"),
+    );
+    const result = run(["audit", "--src", root, "--format", "json", "--fail-on", "incomplete"], 2);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.scanCoverage.complete, true);
+    assert.equal(report.routeGraph.complete, false);
+    assert.equal(report.routeGraph.opaqueMounts.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("audit --format openapi emits an OpenAPI 3.1 doc with a security section", () => {
   const doc = JSON.parse(run(["audit", "--src", FIXTURE, "--format", "openapi"]).stdout);
   assert.equal(doc.openapi, "3.1.0");

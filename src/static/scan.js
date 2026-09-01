@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { analyzeFile } = require("./analyze-file");
+const { STATIC_FRAMEWORK_ADAPTERS } = require("./adapters");
 const { extractIoHints } = require("./io-hints");
 const { createScopedResolver, EXTENSIONS } = require("./resolve");
 const { joinPath, scopedTo } = require("../walk");
@@ -20,6 +21,7 @@ const TEST_DIRS = new Set([
   "__mocks__",
 ]);
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+const DECLARATION_FILE = /\.d\.(?:ts|mts|cts)$/;
 const DEFAULT_IGNORE_FILE = ".express-reconignore";
 const DEFAULT_MAX_FILES = 50_000;
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -272,6 +274,11 @@ function listSourceFiles(dir, opts = {}) {
         if (!includeTests && TEST_DIRS.has(entry.name)) continue;
         stack.push(full);
       } else if (SOURCE_EXT.has(path.extname(entry.name))) {
+        // Declaration files describe types, not executable registrations. Some
+        // real-world ambient declarations intentionally use syntax that a
+        // runtime-oriented parser rejects; they must not make route coverage
+        // incomplete or consume the source budget.
+        if (DECLARATION_FILE.test(entry.name)) continue;
         if (!includeTests && TEST_FILE.test(entry.name)) continue;
         if (scope.matches(full)) {
           if (found.length >= maxFiles) {
@@ -389,11 +396,79 @@ function resolveImportedHandlers(files, resolve) {
   }
 }
 
+function registrarFromRefValue(file, ref, props, byPath, resolve, seen) {
+  if (!ref) return null;
+  if (ref.t === "factory") {
+    return props.length === 0 ? file.registrars.get(ref.fnStart) || null : null;
+  }
+  if (ref.t === "local") {
+    if (props.length) return null;
+    const fn = file.handlerIndex.get(ref.name);
+    return fn ? file.registrars.get(fn.start) || null : null;
+  }
+  if (ref.t === "object") {
+    if (!props.length) return null;
+    return registrarFromRefValue(
+      file,
+      ref.props.get(props[0]),
+      props.slice(1),
+      byPath,
+      resolve,
+      seen,
+    );
+  }
+  if (ref.t === "module") {
+    const target = resolve(file.filePath, ref.source);
+    const targetFile = target && byPath.get(target);
+    if (!targetFile) return null;
+    return resolveRegistrarExport(
+      targetFile,
+      ref.exportName,
+      [...(ref.props || []), ...props],
+      byPath,
+      resolve,
+      seen,
+    );
+  }
+  return null;
+}
+
+function resolveRegistrarExport(file, exportName, props, byPath, resolve, seen = new Set()) {
+  const key = `${file.filePath}#registrar:${exportName}#${props.join(".")}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+  const direct = file.exportRefs.get(exportName);
+  if (direct) return registrarFromRefValue(file, direct, props, byPath, resolve, seen);
+  if (exportName !== "default" && file.exportRefs.has("default")) {
+    const found = resolveRegistrarExport(
+      file,
+      "default",
+      [exportName, ...props],
+      byPath,
+      resolve,
+      seen,
+    );
+    if (found) return found;
+  }
+  for (const source of file.reExportAll) {
+    const target = resolve(file.filePath, source);
+    const targetFile = target && byPath.get(target);
+    const found =
+      targetFile && resolveRegistrarExport(targetFile, exportName, props, byPath, resolve, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
 /** Build the cross-file router graph from analyzed file models. */
 function buildGraph(files, resolve) {
   const byPath = new Map(files.map((f) => [f.filePath, f]));
   const nodes = new Map();
-  const stats = { dropped: 0 };
+  const stats = {
+    dropped: 0,
+    attachedRegistrars: new Set(),
+    attachedRegistrarSites: new Set(),
+  };
   const ensure = (id, kind, metadata = {}) => {
     if (!nodes.has(id)) {
       nodes.set(id, { id, kind, routes: [], globalMw: [], edges: [], opaqueUses: [], ...metadata });
@@ -438,6 +513,13 @@ function buildGraph(files, resolve) {
 
   const isRouteHost = (node) => node.kind === "app" || node.kind === "router";
 
+  // Seed every declared app/router before processing registrations. Without
+  // this pass an Express app that only calls `listen()` (or temporarily has no
+  // routes) disappears because no route/use edge ever asks the graph for it.
+  for (const file of files) {
+    for (const name of file.routers.keys()) resolveLocal(file, name);
+  }
+
   for (const file of files) {
     for (const route of file.routes) {
       const node = resolveLocal(file, route.host);
@@ -471,6 +553,24 @@ function buildGraph(files, resolve) {
         );
       }
     }
+    for (const invocation of file.registrarInvocations || []) {
+      const registrar = registrarFromRefValue(
+        file,
+        invocation.registrarRef,
+        [],
+        byPath,
+        resolve,
+        new Set(),
+      );
+      if (!registrar) continue;
+      const host = resolveLocal(file, invocation.host);
+      if (!isRouteHost(host)) continue;
+      for (const route of registrar.routes) {
+        host.routes.push({ ...route, file: registrar.file });
+        stats.attachedRegistrars.add(`${registrar.file}\0${route.registrarStart}`);
+        stats.attachedRegistrarSites.add(`${registrar.file}\0${route.line || 0}\0${route.method}`);
+      }
+    }
   }
   return { nodes, stats };
 }
@@ -494,6 +594,7 @@ function emitRoute(route, prefix, accMw, partial, out) {
   const full = dynamic ? joinPath(prefix, "<dynamic>") : joinPath(prefix, route.path);
   const chain = accMw.filter((e) => scopedTo(full, e.scopeAbs)).map((e) => e.mw);
   out.push({
+    framework: "express",
     method: route.method,
     path: full,
     middlewares: chain.concat(route.middlewares),
@@ -581,7 +682,7 @@ function diagnose({ appNodes, reachable, orphan, dropped, opaqueMounts }) {
   }
   if (opaqueMounts > 0) {
     out.push(
-      `${opaqueMounts} use() registration(s) may mount opaque route providers; ` +
+      `${opaqueMounts} opaque route-provider registration(s) could not be inspected; ` +
         "documentation-only operations under those mounts cannot be verified statically.",
     );
   }
@@ -589,7 +690,7 @@ function diagnose({ appNodes, reachable, orphan, dropped, opaqueMounts }) {
 }
 
 /**
- * Statically scan a repo for Express routes without executing any code.
+ * Statically scan a repository for supported framework routes without executing code.
  *
  * @param {string} rootDir  directory to scan
  * @param {{includeTests?: boolean, include?: string[], exclude?: string[], ignoreFile?: string|false}} [opts]
@@ -693,9 +794,22 @@ function scan(rootDir, opts = {}) {
     complete: failed === 0 && !limited,
     scope,
   };
-  const resolve = createScopedResolver(root);
+  const resolve = createScopedResolver(root, filePaths);
   resolveImportedHandlers(files, resolve);
   const { nodes, stats } = buildGraph(files, resolve);
+  const frameworkRegistries = STATIC_FRAMEWORK_ADAPTERS.map((adapter) => ({
+    adapter,
+    registry: adapter.build(files, resolve, root, {
+      claimedExpressRegistrarSites: stats.attachedRegistrarSites,
+    }),
+  }));
+  const claimedFrameworkSites = new Set(
+    frameworkRegistries.flatMap(({ registry }) =>
+      registry.routes.map(
+        (route) => `${route.source?.file || ""}\0${route.source?.line || 0}\0${route.method}`,
+      ),
+    ),
+  );
 
   const ctx = { out: [], visited: new Set() };
   const applications = [];
@@ -714,6 +828,8 @@ function scan(rootDir, opts = {}) {
     applications.push({
       id,
       name: `${path.relative(root, node.file).split(path.sep).join("/")}#${node.var}`,
+      framework: "express",
+      adapter: "express",
       source: { file: node.file, line: node.line },
       routeCount: appCtx.out.length,
       globalMiddleware: node.globalMw.map((entry) => entry.mw),
@@ -739,6 +855,10 @@ function scan(rootDir, opts = {}) {
   const registrarHosts = new Map();
   for (const file of files) {
     for (const route of file.registrarRoutes) {
+      if (stats.attachedRegistrars.has(`${file.filePath}\0${route.registrarStart}`)) continue;
+      if (claimedFrameworkSites.has(`${file.filePath}\0${route.line || 0}\0${route.method}`)) {
+        continue;
+      }
       emitRoute({ ...route, file: file.filePath }, "", [], true, ctx.out);
       const key = `'${route.host}' in ${file.filePath}`;
       registrarHosts.set(key, (registrarHosts.get(key) || 0) + 1);
@@ -774,6 +894,19 @@ function scan(rootDir, opts = {}) {
     opaqueSeen.add(key);
     return true;
   });
+  for (const { registry } of frameworkRegistries) {
+    routes.push(...registry.routes);
+    applications.push(...registry.applications);
+    globalMiddleware.push(...registry.globalMiddleware);
+    diagnostics.push(...registry.diagnostics);
+    for (const mount of registry.opaqueMounts || []) {
+      const key = `${mount.applicationId || ""}\0${mount.path || ""}\0${mount.source.file}:${mount.source.line}`;
+      if (!opaqueSeen.has(key)) {
+        opaqueSeen.add(key);
+        opaqueMounts.push(mount);
+      }
+    }
+  }
   diagnostics.push(
     ...diagnose({
       appNodes,
@@ -792,9 +925,11 @@ function scan(rootDir, opts = {}) {
   }
   const registrarRoutes = [...registrarHosts.values()].reduce((total, count) => total + count, 0);
   const orphanRoutes = routes.filter((route) => route.applicationId === null).length;
+  const partialRoutes = routes.filter((route) => route.pathConfidence === "partial").length;
   const routeGraph = {
-    complete: orphanRoutes === 0 && opaqueMounts.length === 0,
+    complete: orphanRoutes === 0 && partialRoutes === 0 && opaqueMounts.length === 0,
     orphanRoutes,
+    partialRoutes,
     registrarRoutes,
     opaqueMounts,
   };

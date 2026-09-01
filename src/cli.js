@@ -13,6 +13,7 @@ const {
   REPORT_SCHEMA,
   formatters,
   compareReports,
+  compareOrganizationReports,
   discover,
   reconcileDocumentation,
   createMiddlewareReview,
@@ -25,7 +26,9 @@ const { executeRuntime } = require("./runtime/execute");
 const { loadPackageInfo } = require("./static/resolve");
 const { loadConfig } = require("./config");
 const { loadReviewFile } = require("./review");
+const { defaultRenderOutput, detectRenderInput } = require("./html");
 const { DEFAULT_MAX_REPOSITORIES, validateOrganization } = require("./organization");
+const { COMPLETE_REPOSITORY_STATUSES } = require("./frameworks");
 const { PROGRESS_MODES, createOrganizationProgressReporter } = require("./organization-progress");
 const {
   CHECKPOINT_FILENAME,
@@ -37,9 +40,20 @@ const {
   organizationCheckpointIdentity,
   withCompleted,
 } = require("./organization-checkpoint");
+const {
+  assertComparableOrganizations,
+  loadOrganizationSnapshot,
+  referencedRepositoryScan,
+  snapshotFromReport,
+} = require("./organization-compare");
+
+const ORGANIZATION_DELTA_FILENAME = "organization-delta.json";
+const ORGANIZATION_BASELINE_DIRECTORY = "comparison-baseline";
+const MAX_ORGANIZATION_DELTA_BYTES = 32 * 1024 * 1024;
+const MAX_ORGANIZATION_BASELINE_BYTES = 256 * 1024 * 1024;
 
 const USAGE = `
-express-recon — inventory & audit Express 4/5 route surfaces
+express-recon — offline HTTP route inventory and auth audit
 
 Usage: express-recon <command> [options]
 
@@ -50,7 +64,7 @@ Quick start (offline; target code is not executed):
   express-recon audit --src . --config recon.config.yaml --format json,md --out .express-recon
 
 Commands:
-  discover      Find packages, Express apps, entry candidates, and API docs
+  discover      Find Express, Fastify, and NestJS apps, entry candidates, and API docs
                 without executing target code.
   inventory     List every route, method, middleware chain, and source location.
   audit         Inventory + classify each route as proven/public/unknown against
@@ -67,13 +81,16 @@ Commands:
                 bounded source/docs files, then discover, inventory/audit, and
                 reconcile documentation when possible. Never executes target code.
   scan-org      Enumerate API-visible repositories in one GitHub organization,
-                scan them statically, and build an aggregate Express inventory.
-  render        Generate a browsable offline HTML site from an existing report
-                JSON file or express-recon output directory. Does not rescan.
+                scan them statically, and build a framework-aware HTTP inventory.
+  render        Generate a browsable offline HTML site from an existing report,
+                OpenAPI 3 JSON/YAML file, or output directory. Does not rescan.
   schema        Print the JSON Schema of the report contract and exit.
+  help          Print this help text and exit.
 
 Options:
   --mode static|runtime|hybrid   default: static
+                        static supports Express, Fastify, and NestJS;
+                        runtime/hybrid currently support Express only.
   --src <dir>           repo root to statically scan (static/hybrid; default cwd)
   --app <path|auto>     JS file exporting the Express app (runtime/hybrid).
                         Executes trusted target code in a bounded worker process.
@@ -88,8 +105,11 @@ Options:
                         auto-detected when omitted).
   --review <path>       middleware-review.json input for import-review.
   --assessment <path>   JSON/YAML assessment input for import-review.
-  --input <path>        routes.json, repo-scan.json, organization-inventory.json,
-                        or a directory containing one of those files (render only).
+  --input <path>        OpenAPI 3 JSON/YAML, routes.json, repo-scan.json,
+                        organization-inventory.json, or a directory containing a
+                        conventional filename for one of them (render only).
+                        Optional when exactly one input is discoverable in the
+                        current directory or an immediate .express-recon child.
   --repo <url|owner/repo|path>
                         repository for scan-repo (HTTPS/GitHub shorthand/local).
   --org <name>          GitHub organization for scan-org. GH_TOKEN or GITHUB_TOKEN
@@ -97,8 +117,8 @@ Options:
   --ref <git-ref>       branch, tag, or commit to fetch (default: remote HEAD).
   --max-repos <n>       scan-org repository cap (default 100; maximum 10000).
   --concurrency <n>     scan-org snapshots processed at once (default 1; maximum 8).
-  --resume              resume a scan-org run from the checkpoint in --out.
-  --overwrite           start a fresh scan-org run in a nonempty --out directory;
+  --resume              resume a scan-org run from the checkpoint in its output.
+  --overwrite           start a fresh scan-org run in a nonempty output directory;
                         replace colliding organization artifacts, keep other files.
   --progress <mode>     scan-org progress on stderr: auto, plain, json, or none
                         (default: auto; TTY status locally, plain lines in CI).
@@ -111,12 +131,18 @@ Options:
                         discovery/review/repository commands.
                         openapi emits an OpenAPI 3.1 document (openapi.json); use
                         audit plus an explicit security mapping to add security.
-  --out <dir>           write command-specific artifacts into <dir> (else stdout).
-                        Required by render and agent-initiated organization scans.
-  --baseline <path>     compare with a prior JSON report; adds delta/new findings
+  --out <dir>           override the command's artifact directory (else stdout
+                        for commands without a documented default).
+                        render defaults to a sibling <input>-html directory;
+                        scan-org defaults to .express-recon/<lowercase-org>.
+  --baseline <path>     inventory/audit: compare with a prior routes.json report.
+                        scan-org: compare with a prior organization output folder
+                        and emit bounded repository/route change evidence.
+                        render: build those change views from two saved folders.
   --fail-on <statuses>  audit: exit 2 if any route matches, e.g. public or
                         public,unknown, policy / policy:<id>, new, regression,
-                        or incomplete (static/hybrid files failed to parse/read;
+                        or incomplete (static/hybrid source or route-graph
+                        evidence is unresolved;
                         rejected in pure runtime mode).
                         For CI gates and agent assertions.
                         docs accepts docs-drift, docs-conflict, docs-incomplete.
@@ -129,12 +155,12 @@ Options:
   --include-tests       also scan test files/dirs (excluded by default)
   --include-hidden      also scan hidden directories such as .cursor (default: exclude;
                         .git and generated/vendor directories remain excluded)
-  --version             print the installed express-recon version and exit
-  --help                show this message
+  --version, -V         print the installed express-recon version and exit
+  --help, -h            show this message
 
 Environment:
   EXPRESS_RECON_CONTEXT=agent
-                        scan-org requires --out and defaults progress to none.
+                        scan-org uses its default output and progress mode none.
                         Existing output requires explicit --resume or --overwrite.
                         Explicit --progress/--no-progress always takes precedence.
   EXPRESS_RECON_CONTEXT=ci
@@ -446,12 +472,9 @@ function validateArgs(args) {
     }
   }
   if (args.command === "render") {
-    const supported = new Set(["--input", "--out"]);
+    const supported = new Set(["--baseline", "--input", "--out"]);
     const unsupported = [...args.provided].filter((option) => !supported.has(option));
     if (unsupported.length) throw new Error(`render does not accept ${unsupported.join(", ")}`);
-    if (!args.input || !args.out) {
-      throw new Error("render requires --input <report-or-dir> and --out <dir>");
-    }
   }
   if (args.command === "scan-repo") {
     const supported = new Set([
@@ -480,6 +503,7 @@ function validateArgs(args) {
   if (args.command === "scan-org") {
     const supported = new Set([
       "--concurrency",
+      "--baseline",
       "--config",
       "--exclude",
       "--fail-on",
@@ -503,10 +527,6 @@ function validateArgs(args) {
     if (unsupported.length) throw new Error(`scan-org does not accept ${unsupported.join(", ")}`);
     if (!args.org) throw new Error("scan-org requires --org <name>");
     validateOrganization(args.org);
-    if (args.resume && !args.out) throw new Error("scan-org --resume requires --out <dir>");
-    if (args.overwrite && !args.out) {
-      throw new Error("scan-org --overwrite requires --out <dir>");
-    }
     if (args.resume && args.overwrite) {
       throw new Error("scan-org --resume and --overwrite cannot be used together");
     }
@@ -594,6 +614,31 @@ function resolvePath(p) {
   return path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
 }
 
+/** Derive the durable organization output without trusting the org as a path. */
+function defaultOrganizationOutput(organization, cwd = process.cwd()) {
+  validateOrganization(organization);
+  let root;
+  try {
+    root = fs.realpathSync(path.resolve(cwd));
+  } catch (value) {
+    const err = value instanceof Error ? value : new Error(String(value));
+    throw new Error(`Could not resolve the scan-org working directory: ${err.message}`);
+  }
+  if (!fs.lstatSync(root).isDirectory()) {
+    throw new Error(`scan-org working directory is not a directory: ${root}`);
+  }
+  const reconRoot = path.join(root, ".express-recon");
+  if (fs.existsSync(reconRoot)) {
+    const stat = fs.lstatSync(reconRoot);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(
+        "scan-org cannot use the default output through a non-directory or symbolic .express-recon entry; pass --out explicitly",
+      );
+    }
+  }
+  return path.join(reconRoot, organization.toLowerCase());
+}
+
 async function loadRuntime(appPath, boot) {
   if (!appPath) die("runtime/hybrid mode requires --app");
   const resolved = resolvePath(appPath);
@@ -613,11 +658,20 @@ async function harnessOpts(args, config) {
         result.applications.map((application) => application.recommendedEntry).filter(Boolean),
       ),
     ];
-    if (result.applications.length !== 1 || entries.length !== 1) {
+    if (result.applications.length !== 1) {
       throw new Error(
-        `--app auto requires exactly one detected application and one high-confidence entry; ` +
-          `found ${result.applications.length} application(s) and ${entries.length} entry candidate(s): ` +
-          `${entries.join(", ") || "none"}`,
+        `--app auto requires exactly one detected application; found ${result.applications.length}`,
+      );
+    }
+    if ((result.applications[0].framework || "express") !== "express") {
+      throw new Error(
+        `--app auto found a ${result.applications[0].framework} application, but runtime/hybrid observation currently supports Express only; use --mode static`,
+      );
+    }
+    if (entries.length !== 1) {
+      throw new Error(
+        `--app auto requires one high-confidence entry for the detected Express application; ` +
+          `found ${entries.length}: ${entries.join(", ") || "none"}`,
       );
     }
     if (args.appId && args.appId !== result.applications[0].id) {
@@ -684,7 +738,11 @@ function writeReport(report, args) {
 }
 
 function runRender(args) {
-  const result = renderHtmlSite(resolvePath(args.input), resolvePath(args.out));
+  const input = args.input ? resolvePath(args.input) : detectRenderInput(process.cwd());
+  const output = args.out ? resolvePath(args.out) : defaultRenderOutput(input);
+  const result = renderHtmlSite(input, output, {
+    baseline: args.baseline ? resolvePath(args.baseline) : undefined,
+  });
   process.stdout.write(
     JSON.stringify(
       {
@@ -732,7 +790,10 @@ function failOnExit(report, failOn) {
     ? (report.delta?.authRegressions.length ?? 0)
     : 0;
   const incompleteHits =
-    statuses.includes("incomplete") && report.scanCoverage?.complete === false ? 1 : 0;
+    statuses.includes("incomplete") &&
+    (report.scanCoverage?.complete === false || report.routeGraph?.complete === false)
+      ? 1
+      : 0;
   const total = count + newHits + regressionHits + incompleteHits;
   if (total === 0) return 0;
   process.stderr.write(`express-recon: ${total} result(s) matched --fail-on ${failOn}\n`);
@@ -957,21 +1018,36 @@ function organizationOutputEntry(output, name, expected) {
 }
 
 function ensureOrganizationOutputDirectory(directory) {
+  const resolved = path.resolve(directory);
   let stat;
   try {
-    stat = fs.lstatSync(directory);
+    stat = fs.lstatSync(resolved);
   } catch (value) {
     const err = value instanceof Error ? value : new Error(String(value));
     if (err.code !== "ENOENT") {
       throw new Error(
-        `Could not inspect organization output directory ${directory}: ${err.message}`,
+        `Could not inspect organization output directory ${resolved}: ${err.message}`,
       );
     }
-    fs.mkdirSync(directory);
-    stat = fs.lstatSync(directory);
+    const parent = path.dirname(resolved);
+    if (parent === resolved) {
+      throw new Error(`Could not create organization output directory: ${resolved}`);
+    }
+    ensureOrganizationOutputDirectory(parent);
+    try {
+      fs.mkdirSync(resolved, { mode: 0o700 });
+    } catch (mkdirValue) {
+      const mkdirError = mkdirValue instanceof Error ? mkdirValue : new Error(String(mkdirValue));
+      if (mkdirError.code !== "EEXIST") {
+        throw new Error(
+          `Could not create organization output directory ${resolved}: ${mkdirError.message}`,
+        );
+      }
+    }
+    stat = fs.lstatSync(resolved);
   }
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error(`Organization output path must be a regular directory: ${directory}`);
+    throw new Error(`Organization output path must be a regular directory: ${resolved}`);
   }
 }
 
@@ -990,8 +1066,8 @@ function inspectOrganizationOutput(outDir) {
   let stat;
   let entries;
   try {
-    stat = fs.statSync(output);
-    if (!stat.isDirectory()) {
+    stat = fs.lstatSync(output);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error(`Organization scan output is not a directory: ${output}`);
     }
     entries = fs.readdirSync(output);
@@ -1004,6 +1080,8 @@ function inspectOrganizationOutput(outDir) {
   for (const [name, expected] of [
     [CHECKPOINT_FILENAME, "file"],
     ["organization-inventory.json", "file"],
+    [ORGANIZATION_DELTA_FILENAME, "file"],
+    [ORGANIZATION_BASELINE_DIRECTORY, "directory"],
     ["repositories", "directory"],
   ]) {
     if (names.has(name)) organizationOutputEntry(output, name, expected);
@@ -1016,6 +1094,146 @@ function inspectOrganizationOutput(outDir) {
     hasInventory: names.has("organization-inventory.json"),
     hasRepositories: names.has("repositories"),
   };
+}
+
+function pathContains(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === "" ||
+    (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+  );
+}
+
+function validateOrganizationBaselineLocation(snapshot, outDir) {
+  const output = path.resolve(outDir);
+  if (snapshot.directoryInput) {
+    if (pathContains(output, snapshot.input) || pathContains(snapshot.input, output)) {
+      throw new Error(
+        "scan-org --baseline directory and --out must be separate, non-nested directories",
+      );
+    }
+  } else if (pathContains(output, snapshot.file)) {
+    throw new Error("scan-org --baseline report must not be inside --out");
+  }
+}
+
+function removeOrganizationDelta(outDir) {
+  const file = path.join(outDir, ORGANIZATION_DELTA_FILENAME);
+  if (!fs.existsSync(file)) return;
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Organization delta artifact must be a regular file: ${file}`);
+  }
+  fs.rmSync(file);
+}
+
+function removeOrganizationBaseline(outDir) {
+  const directory = path.join(outDir, ORGANIZATION_BASELINE_DIRECTORY);
+  if (!fs.existsSync(directory)) return;
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`Organization comparison baseline must be a regular directory: ${directory}`);
+  }
+  fs.rmSync(directory, { recursive: true });
+}
+
+/**
+ * Copy only report artifacts needed for a future comparison into resumable
+ * scan state. Source snapshots are deliberately excluded and remain subject to
+ * per-repository cleanup.
+ */
+function persistOrganizationBaseline(snapshot, outDir) {
+  const temporary = fs.mkdtempSync(path.join(outDir, ".comparison-baseline-"));
+  let bytes = 0;
+  try {
+    const repositories = snapshot.report.repositories.map((value) => {
+      const entry = structuredClone(value);
+      delete entry.scan;
+      delete entry.artifacts;
+      if (entry.coverageComplete === true && COMPLETE_REPOSITORY_STATUSES.has(entry.status)) {
+        const scan = referencedRepositoryScan(snapshot, value);
+        const artifactName = organizationArtifactName(entry.repository);
+        const relative = path.posix.join("repositories", artifactName, "repo-scan.json");
+        const serialized = JSON.stringify(scan, null, 2) + "\n";
+        bytes += Buffer.byteLength(serialized);
+        if (bytes > MAX_ORGANIZATION_BASELINE_BYTES) {
+          throw new Error(
+            `Organization comparison baseline exceeds the ${MAX_ORGANIZATION_BASELINE_BYTES}-byte limit`,
+          );
+        }
+        const file = path.join(temporary, ...relative.split("/"));
+        fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(file, serialized, { mode: 0o600 });
+        entry.artifacts = { repositoryScan: relative };
+      }
+      return entry;
+    });
+    const report = structuredClone(snapshot.report);
+    report.repositories = repositories;
+    delete report.delta;
+    const aggregate = JSON.stringify(report, null, 2) + "\n";
+    bytes += Buffer.byteLength(aggregate);
+    if (bytes > MAX_ORGANIZATION_BASELINE_BYTES) {
+      throw new Error(
+        `Organization comparison baseline exceeds the ${MAX_ORGANIZATION_BASELINE_BYTES}-byte limit`,
+      );
+    }
+    fs.writeFileSync(path.join(temporary, "organization-inventory.json"), aggregate, {
+      mode: 0o600,
+    });
+    removeOrganizationBaseline(outDir);
+    fs.renameSync(temporary, path.join(outDir, ORGANIZATION_BASELINE_DIRECTORY));
+  } catch (error) {
+    fs.rmSync(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function compactOrganizationDelta(delta) {
+  const repositories = delta.repositories.slice(0, 20).map((entry) => ({
+    repository: entry.repository,
+    change: entry.change,
+    before: entry.before ? { status: entry.before.status, routes: entry.before.routes } : null,
+    after: entry.after ? { status: entry.after.status, routes: entry.after.routes } : null,
+    ...(entry.changes?.routes ? { routeChanges: entry.changes.routes.summary } : {}),
+  }));
+  return {
+    kind: delta.kind,
+    artifact: ORGANIZATION_DELTA_FILENAME,
+    organization: delta.organization,
+    baseline: delta.baseline,
+    current: delta.current,
+    coverage: delta.coverage,
+    summary: delta.summary,
+    repositories,
+    repositoriesTruncated: delta.repositories.length > repositories.length,
+  };
+}
+
+/**
+ * Enforce the on-disk delta limit by dropping retained route examples before
+ * exact counts. Counts are the automation contract; details are a bounded
+ * convenience for human review.
+ */
+function serializedOrganizationDelta(delta) {
+  let serialized = JSON.stringify(delta, null, 2);
+  if (Buffer.byteLength(serialized) <= MAX_ORGANIZATION_DELTA_BYTES) return serialized;
+  for (const entry of delta.repositories) {
+    const routes = entry.changes?.routes;
+    if (!routes?.details) continue;
+    delete routes.details;
+    routes.detailsRetained = 0;
+    routes.detailsTruncated = true;
+  }
+  delta.summary.detailsRetained = 0;
+  delta.summary.detailsTruncated = true;
+  serialized = JSON.stringify(delta, null, 2);
+  if (Buffer.byteLength(serialized) > MAX_ORGANIZATION_DELTA_BYTES) {
+    throw new Error(
+      `Organization delta exceeds the ${MAX_ORGANIZATION_DELTA_BYTES}-byte limit even without route details`,
+    );
+  }
+  return serialized;
 }
 
 function organizationOutputConflictError(state) {
@@ -1159,7 +1377,8 @@ function writeRepositoryArtifacts(outDir, repository, scan) {
 
 async function executeScanOrganization(args, dependencies, reporter) {
   const config = loadConfig(args.config);
-  const outDir = args.out ? resolvePath(args.out) : null;
+  if (!args.out) throw new Error("scan-org output directory was not resolved");
+  const outDir = resolvePath(args.out);
   const environment = dependencies.environment || process.env;
   const token = environment.GH_TOKEN || environment.GITHUB_TOKEN || undefined;
   const scan = dependencies.scanOrganization || scanOrganization;
@@ -1173,8 +1392,35 @@ async function executeScanOrganization(args, dependencies, reporter) {
     includeArchived: args.includeArchived,
     includeForks: args.includeForks,
   });
-  const checkpointFile = outDir ? checkpointPath(outDir) : null;
-  let checkpoint = outDir ? initialCheckpoint(args.org, identity) : null;
+  const internalBaseline = path.join(outDir, ORGANIZATION_BASELINE_DIRECTORY);
+  const baselineInput = args.baseline
+    ? resolvePath(args.baseline)
+    : args.resume && fs.existsSync(internalBaseline)
+      ? internalBaseline
+      : null;
+  let baselineSnapshot = baselineInput ? loadOrganizationSnapshot(baselineInput) : null;
+  const baselineIsInternal =
+    baselineSnapshot && path.resolve(baselineSnapshot.input) === path.resolve(internalBaseline);
+  if (baselineSnapshot) {
+    if (!baselineIsInternal) validateOrganizationBaselineLocation(baselineSnapshot, outDir);
+    assertComparableOrganizations(baselineSnapshot.report, {
+      kind: "github-organization-inventory",
+      organization: { login: args.org },
+      scope: {
+        fingerprint: identity.fingerprint,
+        includeArchived: args.includeArchived === true,
+        includeForks: args.includeForks === true,
+        maxRepositories,
+        configHash: identity.scope.configHash,
+        scanHash: identity.scope.scanHash,
+      },
+      coverage: { complete: false },
+      summary: {},
+      repositories: [],
+    });
+  }
+  const checkpointFile = checkpointPath(outDir);
+  let checkpoint = initialCheckpoint(args.org, identity);
   let resumeEntries = [];
   const resumeDiagnostics = [];
   const progressRepositories = new Set();
@@ -1188,13 +1434,21 @@ async function executeScanOrganization(args, dependencies, reporter) {
     if (event.event === "scan-finished") finishedProgress = true;
     reporter.emit(event);
   };
+  ensureOrganizationOutputDirectory(outDir);
+  removeOrganizationDelta(outDir);
+  if (baselineSnapshot && !baselineIsInternal) {
+    persistOrganizationBaseline(baselineSnapshot, outDir);
+    baselineSnapshot = loadOrganizationSnapshot(internalBaseline);
+  } else if (!baselineSnapshot && !args.resume) {
+    removeOrganizationBaseline(outDir);
+  }
   if (args.resume) {
     const loaded = loadCheckpoint(checkpointFile, args.org, identity, outDir);
     checkpoint = loaded.checkpoint;
     resumeEntries = loaded.entries;
     resumeDiagnostics.push(...loaded.diagnostics);
     if (loaded.migratedFromToolVersion) atomicWriteJson(checkpointFile, checkpoint);
-  } else if (checkpointFile) {
+  } else {
     atomicWriteJson(checkpointFile, checkpoint);
   }
   for (const diagnostic of resumeDiagnostics) {
@@ -1219,32 +1473,30 @@ async function executeScanOrganization(args, dependencies, reporter) {
     includeArchived: args.includeArchived,
     includeForks: args.includeForks,
     resumeEntries,
-    retainScans: !outDir,
+    retainScans: false,
     onProgress: reportProgress,
-    onRepository: outDir
-      ? (payload) => {
-          const artifacts = writeRepositoryArtifacts(outDir, payload.repository, payload.scan);
-          const completed = checkpointEntry(payload, artifacts, outDir);
-          if (completed) {
-            const next = withCompleted(checkpoint, completed);
-            atomicWriteJson(checkpointFile, next);
-            checkpoint = next;
-            reportProgress({
-              event: "checkpoint-written",
-              organization: args.org,
-              repository: payload.repository.fullName,
-              completedRepositories: checkpoint.completed.length,
-              total: lastProgress.total,
-            });
-          }
-          return artifacts;
-        }
-      : undefined,
+    onRepository: (payload) => {
+      const artifacts = writeRepositoryArtifacts(outDir, payload.repository, payload.scan);
+      const completed = checkpointEntry(payload, artifacts, outDir);
+      if (completed) {
+        const next = withCompleted(checkpoint, completed);
+        atomicWriteJson(checkpointFile, next);
+        checkpoint = next;
+        reportProgress({
+          event: "checkpoint-written",
+          organization: args.org,
+          repository: payload.repository.fullName,
+          completedRepositories: checkpoint.completed.length,
+          total: lastProgress.total,
+        });
+      }
+      return artifacts;
+    },
   });
   result.resume = {
     requested: args.resume === true,
     repositoriesReused: result.summary?.repositoriesResumed || 0,
-    checkpoint: result.coverage.complete || !outDir ? null : CHECKPOINT_FILENAME,
+    checkpoint: result.coverage.complete ? null : CHECKPOINT_FILENAME,
   };
   for (const entry of result.repositories) {
     if (
@@ -1278,15 +1530,40 @@ async function executeScanOrganization(args, dependencies, reporter) {
       total: selectedResults.length,
       failed: result.summary?.failedRepositories || 0,
       expressRepositories: result.summary?.expressRepositories || 0,
+      supportedRepositories: result.summary?.supportedRepositories || 0,
+      fastifyRepositories: result.summary?.fastifyRepositories || 0,
+      nestjsRepositories: result.summary?.nestjsRepositories || 0,
       failedRepositories: result.summary?.failedRepositories || 0,
       inconclusiveRepositories: result.summary?.inconclusiveRepositories || 0,
+      incompleteRouteGraphs: result.summary?.incompleteRouteGraphs || 0,
       repositoriesResumed: result.summary?.repositoriesResumed || 0,
     });
   }
+  if (baselineSnapshot) {
+    // Compute and persist the full delta before embedding its compact projection
+    // in the aggregate. A consumer never sees an aggregate that advertises a
+    // delta artifact which has not yet been written durably.
+    const currentSnapshot = snapshotFromReport(result, outDir);
+    const delta = compareOrganizationReports(baselineSnapshot.report, result, {
+      loadBaselineScan: (entry) => referencedRepositoryScan(baselineSnapshot, entry),
+      loadCurrentScan: (entry) => referencedRepositoryScan(currentSnapshot, entry),
+    });
+    const serializedDelta = serializedOrganizationDelta(delta);
+    result.delta = compactOrganizationDelta(delta);
+    emit(serializedDelta, "json", outDir, ORGANIZATION_DELTA_FILENAME);
+  }
   emit(JSON.stringify(result, null, 2), "json", outDir, "organization-inventory.json");
-  if (result.coverage.complete && checkpointFile) fs.rmSync(checkpointFile, { force: true });
-  if (args.failOn === "incomplete" && !result.coverage.complete) {
-    const message = "organization inventory is incomplete";
+  if (result.coverage.complete) {
+    // The internal baseline is resume state, not historical storage. Remove it
+    // only after the completed aggregate (and optional delta) is durable.
+    fs.rmSync(checkpointFile, { force: true });
+    removeOrganizationBaseline(outDir);
+  }
+  const comparisonIncomplete = result.delta?.coverage?.complete === false;
+  if (args.failOn === "incomplete" && (!result.coverage.complete || comparisonIncomplete)) {
+    const message = result.coverage.complete
+      ? "organization baseline comparison is incomplete"
+      : "organization inventory is incomplete";
     if (reporter.mode === "none") {
       (dependencies.stderr || process.stderr).write(`express-recon: ${message}\n`);
     } else {
@@ -1306,12 +1583,17 @@ async function runScanOrganization(args, dependencies = {}) {
   validateOrganization(args.org);
   const environment = dependencies.environment || process.env;
   const executionContext = resolveExecutionContext(environment);
-  if (executionContext === "agent" && !args.out) {
-    throw new Error(
-      "EXPRESS_RECON_CONTEXT=agent requires scan-org --out <dir> to keep detailed reports out of model context",
-    );
-  }
-  const effectiveArgs = await resolveOrganizationOutputArgs(args, dependencies, executionContext);
+  const outputArgs = args.out
+    ? args
+    : {
+        ...args,
+        out: defaultOrganizationOutput(args.org, dependencies.cwd || process.cwd()),
+      };
+  const effectiveArgs = await resolveOrganizationOutputArgs(
+    outputArgs,
+    dependencies,
+    executionContext,
+  );
   const reporter =
     dependencies.progressReporter ||
     createOrganizationProgressReporter({
@@ -1385,6 +1667,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  defaultOrganizationOutput,
   inspectOrganizationOutput,
   main,
   normalizeOrganizationOutputChoice,

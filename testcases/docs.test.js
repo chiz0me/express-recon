@@ -95,7 +95,7 @@ test("cross-package documentation requires an explicit application confirmation"
     });
     assert.throws(
       () => reconcileDocumentation(report, { root }),
-      /outside the detected Express application package service/,
+      /outside the detected application package service/,
     );
     const explicit = reconcileDocumentation(report, {
       root,

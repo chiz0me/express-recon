@@ -29,7 +29,17 @@ const SCAN_KEYS = new Set([
 ]);
 const OPENAPI_KEYS = new Set(["securityByTag", "securitySchemes"]);
 const ACCEPTED_PUBLIC_KEYS = new Set(["applicationId", "method", "path"]);
-const ROUTE_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ALL"]);
+const ROUTE_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+  "TRACE",
+  "ALL",
+]);
 
 function plainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -50,7 +60,7 @@ function acceptedPublicKey(entry, index) {
   if (typeof entry === "string") {
     if (
       entry !== entry.trim() ||
-      !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|ALL) \/[^\r\n]*$/.test(entry)
+      !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|ALL) \/[^\r\n]*$/.test(entry)
     ) {
       throw new Error(
         `acceptedPublic entry "${entry}" must use the form "METHOD /path" with an uppercase method`,
@@ -121,6 +131,11 @@ function validateOpenApi(value) {
   }
 }
 
+/**
+ * Validate the complete data/configuration contract and reject unknown fields.
+ * The returned object is the caller's value after nested validators have
+ * confirmed it; this function does not execute or otherwise transform config.
+ */
 function validateConfig(value) {
   if (!plainObject(value)) throw new Error("configuration must be an object");
   knownKeys(value, CONFIG_KEYS, "configuration");

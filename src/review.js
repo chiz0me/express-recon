@@ -366,6 +366,10 @@ function collectCandidates(report, root) {
   return candidates;
 }
 
+/**
+ * Build a bounded, provider-neutral middleware evidence bundle for review by a
+ * person or model. Evidence is advisory and cannot alter audit classification.
+ */
 function createMiddlewareReview(report, opts = {}) {
   const root = path.resolve(opts.root || process.cwd());
   const limits = scanLimits(opts.scan || {});
@@ -484,6 +488,11 @@ function validateStrings(value, label) {
   }
 }
 
+/**
+ * Validate an assessment document independently of an evidence bundle. Use
+ * applyMiddlewareAssessments() when fingerprint and candidate matching are
+ * also required.
+ */
 function validateAssessment(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("assessment must be an object");
@@ -563,6 +572,11 @@ function defaultTag(classification) {
   return "authenticated";
 }
 
+/**
+ * Bind a validated assessment to the exact evidence bundle that produced it
+ * and return advisory configuration suggestions. Stale or unknown candidates
+ * fail closed; no project files are changed.
+ */
 function applyMiddlewareAssessments(bundle, assessment) {
   if (!bundle || bundle.kind !== "middleware-review-bundle") {
     throw new Error("review bundle is not an express-recon middleware-review-bundle");

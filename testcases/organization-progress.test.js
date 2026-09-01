@@ -130,9 +130,10 @@ test("plain progress renders every organization lifecycle event", () => {
         status: "express",
         routes: 4,
         applications: 1,
+        routeGraphComplete: false,
         durationMs: 1_250,
       },
-      /COMPLETE acme\/api · express · 4 routes · 1 apps · 1\.3s/,
+      /COMPLETE acme\/api · express · 4 routes · 1 apps · route graph incomplete · 1\.3s/,
     ],
     [
       {

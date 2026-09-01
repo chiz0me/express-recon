@@ -181,7 +181,8 @@ function mergePair(route, match) {
  * the audit doesn't miss them. A partial static route that unambiguously
  * matches a runtime route by suffix is merged instead of double-reported: the
  * runtime view wins (it saw the real mount wiring and middleware), the static
- * source location is kept.
+ * source location is kept. Ambiguous observations are never assigned to the
+ * first matching application or path.
  *
  * @param {{routes: object[], globalMiddleware: object[]}} staticReg
  * @param {{routes: object[], globalMiddleware: object[]}} runtimeReg

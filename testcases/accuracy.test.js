@@ -120,12 +120,13 @@ test("a configured transparent wrapper may prove its inner auth middleware", () 
 
 const REGISTRAR = path.join(__dirname, "fixtures", "registrar-app");
 
-test("registrar-pattern routes surface as partial orphans with a diagnostic", () => {
+test("registrar-pattern routes attach at known calls and retain unmounted evidence", () => {
   const { routes, diagnostics } = audit({ mode: "static", src: REGISTRAR }, CONFIG);
   const keyed = index(routes);
   assert.equal(keyed["POST /reg/users"].authStatus, "proven");
-  assert.equal(keyed["POST /reg/users"].pathConfidence, "partial");
+  assert.equal(keyed["POST /reg/users"].pathConfidence, "full");
   assert.equal(keyed["GET /reg/health"].authStatus, "public");
+  assert.equal(keyed["GET /unmounted"].pathConfidence, "partial");
   assert.ok(diagnostics.some((d) => /registrar/.test(d)));
 });
 

@@ -111,18 +111,72 @@ function readJson(file, limits, diagnostics) {
   }
 }
 
-function expressDependency(manifest) {
-  for (const field of [
-    "dependencies",
-    "devDependencies",
-    "peerDependencies",
-    "optionalDependencies",
-  ]) {
-    if (manifest[field] && typeof manifest[field].express === "string") {
-      return { field, range: manifest[field].express };
+const DEPENDENCY_FIELDS = Object.freeze([
+  ["dependencies", "runtime", "strong"],
+  ["optionalDependencies", "optional", "strong"],
+  ["peerDependencies", "peer", "supporting"],
+  ["devDependencies", "development", "weak"],
+]);
+
+function packageDependency(manifest, packageName) {
+  for (const [field, scope, strength] of DEPENDENCY_FIELDS) {
+    if (manifest[field] && typeof manifest[field][packageName] === "string") {
+      return {
+        package: packageName,
+        field,
+        range: manifest[field][packageName],
+        direct: true,
+        scope,
+        strength,
+      };
     }
   }
   return null;
+}
+
+function expressDependency(manifest) {
+  const dependency = packageDependency(manifest, "express");
+  if (!dependency) return null;
+  const { package: _package, ...evidence } = dependency;
+  return evidence;
+}
+
+function dependencyClassification(packages) {
+  const rank = { weak: 1, supporting: 2, strong: 3 };
+  const strength = packages.reduce(
+    (selected, dependency) =>
+      rank[dependency.strength] > rank[selected] ? dependency.strength : selected,
+    "weak",
+  );
+  return {
+    signal: "package-json-direct-dependency",
+    direct: true,
+    strength,
+    scopes: [...new Set(packages.map((dependency) => dependency.scope))].sort(),
+  };
+}
+
+function frameworkDependencies(manifest) {
+  const definitions = [
+    ["express", ["express"]],
+    ["fastify", ["fastify"]],
+    [
+      "nestjs",
+      ["@nestjs/core", "@nestjs/common", "@nestjs/platform-express", "@nestjs/platform-fastify"],
+    ],
+  ];
+  return definitions
+    .map(([name, packageNames]) => {
+      const packages = packageNames
+        .map((packageName) => packageDependency(manifest, packageName))
+        .filter(Boolean);
+      return {
+        name,
+        packages,
+        classification: packages.length ? dependencyClassification(packages) : null,
+      };
+    })
+    .filter((framework) => framework.packages.length > 0);
 }
 
 function discoverPackages(root, files, limits, diagnostics) {
@@ -163,6 +217,7 @@ function discoverPackages(root, files, limits, diagnostics) {
         name: typeof manifest.name === "string" ? manifest.name : null,
         version: typeof manifest.version === "string" ? manifest.version : null,
         express: expressDependency(manifest),
+        frameworks: frameworkDependencies(manifest),
         manifest,
         absoluteRoot: packageRoot,
       };
@@ -230,7 +285,10 @@ function entryCandidates(root, application, owner) {
   if (sourceFile) {
     const signals = sourceSignals(sourceFile);
     let score = 60;
-    const reasons = ["declares an Express application"];
+    const framework = application.framework || "express";
+    const frameworkName =
+      framework === "nestjs" ? "NestJS" : framework === "fastify" ? "Fastify" : "Express";
+    const reasons = [`declares a ${frameworkName} application`];
     if (signals.exported) {
       score += 25;
       reasons.push("exports application/module state");
@@ -455,7 +513,7 @@ function discoverApiDocumentation(rootDir, opts = {}) {
   };
 }
 
-/** Discover repository packages, Express applications, entry candidates, and API docs without execution. */
+/** Discover repository packages, supported HTTP applications, entry candidates, and API docs. */
 function discover(rootDir, opts = {}) {
   const root = path.resolve(rootDir);
   const limits = scanLimits(opts);
@@ -499,6 +557,7 @@ function discover(rootDir, opts = {}) {
       name: item.name,
       version: item.version,
       express: item.express,
+      frameworks: item.frameworks,
     })),
     applications,
     documentation: documentation.documentation,

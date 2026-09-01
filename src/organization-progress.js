@@ -72,7 +72,10 @@ function formatPlainProgress(event) {
     case "repository-skipped":
       return null;
     case "repository-resumed":
-      return `${prefix} RESUME ${repository} · ${cleanLine(event.status)}`;
+      return (
+        `${prefix} RESUME ${repository} · ${cleanLine(event.status)}` +
+        `${event.routeGraphComplete === false ? " · route graph incomplete" : ""}`
+      );
     case "repository-started":
       return `${prefix} START ${repository} · active ${event.active ?? 1}/${event.concurrency ?? 1}`;
     case "repository-phase":
@@ -81,6 +84,7 @@ function formatPlainProgress(event) {
       const details = [cleanLine(event.status)];
       if (Number.isSafeInteger(event.routes)) details.push(`${event.routes} routes`);
       if (Number.isSafeInteger(event.applications)) details.push(`${event.applications} apps`);
+      if (event.routeGraphComplete === false) details.push("route graph incomplete");
       if (elapsed) details.push(elapsed);
       return `${prefix} COMPLETE ${repository} · ${details.join(" · ")}`;
     }
@@ -96,8 +100,13 @@ function formatPlainProgress(event) {
       return (
         `${prefix} FINISHED ${cleanLine(event.organization)}` +
         ` · ${event.completed ?? event.processed ?? 0}/${event.total ?? 0} processed` +
-        ` · ${event.expressRepositories ?? 0} express` +
+        ` · ${
+          event.supportedRepositories === undefined
+            ? `${event.expressRepositories ?? 0} express`
+            : `${event.supportedRepositories} supported`
+        }` +
         ` · ${event.failedRepositories ?? 0} failed` +
+        `${event.incompleteRouteGraphs ? ` · ${event.incompleteRouteGraphs} unresolved graphs` : ""}` +
         ` · ${event.complete === true ? "complete" : "incomplete"}` +
         `${elapsed ? ` · ${elapsed}` : ""}`
       );

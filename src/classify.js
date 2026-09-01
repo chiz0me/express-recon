@@ -4,6 +4,10 @@ const { isOpaque } = require("./middleware");
 
 const PUBLIC_TAG = "public";
 const REVIEW_TAG = "unknown:review";
+// This is a user-facing configuration surface. Keeping the accepted keys in
+// one named list lets validation and documentation-coverage checks drift
+// together instead of maintaining two implicit schemas.
+const AUTH_GRANT_KEYS = new Set(["tag", "tags", "roles", "scopes"]);
 
 function validateAuthMiddleware(authMiddleware) {
   if (!authMiddleware || typeof authMiddleware !== "object" || Array.isArray(authMiddleware)) {
@@ -15,9 +19,7 @@ function validateAuthMiddleware(authMiddleware) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error(`authMiddleware.${name} must be a tag string or grant object`);
     }
-    const unknown = Object.keys(value).filter(
-      (field) => !["tag", "tags", "roles", "scopes"].includes(field),
-    );
+    const unknown = Object.keys(value).filter((field) => !AUTH_GRANT_KEYS.has(field));
     if (unknown.length) {
       throw new Error(`authMiddleware.${name} contains unknown field(s): ${unknown.join(", ")}`);
     }

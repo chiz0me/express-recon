@@ -11,6 +11,7 @@ const {
   HTTP_METHODS,
 } = require("./ast");
 const { extractIoHints } = require("./io-hints");
+const { STATIC_FRAMEWORK_ADAPTERS } = require("./adapters");
 
 /** Map a character offset to a 1-based line number via precomputed line starts. */
 function lineCounter(code) {
@@ -36,7 +37,7 @@ function lineCounter(code) {
  *
  * @returns {{source: string, exportName: "default", props: string[]}|null}
  */
-function requireInfo(node) {
+function requireInfo(node, requireAliases = new Set(["require"])) {
   let n = unwrap(node);
   const props = [];
   while (n) {
@@ -46,7 +47,7 @@ function requireInfo(node) {
       continue;
     }
     if (n.type === "CallExpression") {
-      if (calleeName(n.callee) === "require") {
+      if (n.callee.type === "Identifier" && requireAliases.has(n.callee.name)) {
         const source = staticString(n.arguments[0]);
         return source ? { source, exportName: "default", props } : null;
       }
@@ -65,21 +66,51 @@ function requireInfo(node) {
   return null;
 }
 
+/**
+ * Collect immutable local aliases of CommonJS `require`. Small bootstrap files
+ * sometimes use `const load = require` to make imports terse; treating only
+ * explicit aliases as loaders avoids interpreting arbitrary helper calls as
+ * module imports.
+ */
+function collectRequireAliases(program) {
+  const aliases = new Set(["require"]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    walk(program, (node) => {
+      if (node.type !== "VariableDeclaration" || node.kind !== "const") return;
+      for (const declaration of node.declarations) {
+        const init = declaration.init && unwrap(declaration.init);
+        if (
+          declaration.id.type === "Identifier" &&
+          init?.type === "Identifier" &&
+          aliases.has(init.name) &&
+          !aliases.has(declaration.id.name)
+        ) {
+          aliases.add(declaration.id.name);
+          changed = true;
+        }
+      }
+    });
+  }
+  return aliases;
+}
+
 /** Record a module binding (`require`/`import`) as local name -> ref descriptor. */
 function addBinding(bindings, local, ref) {
   if (local && ref) bindings.set(local, ref);
 }
 
-function collectRequireBinding(node, bindings) {
+function collectRequireBinding(node, bindings, requireAliases) {
   const init = node.init && unwrap(node.init);
   if (!init) return;
   if (node.id.type === "Identifier") {
-    const info = requireInfo(init);
+    const info = requireInfo(init, requireAliases);
     if (info) addBinding(bindings, node.id.name, info);
     return;
   }
   if (node.id.type === "ObjectPattern") {
-    const info = requireInfo(init);
+    const info = requireInfo(init, requireAliases);
     if (!info) return;
     for (const prop of node.id.properties) {
       if (prop.key && prop.value && prop.value.type === "Identifier") {
@@ -112,17 +143,19 @@ function collectImportBinding(node, bindings) {
  * `*.Router()` (router) variable.
  */
 function collectBindings(program) {
+  const requireAliases = collectRequireAliases(program);
   const bindings = new Map();
   walk(program, (node) => {
-    if (node.type === "VariableDeclarator") collectRequireBinding(node, bindings);
-    else if (node.type === "ImportDeclaration") collectImportBinding(node, bindings);
+    if (node.type === "VariableDeclarator") {
+      collectRequireBinding(node, bindings, requireAliases);
+    } else if (node.type === "ImportDeclaration") collectImportBinding(node, bindings);
   });
 
-  let expressVar = null;
+  const expressVars = new Set();
   const factoryNames = new Set();
   for (const [local, { source, exportName }] of bindings) {
     if (source !== "express") continue;
-    if (exportName === "default" || exportName === "*") expressVar = local;
+    if (exportName === "default" || exportName === "*") expressVars.add(local);
     if (exportName === "Router") factoryNames.add(local);
   }
 
@@ -142,7 +175,15 @@ function collectBindings(program) {
   };
   const isAppInit = (init) => {
     const c = callee(init);
-    return Boolean(c && c.type === "Identifier" && c.name === expressVar);
+    if (!c) return false;
+    if (c.type === "Identifier" && expressVars.has(c.name)) return true;
+    const direct = requireInfo(c, requireAliases);
+    return Boolean(
+      direct &&
+      direct.source === "express" &&
+      ["default", "*"].includes(direct.exportName) &&
+      direct.props.length === 0,
+    );
   };
 
   const routers = new Map();
@@ -154,7 +195,7 @@ function collectBindings(program) {
     }
   });
 
-  return { requires: bindings, routers, factoryNames };
+  return { requires: bindings, routers, factoryNames, requireAliases };
 }
 
 /**
@@ -221,7 +262,7 @@ function refFromExpr(node, ctx) {
   const n = unwrap(node);
   if (!n) return { t: "unknown" };
 
-  const info = requireInfo(n);
+  const info = requireInfo(n, ctx.requireAliases);
   if (info)
     return { t: "module", source: info.source, exportName: info.exportName, props: info.props };
 
@@ -256,9 +297,17 @@ function refFromExpr(node, ctx) {
     }
     return { t: "object", props };
   }
-  if (n.type === "FunctionExpression" || n.type === "ArrowFunctionExpression") {
+  if (
+    n.type === "FunctionDeclaration" ||
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression"
+  ) {
     const ret = factoryReturnNode(n);
-    return { t: "factory", ret: ret ? refFromExpr(ret, ctx) : { t: "unknown" } };
+    return {
+      t: "factory",
+      fnStart: n.start,
+      ret: ret ? refFromExpr(ret, ctx) : { t: "unknown" },
+    };
   }
   return { t: "unknown" };
 }
@@ -546,7 +595,7 @@ function isMountRef(node, ref, ctx) {
   // Inline factory mount: `require('./sub')(deps)`. A bare-package or plain
   // call (`cors()`, `auth()`) is middleware, not a mount.
   if (n.type === "CallExpression") {
-    const info = requireInfo(n);
+    const info = requireInfo(n, ctx.requireAliases);
     return Boolean(info && isLocalSource(info.source));
   }
   return false;
@@ -677,22 +726,60 @@ function extractMounts(program, code, ctx, out) {
 }
 
 const FN_TYPES = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
+const NON_EXPRESS_HOST_PACKAGE =
+  /^(?:fastify|uwebsockets(?:\.js)?|uws|koa|@koa\/router|@hapi\/hapi|hapi|hono|polka)(?:\/|$)/i;
+
+/** Root binding of a TypeScript parameter type such as `uWS.TemplatedApp`. */
+function parameterTypeBinding(param, ctx) {
+  let type = param?.typeAnnotation?.typeAnnotation;
+  if (type?.type !== "TSTypeReference") return null;
+  let name = type.typeName;
+  while (name?.type === "TSQualifiedName") name = name.left;
+  return name?.type === "Identifier" ? ctx.requires.get(name.name) || null : null;
+}
+
+/**
+ * A typed host imported from another HTTP framework is not an Express
+ * registrar. The owning adapter can still claim it; this only prevents the
+ * generic `app.get()` fallback from creating a second, misleading route.
+ */
+function isExpressRegistrarParameter(param, ctx) {
+  if (param?.type !== "Identifier") return false;
+  const binding = parameterTypeBinding(param, ctx);
+  return !binding || !NON_EXPRESS_HOST_PACKAGE.test(binding.source);
+}
 
 /**
  * Routes registered on a function parameter — the registrar pattern
  * (`module.exports = (app) => { app.get('/x', h) }`). The host can't be
- * resolved statically (it's bound at the call site), so instead of vanishing,
- * these surface as partial-confidence orphans plus a diagnostic. A static
- * `/`-path and at least one handler arg are required, which filters out
+ * resolved from the function alone (it's bound at the call site), so routes are
+ * grouped by their owning function for the graph pass to connect when possible.
+ * A static `/`-path and at least one handler arg are required, which filters out
  * HTTP-client/ORM `.get(url)` lookalikes.
  */
 function extractRegistrarRoutes(program, code, ctx, out) {
   const seen = new Set();
   walk(program, (fn) => {
     if (!FN_TYPES.has(fn.type) || !fn.body) return;
-    const params = new Set(fn.params.filter((p) => p.type === "Identifier").map((p) => p.name));
+    const params = new Set(
+      fn.params
+        .filter((param) => isExpressRegistrarParameter(param, ctx))
+        .map((param) => param.name),
+    );
     if (params.size === 0) return;
-    walk(fn.body, (node) => {
+    const registrar = {
+      id: `${ctx.filePath}#express-registrar:${fn.start}`,
+      file: ctx.filePath,
+      fnStart: fn.start,
+      name:
+        fn.id?.name ||
+        [...ctx.handlerIndex].find(([, candidate]) => candidate === fn)?.[0] ||
+        `<anonymous:${fn.start}>`,
+      routes: [],
+    };
+    const visitOwnBody = (node) => {
+      if (!node || typeof node.type !== "string") return;
+      if (node !== fn.body && FN_TYPES.has(node.type)) return;
       if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
       if (seen.has(node.start)) return;
       const method = node.callee.property.name;
@@ -714,10 +801,48 @@ function extractRegistrarRoutes(program, code, ctx, out) {
           path,
           middlewares,
           line: ctx.lineAt(node.callee.property.start),
+          registrarStart: fn.start,
         };
         attachIo(route, handlerNode, ctx);
         out.registrarRoutes.push(route);
+        registrar.routes.push(route);
       }
+    };
+    const descend = (node) => {
+      if (!node || typeof node.type !== "string") return;
+      visitOwnBody(node);
+      if (node !== fn.body && FN_TYPES.has(node.type)) return;
+      for (const key of Object.keys(node)) {
+        if (["loc", "start", "end"].includes(key)) continue;
+        const child = node[key];
+        if (Array.isArray(child)) child.forEach(descend);
+        else if (child && typeof child.type === "string") descend(child);
+      }
+    };
+    descend(fn.body);
+    if (registrar.routes.length) out.registrars.set(fn.start, registrar);
+  });
+}
+
+/** Record free-function calls that pass a known local Express host. */
+function extractRegistrarInvocations(program, ctx, out) {
+  walk(program, (node) => {
+    if (node.type !== "CallExpression") return;
+    const host = node.arguments
+      .map(unwrap)
+      .find((argument) => argument?.type === "Identifier" && ctx.routers.has(argument.name));
+    if (!host) return;
+    const callee = unwrap(node.callee);
+    if (callee?.type === "MemberExpression") {
+      const object = unwrap(callee.object);
+      if (object?.type === "Identifier" && object.name === host.name) return;
+    }
+    const registrarRef = refFromExpr(node.callee, ctx);
+    if (!["local", "module", "factory", "object"].includes(registrarRef.t)) return;
+    out.registrarInvocations.push({
+      host: host.name,
+      registrarRef,
+      line: ctx.lineAt(node.start),
     });
   });
 }
@@ -751,6 +876,9 @@ function collectExports(program, ctx) {
 }
 
 function collectNamedExport(node, exportRefs) {
+  if (node.declaration?.id?.name && FN_TYPES.has(node.declaration.type)) {
+    exportRefs.set(node.declaration.id.name, { t: "local", name: node.declaration.id.name });
+  }
   if (node.declaration && node.declaration.declarations) {
     for (const d of node.declaration.declarations) {
       if (d.id.type === "Identifier") exportRefs.set(d.id.name, { t: "local", name: d.id.name });
@@ -779,11 +907,23 @@ function collectNamedExport(node, exportRefs) {
 function analyzeFile(code, filePath, onParseError) {
   const program = parse(code, filePath, onParseError);
   if (!program) return null;
-  const { requires, routers } = collectBindings(program);
+  const { requires, routers, requireAliases } = collectBindings(program);
   const consts = collectStringConsts(program);
   const lineAt = lineCounter(code);
   const handlerIndex = collectHandlerIndex(program);
-  const ctx = { requires, routers, consts, lineAt, handlerIndex, filePath };
+  const ctx = {
+    requires,
+    routers,
+    requireAliases,
+    consts,
+    lineAt,
+    handlerIndex,
+    filePath,
+    attachIo,
+  };
+  const frameworks = Object.fromEntries(
+    STATIC_FRAMEWORK_ADAPTERS.map((adapter) => [adapter.name, adapter.analyze(program, code, ctx)]),
+  );
   const out = {
     filePath,
     requires,
@@ -791,14 +931,18 @@ function analyzeFile(code, filePath, onParseError) {
     routes: [],
     edges: [],
     registrarRoutes: [],
+    registrars: new Map(),
+    registrarInvocations: [],
     opaqueUses: [],
     globalMwByHost: new Map(),
     handlerIndex,
     lineAt,
+    frameworks,
   };
   extractRoutes(program, code, ctx, out);
   extractMounts(program, code, ctx, out);
   extractRegistrarRoutes(program, code, ctx, out);
+  extractRegistrarInvocations(program, ctx, out);
   const { exportRefs, reExportAll } = collectExports(program, ctx);
   out.exportRefs = exportRefs;
   out.reExportAll = reExportAll;

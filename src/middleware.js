@@ -8,6 +8,8 @@
  *   a dotted callee (`passport.authenticate`), or `"<anonymous>"`.
  * @property {"identifier"|"call"|"anonymous"|"unknown"} kind
  * @property {string} raw  Best-effort source snippet for the audit trail.
+ * @property {"middleware"|"hook"|"guard"|"interceptor"|"pipe"|"filter"} [stage]
+ *   Framework lifecycle role when the source API makes it explicit.
  */
 
 const ANONYMOUS = "<anonymous>";
@@ -20,11 +22,13 @@ const ANONYMOUS = "<anonymous>";
  */
 function descriptor(fields) {
   const name = fields.name || ANONYMOUS;
-  return {
+  const value = {
     name,
     kind: fields.kind || (name === ANONYMOUS ? "anonymous" : "identifier"),
     raw: fields.raw || name,
   };
+  if (fields.stage) value.stage = fields.stage;
+  return value;
 }
 
 /**

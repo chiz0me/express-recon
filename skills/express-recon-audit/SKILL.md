@@ -1,16 +1,17 @@
 ---
 name: express-recon-audit
 description: >-
-  Audit or inventory Express 4/5 HTTP routes and middleware in one repository
-  or across a GitHub organization. Use when asked to find unauthenticated/open
-  endpoints, list routes and middleware, check missing auth guards, inventory
-  Express apps, or identify Express repositories in an organization. Triggers:
-  "audit express routes", "find open endpoints", "which routes have no auth",
-  "list routes and middleware", "express attack surface", "scan GitHub org for
-  Express repos", "unauthenticated API endpoints".
+  Audit or inventory Express, Fastify, and NestJS HTTP routes and lifecycle
+  middleware in one repository or across a GitHub organization. Use when asked
+  to find unauthenticated/open endpoints, list routes and middleware, check
+  missing guards, inventory supported apps, or identify HTTP services in an
+  organization. Triggers: "audit express routes", "audit fastify routes",
+  "audit nestjs routes", "find open endpoints", "which routes have no auth",
+  "list routes and middleware", "scan GitHub org for API repos",
+  "unauthenticated API endpoints".
 ---
 
-# Express route audit (express-recon)
+# HTTP route audit (express-recon)
 
 Drives the `express-recon` harness to enumerate routes and flag unauthenticated
 ones. The harness parses JS/TS statically (no app boot) and classifies each
@@ -116,10 +117,11 @@ express-recon audit --src <repoDir> --config /tmp/express-recon.config.js --form
 ```
 
 Parse the JSON report (`schemaVersion`, `summary`, `routes`, `findings`). Key
-fields per route: `method`, `path`, `authStatus`, `middlewares[].name`,
-`source.{file,line}`, `applicationId`, `pathConfidence`. Version 2 source paths
-are repository-relative, and `applications` keeps identical paths in different
-Express roots separate.
+fields per route: `framework`, `method`, `path`, `authStatus`,
+`middlewares[].name`, optional `middlewares[].stage`, `source.{file,line}`,
+`applicationId`, and `pathConfidence`. Version 2 source paths are
+repository-relative, and `applications` keeps identical paths in different
+application roots separate.
 
 Findings ids to surface:
 
@@ -136,7 +138,7 @@ Findings ids to surface:
 
 Every finding includes a stable `fingerprint`, `severity`, `confidence`, and
 `applicationId`; fingerprints and per-verb gaps never combine identical paths
-from separate Express roots. Also inspect `scanCoverage` and retain its scope
+from separate application roots. Also inspect `scanCoverage` and retain its scope
 fingerprint. If `complete` is false, do not present the audit as complete;
 surface the diagnostics and fix or explicitly scope the failed files.
 
@@ -152,8 +154,8 @@ Lead with the `public-route` and `per-verb-gap` findings, each with its
   on every scan. If either is incomplete, say exactly what failed or was
   skipped before drawing conclusions.
 - If routes show `pathConfidence: "partial"`, say so — those mounts/paths
-  couldn't be fully resolved statically; re-run with `--mode hybrid --app
-  <entry>` if the app boots, to recover dynamic routes and verify.
+  could not be fully resolved statically. Hybrid recovery is available only for
+  a trusted Express app; keep Fastify/NestJS uncertainty explicit.
 - If a `public` route's chain contains a middleware that IS auth but wasn't in
   the allowlist, add it to the config and re-audit — iterate until the public
   list is only genuinely-open routes.
@@ -194,9 +196,10 @@ Static organization scanning does not call a model. Tokens are consumed when
 an agent receives logs/reports or performs model-assisted middleware review.
 For an agent-initiated scan:
 
-- Set `EXPRESS_RECON_CONTEXT=agent`. This makes the CLI require `--out <dir>` and
-  default to no progress, preventing detailed stdout and routine stderr from
-  flooding model context. Explicit `--progress` still overrides the default.
+- Set `EXPRESS_RECON_CONTEXT=agent`. The CLI then writes to
+  `.express-recon/<lowercase-organization>` when `--out` is omitted and defaults
+  to no progress, preventing detailed stdout and routine stderr from flooding
+  model context. Explicit output/progress flags still override those defaults.
 - Agent/CI runs never prompt for a nonempty output directory. If one already
   exists, inspect it first and pass `--resume` for a compatible checkpoint or
   `--overwrite` for an explicitly requested fresh scan. Do not infer overwrite
@@ -204,27 +207,35 @@ For an agent-initiated scan:
 - If progress must be monitored, use `--progress json 2>scan-progress.jsonl` and
   inspect only a bounded tail or selected failure/checkpoint/final events; never
   load the complete progress stream into context.
-- Read `scope`, `coverage`, and `summary` first. Then select `express`, `failed`,
-  and `inconclusive` repository entries. For a large aggregate, use `jq` or
+- Read `scope`, `coverage`, and `summary` first. Then select `express`,
+  `fastify`, `nestjs`, `multi-framework`, `failed`, and `inconclusive`
+  repository entries. For a large aggregate, use `jq` or
   equivalent local processing to project those fields before returning them to
   the model. Open detailed artifacts only for repositories needed for the
   user's next decision.
-- Do not send every repository report, route, source file, or non-Express entry
+- Do not send every repository report, route, source file, or unsupported entry
   to a model. Restrict `review-middleware` and AI classification to unresolved,
   relevant candidates.
+- For recurring scans, keep a completed prior output outside the new
+  selected/default output directory and pass it with `--baseline`. Read the aggregate's bounded
+  `delta.summary`/`delta.repositories` first; open `organization-delta.json`
+  only for specifically requested changed repositories. An incomplete
+  comparison stores `comparison-baseline/` with its checkpoint so `--resume`
+  can reuse it automatically; do not delete that generated report state.
 
 Default agent invocation:
 
 ```bash
 EXPRESS_RECON_CONTEXT=agent express-recon scan-org \
-  --org <org> --out <outDir> --concurrency 2 --fail-on incomplete
+  --org <org> --concurrency 2 --fail-on incomplete
 ```
 
 ## Modes
 
-- `static` (default) — no app boot; safe on any checkout. Handles JS+TS, ESM
-  imports, tsconfig path aliases, barrel re-exports.
-- `hybrid` (`--mode hybrid --app <file>`) — adds runtime verification and
+- `static` (default) — no app boot; safe on any checkout. Supports Express,
+  Fastify, and NestJS across JS+TS, ESM imports, tsconfig path aliases, and
+  barrel re-exports.
+- Express-only `hybrid` (`--mode hybrid --app <file>`) — adds runtime verification and
   recovers dynamically-registered routes static can't see. Only for trusted
   code; the CLI sets `EXPRESS_RECON_DRY=1` and isolates the parent environment
   by default, but the worker is not an OS sandbox. Native ESM dependency imports
@@ -248,11 +259,12 @@ EXPRESS_RECON_CONTEXT=agent express-recon scan-org \
   the requested scope explicitly includes a hidden contract path such as
   `.cursor/`; record that wider scope and do not apply it indiscriminately to an
   organization.
-- For a GitHub organization, use `scan-org --out <dir>`. Default concurrency is
-  one; every bounded repository snapshot is deleted before the report returns.
-  After an interruption, reuse the exact scan-defining options with `--resume`;
-  concurrency may change. Report checkpointed entries as resumed rather than
-  freshly scanned.
+- For a GitHub organization, use `scan-org`; it defaults to
+  `.express-recon/<lowercase-organization>`, while `--out <dir>` overrides the
+  location. Default concurrency is one; every bounded repository snapshot is
+  deleted before the report returns. After an interruption, reuse the exact
+  scan-defining options with `--resume`; concurrency may change. Report
+  checkpointed entries as resumed rather than freshly scanned.
   Treat `not-express` as conclusive only when aggregate and repository coverage
   are complete, and keep repository identity above application identity.
 - To also **document the API** (OpenAPI 3.1 / Swagger with request/response

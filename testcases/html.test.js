@@ -5,10 +5,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
 const { spawnSync } = require("node:child_process");
 
 const {
   MAX_JSON_BYTES,
+  MAX_OPENAPI_BYTES,
+  defaultRenderOutput,
+  detectRenderInput,
   escapeHtml,
   inputKind,
   renderHtmlSite,
@@ -153,6 +157,75 @@ function repositoryScan(overrides = {}) {
   };
 }
 
+function openApiDocument(overrides = {}) {
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "Payments API",
+      version: "1.2.0",
+      summary: "Payment operations",
+      description: "A standalone contract.",
+    },
+    servers: [{ url: "https://api.example.test/{region}", description: "Production template" }],
+    tags: [{ name: "accounts", description: "Account operations" }],
+    security: [{ bearerAuth: [] }],
+    paths: {
+      "/accounts/{id}": {
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "Account identifier",
+            schema: { type: "string" },
+          },
+        ],
+        get: {
+          operationId: "getAccount",
+          summary: "Get an account",
+          description: "Returns one account.",
+          tags: ["accounts"],
+          responses: {
+            200: {
+              description: "Found",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/Account" } } },
+            },
+            default: { $ref: "https://schemas.example.test/errors.yaml#/Error" },
+          },
+        },
+        post: {
+          operationId: "updateAccount",
+          summary: "Update an account",
+          tags: ["accounts"],
+          security: [],
+          requestBody: {
+            required: true,
+            description: "Replacement fields",
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+          responses: { 204: { description: "Updated" } },
+        },
+      },
+    },
+    webhooks: {
+      "payment.completed": {
+        post: {
+          summary: "Payment completed",
+          tags: ["events"],
+          responses: { 200: { description: "Accepted" } },
+        },
+      },
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: "http", scheme: "bearer", description: "Bearer token" },
+      },
+      schemas: { Account: { type: "object" } },
+    },
+    ...overrides,
+  };
+}
+
 test("HTML renderer escapes untrusted report content and creates an offline route site", () => {
   temporary("html-routes", (root) => {
     const payload = `<img src=x onerror="alert(1)"><script>alert(2)</script>`;
@@ -185,6 +258,192 @@ test("HTML renderer escapes untrusted report content and creates an offline rout
     assert.doesNotMatch(html, /<script>alert/);
     assert.ok(fs.existsSync(path.join(root, "site", "assets", "report.js")));
     assert.ok(fs.existsSync(path.join(root, "site", "assets", "report.css")));
+  });
+});
+
+test("OpenAPI JSON renders with packaged Swagger UI and offline-safe defaults", () => {
+  temporary("html-openapi-json", (root) => {
+    const injection = `</script><script>alert("rendered")</script>`;
+    const document = openApiDocument({
+      info: {
+        ...openApiDocument().info,
+        title: `Payments ${injection}`,
+        description: `Untrusted ${injection}`,
+      },
+    });
+    document["x-object"] = JSON.parse('{"__proto__":{"polluted":true}}');
+    writeJson(path.join(root, "openapi.json"), document);
+
+    const detected = resolveInput(root);
+    assert.equal(detected.kind, "openapi");
+    assert.equal(path.basename(detected.file), "openapi.json");
+
+    const output = path.join(root, "site");
+    const result = renderHtmlSite(root, output);
+    const html = fs.readFileSync(result.output, "utf8");
+    const config = fs.readFileSync(path.join(output, "assets", "openapi-config.js"), "utf8");
+    const manifest = JSON.parse(fs.readFileSync(path.join(output, "render-manifest.json"), "utf8"));
+
+    assert.equal(result.source.kind, "openapi");
+    assert.equal(result.pages.length, 1);
+    assert.deepEqual(manifest.assets, [
+      "assets/swagger-ui.css",
+      "assets/swagger-ui-bundle.js",
+      "assets/swagger-ui-bundle.js.LICENSE.txt",
+      "assets/swagger-ui-LICENSE.txt",
+      "assets/swagger-ui-NOTICE.txt",
+      "assets/openapi-config.js",
+    ]);
+    assert.match(html, /assets\/swagger-ui\.css/);
+    assert.match(html, /assets\/swagger-ui-bundle\.js/);
+    assert.match(html, /assets\/openapi-config\.js/);
+    assert.match(html, /connect-src 'none'/);
+    assert.match(html, /Payments &lt;\/script&gt;&lt;script&gt;/);
+    assert.doesNotMatch(html, /<script>alert/);
+    assert.doesNotMatch(html, /https?:\/\//);
+    assert.match(config, /const spec = JSON\.parse\("\{\\"openapi\\":\\"3\.1\.0\\"/);
+    assert.match(config, /\\u003c\/script\\u003e\\u003cscript\\u003e/);
+    assert.doesNotMatch(config, /<\/script>/i);
+    assert.match(config, /queryConfigEnabled: false/);
+    assert.match(config, /supportedSubmitMethods: \[\]/);
+    assert.match(config, /tryItOutEnabled: false/);
+    assert.match(config, /validatorUrl: null/);
+    assert.doesNotMatch(config, /^\s*(?:configUrl|url):/m);
+
+    let swaggerConfiguration;
+    const browserGlobal = {};
+    vm.runInNewContext(config, {
+      SwaggerUIBundle: (value) => {
+        swaggerConfiguration = value;
+        return { initialized: true };
+      },
+      window: browserGlobal,
+    });
+    assert.equal(swaggerConfiguration.spec.info.title, document.info.title);
+    assert.equal(Object.hasOwn(swaggerConfiguration.spec["x-object"], "__proto__"), true);
+    assert.equal(swaggerConfiguration.spec["x-object"].polluted, undefined);
+    assert.equal(swaggerConfiguration.dom_id, "#swagger-ui");
+    assert.deepEqual(Array.from(swaggerConfiguration.supportedSubmitMethods), []);
+    assert.equal(swaggerConfiguration.validatorUrl, null);
+    assert.equal(browserGlobal.ui.initialized, true);
+
+    assert.equal(fs.existsSync(path.join(output, "assets", "report.css")), false);
+    assert.equal(fs.existsSync(path.join(output, "assets", "report.js")), false);
+    for (const asset of manifest.assets) {
+      assert.ok(fs.statSync(path.join(output, ...asset.split("/"))).isFile(), asset);
+    }
+  });
+});
+
+test("OpenAPI YAML renders directly and malformed or unsupported contracts fail clearly", () => {
+  temporary("html-openapi-yaml", (root) => {
+    const specification = path.join(root, "openapi.yaml");
+    fs.writeFileSync(
+      specification,
+      [
+        'openapi: "3.0.3"',
+        "info:",
+        "  title: YAML API",
+        '  version: "1.0"',
+        "paths:",
+        "  /health:",
+        "    get:",
+        "      responses:",
+        '        "200":',
+        "          description: Healthy",
+        "",
+      ].join("\n"),
+    );
+
+    const result = renderHtmlSite(specification, path.join(root, "yaml-site"));
+    assert.equal(result.source.kind, "openapi");
+    assert.match(
+      fs.readFileSync(path.join(root, "yaml-site", "assets", "openapi-config.js"), "utf8"),
+      /YAML API/,
+    );
+    assert.equal(inputKind(openApiDocument()), "openapi");
+    assert.throws(
+      () => inputKind({ swagger: "2.0", info: { title: "Legacy" }, paths: {} }),
+      /Swagger 2 must be converted/,
+    );
+    assert.throws(
+      () => inputKind({ openapi: "2.0.0", info: { title: "Legacy" }, paths: {} }),
+      /OpenAPI version 2\.0\.0/,
+    );
+    assert.throws(
+      () => inputKind({ openapi: "3.1.0", info: { title: "Missing paths" } }),
+      /requires info\.title and paths/,
+    );
+    assert.throws(
+      () => renderHtmlSite(specification, path.join(root, "baseline-site"), { baseline: root }),
+      /requires an organization inventory input/,
+    );
+
+    const cyclic = path.join(root, "cyclic.yaml");
+    fs.writeFileSync(
+      cyclic,
+      [
+        'openapi: "3.1.0"',
+        "info:",
+        "  title: Cyclic API",
+        '  version: "1.0"',
+        "paths: {}",
+        "components:",
+        "  schemas:",
+        "    Loop: &loop",
+        "      self: *loop",
+        "",
+      ].join("\n"),
+    );
+    assert.throws(
+      () => renderHtmlSite(cyclic, path.join(root, "cyclic-site")),
+      /cyclic YAML alias/,
+    );
+
+    const oversized = path.join(root, "oversized.yaml");
+    fs.writeFileSync(oversized, "");
+    fs.truncateSync(oversized, MAX_OPENAPI_BYTES + 1);
+    assert.throws(() => renderHtmlSite(oversized, path.join(root, "oversized-site")), /exceed/);
+  });
+});
+
+test("render input and output defaults are bounded and refuse ambiguity", () => {
+  temporary("html-path-defaults", (root) => {
+    const workspace = path.join(root, "workspace");
+    const first = path.join(workspace, ".express-recon", "first");
+    fs.mkdirSync(first, { recursive: true });
+    writeJson(path.join(first, "routes.json"), routeReport());
+
+    assert.equal(detectRenderInput(workspace), first);
+    assert.equal(defaultRenderOutput(first), `${first}-html`);
+    assert.equal(defaultRenderOutput(path.join(first, "routes.json")), `${first}-html`);
+
+    const named = path.join(workspace, "contracts", "payments.yaml");
+    fs.mkdirSync(path.dirname(named), { recursive: true });
+    fs.writeFileSync(
+      named,
+      'openapi: "3.1.0"\ninfo: { title: Payments, version: "1" }\npaths: {}\n',
+    );
+    assert.equal(defaultRenderOutput(named), path.join(workspace, "contracts", "payments-html"));
+
+    const second = path.join(workspace, ".express-recon", "second");
+    fs.mkdirSync(second, { recursive: true });
+    writeJson(path.join(second, "repo-scan.json"), repositoryScan());
+    assert.throws(() => detectRenderInput(workspace), /multiple possible inputs.*first.*second/);
+
+    const empty = path.join(root, "empty");
+    fs.mkdirSync(empty);
+    assert.throws(() => detectRenderInput(empty), /could not auto-detect an input/);
+
+    const linked = path.join(root, "linked-workspace");
+    fs.mkdirSync(linked);
+    fs.symlinkSync(path.join(workspace, ".express-recon"), path.join(linked, ".express-recon"));
+    assert.throws(() => detectRenderInput(linked), /cannot auto-detect through/);
+
+    const linkedInput = path.join(root, "linked-input");
+    fs.mkdirSync(linkedInput);
+    fs.symlinkSync(path.join(first, "routes.json"), path.join(linkedInput, "routes.json"));
+    assert.throws(() => detectRenderInput(linkedInput), /symbolic input candidate/);
   });
 });
 
@@ -323,12 +582,12 @@ test("organization rendering writes per-repository pages and contains unsafe art
       assert.match(manifest.warnings[0], /escapes the input folder/);
       assert.match(html, /GitHub organization inventory/);
       assert.match(html, /Incomplete organization inventory/);
-      assert.match(html, /Some detailed reports could not be rendered/);
+      assert.match(html, /Some detailed reports or API references could not be rendered/);
       assert.match(html, /repositories\/payments\.html/);
       assert.match(html, /repositories\/payments-2\.html/);
       assert.match(html, /repositories\/partial\.html/);
       assert.match(html, /View diagnostics/);
-      assert.match(html, /No Express report/);
+      assert.match(html, /No supported framework report/);
       assert.doesNotMatch(html, /repositories\/no-express\.html/);
       assert.doesNotMatch(html, /must-not-be-rendered/);
       assert.match(html, /acme&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
@@ -338,6 +597,403 @@ test("organization rendering writes per-repository pages and contains unsafe art
     } finally {
       fs.rmSync(outside, { force: true });
     }
+  });
+});
+
+test("organization folders render supported-framework OpenAPI artifacts with one shared bundle", () => {
+  temporary("html-organization-openapi", (root) => {
+    const scanFile = path.join(root, "repositories", "api", "repo-scan.json");
+    const specificationFile = path.join(root, "repositories", "api", "openapi.json");
+    const organizationFile = path.join(root, "organization-inventory.json");
+    const output = path.join(root, "site");
+    const scan = repositoryScan({
+      documentation: {
+        status: "merged",
+        document: openApiDocument({
+          info: { title: "Embedded fallback", version: "1" },
+        }),
+        report: repositoryScan().documentation.report,
+      },
+    });
+    writeJson(scanFile, scan);
+    writeJson(
+      specificationFile,
+      openApiDocument({ info: { title: "Organization API", version: "2" } }),
+    );
+    writeJson(organizationFile, {
+      kind: "github-organization-inventory",
+      organization: { login: "acme" },
+      coverage: { complete: true },
+      summary: {
+        repositoriesScanned: 2,
+        supportedRepositories: 1,
+        expressRepositories: 0,
+        fastifyRepositories: 1,
+      },
+      repositories: [
+        {
+          repository: { name: "api", fullName: "acme/api" },
+          status: "fastify",
+          coverageComplete: true,
+          frameworks: {
+            detected: true,
+            names: ["fastify"],
+            items: [
+              {
+                name: "fastify",
+                classification: { role: "application", confidence: "high" },
+              },
+            ],
+            applicationCount: 1,
+            routeCount: 2,
+            documentation: { reconciliationStatus: "merged" },
+          },
+          express: {
+            applicationCount: 1,
+            routeCount: 2,
+            documentation: { reconciliationStatus: "merged" },
+          },
+          artifacts: {
+            repositoryScan: "repositories/api/repo-scan.json",
+            openapi: "repositories/api/openapi.json",
+          },
+        },
+        {
+          repository: { name: "frontend", fullName: "acme/frontend" },
+          status: "not-express",
+          coverageComplete: true,
+          express: { applicationCount: 0, routeCount: 0, documentation: {} },
+          artifacts: { openapi: "../../must-not-be-read.json" },
+        },
+      ],
+    });
+
+    const result = renderHtmlSite(root, output);
+    const overview = fs.readFileSync(result.output, "utf8");
+    const detail = fs.readFileSync(path.join(output, "repositories", "api.html"), "utf8");
+    const reference = fs.readFileSync(path.join(output, "openapi", "api.html"), "utf8");
+    const config = fs.readFileSync(path.join(output, "openapi", "api.js"), "utf8");
+    const manifest = JSON.parse(fs.readFileSync(path.join(output, "render-manifest.json"), "utf8"));
+
+    assert.equal(result.warnings.length, 0);
+    assert.match(overview, /openapi\/api\.html/);
+    assert.match(overview, /API reference/);
+    assert.match(overview, /fastify: application/);
+    assert.match(detail, /\.\.\/openapi\/api\.html/);
+    assert.match(reference, /\.\.\/assets\/swagger-ui\.css/);
+    assert.match(reference, /src="api\.js"/);
+    assert.match(config, /Organization API/);
+    assert.doesNotMatch(config, /Embedded fallback/);
+    assert.doesNotMatch(overview, /openapi\/frontend\.html/);
+    assert.equal(
+      manifest.assets.filter((asset) => asset === "assets/swagger-ui-bundle.js").length,
+      1,
+    );
+    assert.deepEqual(
+      manifest.pages.filter((page) => page.startsWith("openapi/")),
+      ["openapi/api.html"],
+    );
+
+    fs.writeFileSync(path.join(output, "keep.txt"), "not renderer-owned");
+    const aggregate = JSON.parse(fs.readFileSync(organizationFile, "utf8"));
+    delete aggregate.repositories[0].artifacts.openapi;
+    writeJson(organizationFile, aggregate);
+    writeJson(scanFile, repositoryScan());
+    renderHtmlSite(root, output);
+
+    assert.equal(fs.existsSync(path.join(output, "openapi", "api.html")), false);
+    assert.equal(fs.existsSync(path.join(output, "openapi", "api.js")), false);
+    assert.equal(fs.existsSync(path.join(output, "assets", "swagger-ui.css")), false);
+    assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "not renderer-owned");
+  });
+});
+
+test("organization OpenAPI references fail closed without falling back or inspecting unsupported entries", () => {
+  temporary("html-organization-openapi-safety", (root) => {
+    const outside = path.join(path.dirname(root), `${path.basename(root)}-outside.json`);
+    const wrongKind = path.join(root, "repositories", "wrong", "routes.json");
+    const linked = path.join(root, "repositories", "linked", "openapi.json");
+    writeJson(outside, openApiDocument({ info: { title: "Outside secret", version: "1" } }));
+    writeJson(wrongKind, routeReport());
+    fs.mkdirSync(path.dirname(linked), { recursive: true });
+    fs.symlinkSync(outside, linked);
+
+    const invalidReferences = [
+      outside,
+      "../outside.json",
+      "repositories/missing/openapi.json",
+      "repositories/wrong/routes.json",
+      "repositories/linked/openapi.json",
+    ];
+    const embedded = repositoryScan({
+      documentation: {
+        status: "merged",
+        document: openApiDocument({ info: { title: "Must not fallback", version: "1" } }),
+        report: repositoryScan().documentation.report,
+      },
+    });
+    try {
+      writeJson(path.join(root, "organization-inventory.json"), {
+        kind: "github-organization-inventory",
+        organization: { login: "acme" },
+        coverage: { complete: false },
+        summary: {},
+        repositories: [
+          ...invalidReferences.map((reference, index) => ({
+            repository: { name: `api-${index}`, fullName: `acme/api-${index}` },
+            status: "express",
+            scan: embedded,
+            artifacts: { openapi: reference },
+          })),
+          {
+            repository: { name: "frontend", fullName: "acme/frontend" },
+            status: "not-express",
+            artifacts: { openapi: outside },
+          },
+        ],
+      });
+
+      const output = path.join(root, "site");
+      const result = renderHtmlSite(root, output);
+      const overview = fs.readFileSync(result.output, "utf8");
+      assert.equal(result.warnings.length, invalidReferences.length);
+      assert.ok(
+        result.warnings.some((warning) => /must be a non-empty relative path/.test(warning)),
+      );
+      assert.ok(result.warnings.some((warning) => /escapes the input folder/.test(warning)));
+      assert.ok(result.warnings.some((warning) => /Could not read|ENOENT/.test(warning)));
+      assert.ok(result.warnings.some((warning) => /wrong kind/.test(warning)));
+      assert.ok(result.warnings.some((warning) => /symlink escapes/.test(warning)));
+      assert.ok(result.warnings.every((warning) => !warning.includes(root)));
+      assert.ok(result.warnings.every((warning) => !warning.includes("frontend")));
+      assert.doesNotMatch(overview, /openapi\/api-/);
+      assert.doesNotMatch(overview, /Outside secret|Must not fallback/);
+      assert.equal(fs.existsSync(path.join(output, "openapi")), false);
+      assert.equal(fs.existsSync(path.join(output, "assets", "swagger-ui.css")), false);
+    } finally {
+      fs.rmSync(outside, { force: true });
+    }
+  });
+});
+
+test("organization rendering surfaces bounded baseline changes in overview and repository pages", () => {
+  temporary("html-organization-delta", (root) => {
+    const scan = repositoryScan({
+      inventory: routeReport({
+        routes: [
+          {
+            ...routeReport().routes[0],
+            method: "POST",
+            path: "/new-route",
+          },
+        ],
+      }),
+    });
+    writeJson(path.join(root, "repositories", "payments", "repo-scan.json"), scan);
+    writeJson(
+      path.join(root, "repositories", "legacy", "repo-scan.json"),
+      repositoryScan({
+        repository: { ...repositoryScan().repository, source: "acme/legacy" },
+        inventory: routeReport({ routes: [], findings: [], summary: { routes: 0 } }),
+      }),
+    );
+    writeJson(path.join(root, "organization-inventory.json"), {
+      kind: "github-organization-inventory",
+      organization: { login: "acme" },
+      scope: { fingerprint: "same-scope" },
+      coverage: { complete: true },
+      summary: { repositoriesDiscovered: 2, repositoriesScanned: 2, expressRepositories: 1 },
+      repositories: [
+        {
+          repository: { name: "payments", fullName: "acme/payments" },
+          status: "express",
+          coverageComplete: true,
+          express: { applicationCount: 1, routeCount: 1, documentation: {} },
+          artifacts: { repositoryScan: "repositories/payments/repo-scan.json" },
+        },
+        {
+          repository: { name: "legacy", fullName: "acme/legacy" },
+          status: "not-express",
+          coverageComplete: true,
+          express: { applicationCount: 0, routeCount: 0, documentation: {} },
+          artifacts: { repositoryScan: "repositories/legacy/repo-scan.json" },
+        },
+      ],
+      delta: {
+        kind: "github-organization-inventory-delta",
+        artifact: "organization-delta.json",
+        organization: { login: "acme" },
+      },
+    });
+    writeJson(path.join(root, "organization-delta.json"), {
+      schemaVersion: "1.0",
+      kind: "github-organization-inventory-delta",
+      organization: { login: "acme" },
+      current: { scopeFingerprint: "same-scope" },
+      coverage: { complete: true, exactComparisonFailures: 0 },
+      summary: {
+        repositoriesAdded: 0,
+        repositoriesRemoved: 0,
+        repositoriesChanged: 2,
+        newlyExpressRepositories: 0,
+        addedRoutes: 1,
+        removedRoutes: 1,
+        authRegressions: 0,
+      },
+      repositories: [
+        {
+          repository: { name: "payments", fullName: "acme/payments" },
+          change: "changed",
+          before: { status: "express", routes: 0 },
+          after: { status: "express", routes: 1 },
+          changes: {
+            statusChanged: false,
+            applicationsDelta: 0,
+            routeCountDelta: 1,
+            documentationChanged: false,
+            routes: {
+              summary: {
+                addedRoutes: 1,
+                removedRoutes: 0,
+                authRegressions: 0,
+                authImprovements: 0,
+                newFindings: 0,
+                resolvedFindings: 0,
+              },
+              details: {
+                addedRoutes: [
+                  {
+                    applicationId: "app:src/app.js#app",
+                    method: "POST",
+                    path: "/new-route",
+                    source: { file: "src/app.js", line: 9 },
+                  },
+                ],
+              },
+              detailsRetained: 1,
+              detailsTruncated: false,
+            },
+          },
+        },
+        {
+          repository: { name: "legacy", fullName: "acme/legacy" },
+          change: "changed",
+          before: { status: "express", routes: 1 },
+          after: { status: "not-express", routes: 0 },
+          changes: {
+            statusChanged: true,
+            applicationsDelta: -1,
+            routeCountDelta: -1,
+            documentationChanged: false,
+            routes: {
+              summary: {
+                addedRoutes: 0,
+                removedRoutes: 1,
+                authRegressions: 0,
+                authImprovements: 0,
+                newFindings: 0,
+                resolvedFindings: 0,
+              },
+              details: {
+                removedRoutes: [
+                  {
+                    applicationId: "app:src/app.js#app",
+                    method: "GET",
+                    path: "/legacy",
+                    source: { file: "src/legacy.js", line: 4 },
+                  },
+                ],
+              },
+              detailsRetained: 1,
+              detailsTruncated: false,
+            },
+          },
+        },
+      ],
+      diagnostics: [],
+    });
+
+    const result = renderHtmlSite(root, path.join(root, "site"));
+    const overview = fs.readFileSync(result.output, "utf8");
+    const detail = fs.readFileSync(
+      path.join(root, "site", "repositories", "payments.html"),
+      "utf8",
+    );
+    const legacy = fs.readFileSync(path.join(root, "site", "repositories", "legacy.html"), "utf8");
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(root, "site", "render-manifest.json"), "utf8"),
+    );
+    assert.match(overview, /Changes since baseline/);
+    assert.match(overview, /Added paths/);
+    assert.match(overview, /acme\/payments/);
+    assert.match(detail, /\/new-route/);
+    assert.match(detail, /auth regression|added/);
+    assert.match(overview, /View changes/);
+    assert.match(legacy, /\/legacy/);
+    assert.deepEqual(manifest.data, ["organization-delta.json"]);
+    assert.ok(fs.existsSync(path.join(root, "site", "organization-delta.json")));
+
+    fs.rmSync(path.join(root, "organization-delta.json"));
+    const aggregate = JSON.parse(
+      fs.readFileSync(path.join(root, "organization-inventory.json"), "utf8"),
+    );
+    delete aggregate.delta;
+    writeJson(path.join(root, "organization-inventory.json"), aggregate);
+    renderHtmlSite(root, path.join(root, "site"));
+    assert.equal(fs.existsSync(path.join(root, "site", "organization-delta.json")), false);
+  });
+});
+
+test("HTML rendering can compare two saved organization folders without rescanning", () => {
+  temporary("html-baseline-option", (root) => {
+    const baseline = path.join(root, "baseline");
+    const current = path.join(root, "current");
+    const organization = (routes, commit) => ({
+      schemaVersion: "1.0",
+      tool: "express-recon",
+      toolVersion: "0.8.0",
+      kind: "github-organization-inventory",
+      organization: { login: "acme" },
+      scope: {
+        fingerprint: "same-scope",
+        includeArchived: false,
+        includeForks: false,
+        maxRepositories: 100,
+      },
+      coverage: { complete: true },
+      summary: { routes: routes.length },
+      repositories: [
+        {
+          repository: { name: "api", fullName: "acme/api" },
+          status: routes.length ? "express" : "not-express",
+          commit,
+          coverageComplete: true,
+          express: {
+            applicationCount: routes.length ? 1 : 0,
+            routeCount: routes.length,
+            documentation: {},
+          },
+          scan: repositoryScan({
+            repository: { ...repositoryScan().repository, commit },
+            inventory: routeReport({ routes, findings: [], summary: { routes: routes.length } }),
+          }),
+        },
+      ],
+    });
+    writeJson(path.join(baseline, "organization-inventory.json"), organization([], "a".repeat(40)));
+    writeJson(
+      path.join(current, "organization-inventory.json"),
+      organization([{ ...routeReport().routes[0], method: "GET", path: "/new" }], "b".repeat(40)),
+    );
+
+    const result = renderHtmlSite(current, path.join(root, "site"), { baseline });
+    const overview = fs.readFileSync(result.output, "utf8");
+    const delta = JSON.parse(
+      fs.readFileSync(path.join(root, "site", "organization-delta.json"), "utf8"),
+    );
+    assert.match(overview, /Changes since baseline/);
+    assert.equal(delta.summary.addedRoutes, 1);
+    assert.equal(delta.repositories[0].changes.routes.details.addedRoutes[0].path, "/new");
   });
 });
 
@@ -466,8 +1122,34 @@ test("rerendering removes only stale files owned by the previous manifest", () =
     const result = renderHtmlSite(root, output);
     assert.equal(result.pages.length, 2);
     assert.equal(fs.existsSync(stale), false);
-    assert.match(fs.readFileSync(result.output, "utf8"), /No Express report/);
+    assert.match(fs.readFileSync(result.output, "utf8"), /No supported framework report/);
     assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "not renderer-owned");
+  });
+});
+
+test("rerendering switches cleanly between report and OpenAPI asset sets", () => {
+  temporary("html-rerender-kinds", (root) => {
+    const reportFile = path.join(root, "routes.json");
+    const specification = path.join(root, "contract.json");
+    const output = path.join(root, "site");
+    writeJson(reportFile, routeReport());
+    writeJson(specification, openApiDocument());
+
+    renderHtmlSite(reportFile, output);
+    fs.writeFileSync(path.join(output, "keep.txt"), "unowned and preserved");
+    assert.ok(fs.existsSync(path.join(output, "assets", "report.css")));
+
+    renderHtmlSite(specification, output);
+    assert.equal(fs.existsSync(path.join(output, "assets", "report.css")), false);
+    assert.equal(fs.existsSync(path.join(output, "assets", "report.js")), false);
+    assert.ok(fs.existsSync(path.join(output, "assets", "swagger-ui.css")));
+    assert.ok(fs.existsSync(path.join(output, "assets", "openapi-config.js")));
+
+    renderHtmlSite(reportFile, output);
+    assert.ok(fs.existsSync(path.join(output, "assets", "report.css")));
+    assert.equal(fs.existsSync(path.join(output, "assets", "swagger-ui.css")), false);
+    assert.equal(fs.existsSync(path.join(output, "assets", "openapi-config.js")), false);
+    assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "unowned and preserved");
   });
 });
 
@@ -494,16 +1176,19 @@ test("renderer refuses nonempty unowned output and unsafe prior manifests", () =
   });
 });
 
-test("render CLI requires explicit input/output and returns a bounded result", () => {
+test("render CLI supports explicit paths and safe input/output defaults", () => {
   temporary("html-cli", (root) => {
+    const explicitInput = path.join(root, "explicit");
     writeJson(
-      path.join(root, "routes.json"),
+      path.join(explicitInput, "routes.json"),
       routeReport({ command: "inventory", findings: undefined }),
     );
     const output = path.join(root, "site");
-    const success = spawnSync(process.execPath, [CLI, "render", "--input", root, "--out", output], {
-      encoding: "utf8",
-    });
+    const success = spawnSync(
+      process.execPath,
+      [CLI, "render", "--input", explicitInput, "--out", output],
+      { encoding: "utf8" },
+    );
     assert.equal(success.status, 0, success.stderr);
     assert.deepEqual(JSON.parse(success.stdout), {
       kind: "html-render-result",
@@ -513,12 +1198,83 @@ test("render CLI requires explicit input/output and returns a bounded result", (
       warnings: 0,
     });
 
+    const specification = path.join(root, "contract.json");
+    const openApiOutput = path.join(root, "openapi-site");
+    writeJson(specification, openApiDocument());
+    const openApi = spawnSync(
+      process.execPath,
+      [CLI, "render", "--input", specification, "--out", openApiOutput],
+      { encoding: "utf8" },
+    );
+    assert.equal(openApi.status, 0, openApi.stderr);
+    assert.deepEqual(JSON.parse(openApi.stdout), {
+      kind: "html-render-result",
+      sourceKind: "openapi",
+      output: path.join(openApiOutput, "index.html"),
+      pages: 1,
+      warnings: 0,
+    });
+
+    const inputOnly = path.join(root, "input-only");
+    writeJson(path.join(inputOnly, "routes.json"), routeReport());
+    const derived = spawnSync(process.execPath, [CLI, "render", "--input", inputOnly], {
+      encoding: "utf8",
+    });
+    assert.equal(derived.status, 0, derived.stderr);
+    assert.equal(JSON.parse(derived.stdout).output, `${inputOnly}-html/index.html`);
+
+    const outputOnlyWorkspace = path.join(root, "output-only-workspace");
+    const outputOnlyTarget = path.join(outputOnlyWorkspace, "rendered");
+    writeJson(path.join(outputOnlyWorkspace, "routes.json"), routeReport());
+    const outputOnly = spawnSync(process.execPath, [CLI, "render", "--out", outputOnlyTarget], {
+      cwd: outputOnlyWorkspace,
+      encoding: "utf8",
+    });
+    assert.equal(outputOnly.status, 0, outputOnly.stderr);
+    assert.equal(JSON.parse(outputOnly.stdout).output, path.join(outputOnlyTarget, "index.html"));
+
+    const automaticWorkspace = path.join(root, "automatic-workspace");
+    const automaticInput = path.join(automaticWorkspace, ".express-recon", "result");
+    writeJson(path.join(automaticInput, "routes.json"), routeReport());
+    const automatic = spawnSync(process.execPath, [CLI, "render"], {
+      cwd: automaticWorkspace,
+      encoding: "utf8",
+    });
+    assert.equal(automatic.status, 0, automatic.stderr);
+    assert.equal(
+      JSON.parse(automatic.stdout).output,
+      path.join(fs.realpathSync(automaticWorkspace), ".express-recon", "result-html", "index.html"),
+    );
+
+    const empty = path.join(root, "empty");
+    fs.mkdirSync(empty);
+    const ambiguous = path.join(root, "ambiguous");
+    writeJson(path.join(ambiguous, ".express-recon", "one", "routes.json"), routeReport());
+    writeJson(path.join(ambiguous, ".express-recon", "two", "routes.json"), routeReport());
     for (const args of [
-      ["render", "--input", root],
-      ["render", "--out", output],
-      ["render", "--input", root, "--out", output, "--src", "."],
+      { cwd: empty, args: ["render"] },
+      { cwd: ambiguous, args: ["render"] },
+      {
+        cwd: root,
+        args: ["render", "--input", explicitInput, "--out", output, "--src", "."],
+      },
+      {
+        cwd: root,
+        args: [
+          "render",
+          "--input",
+          explicitInput,
+          "--out",
+          path.join(root, "baseline-site"),
+          "--baseline",
+          explicitInput,
+        ],
+      },
     ]) {
-      const failure = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8" });
+      const failure = spawnSync(process.execPath, [CLI, ...args.args], {
+        cwd: args.cwd,
+        encoding: "utf8",
+      });
       assert.equal(failure.status, 1);
       assert.ok(failure.stderr.trim());
     }

@@ -23,54 +23,81 @@ npm run check
 npm run audit:prod
 ```
 
-`npm run check` runs linting, formatting checks, the coverage-gated suite, and
-the version-consistency guard. `npm run docs:check` is the focused link/help/
-package-surface check while editing documentation.
+`npm run check` runs linting, formatting checks, documentation coverage, the
+coverage-gated suite, and the version-consistency guard. `npm run docs:check`
+is the focused documentation-coverage and link/help/package-surface check.
 
 Use `npx oxfmt src testcases` to format JavaScript. `npm run fmt` formats the
 whole repository, including Markdown and fixtures, so use it only when those
 broader changes are intentional.
 
+### Development script index
+
+| Script                   | Purpose                                                                |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `npm run check`          | Run every required local quality gate.                                 |
+| `npm run docs:check`     | Run documentation coverage plus focused documentation tests.           |
+| `npm run docs:coverage`  | Measure and require complete supported-surface documentation.          |
+| `npm test`               | Run the complete Node test suite without coverage thresholds.          |
+| `npm run test:coverage`  | Run tests with enforced line, branch, and function thresholds.         |
+| `npm run lint`           | Run `oxlint`.                                                          |
+| `npm run fmt`            | Format the repository with `oxfmt`.                                    |
+| `npm run fmt:check`      | Check formatting for `src/` and `testcases/`.                          |
+| `npm run logo:build`     | Rebuild committed SVG variants; add `-- --social` for the preview PNG. |
+| `npm run audit:prod`     | Audit production dependencies at high severity.                        |
+| `npm run check:version`  | Verify package, CLI/plugin, and generated version consistency.         |
+| `npm run version`        | Synchronize versioned plugin metadata during npm versioning.           |
+| `npm run prepublishOnly` | Re-run the version guard immediately before publication.               |
+
 ## Repository map
 
-| Area | Responsibility |
-| --- | --- |
-| `src/static/` | AST parsing, module resolution, route/mount extraction, scan limits |
-| `src/runtime/` | Trusted app boot worker and runtime route observation |
-| `src/discover.js` | Packages, apps, entries, and API-document discovery |
-| `src/docs.js` | OpenAPI/JSDoc/inventory reconciliation and drift evidence |
-| `src/review.js` | Bounded middleware evidence and advisory assessment validation |
-| `src/repository.js` | Non-executing Git acquisition/materialization |
-| `src/organization.js` | GitHub pagination, bounded worker orchestration, aggregate inventory |
-| `src/organization-checkpoint.js` | Atomic resume checkpoints and artifact integrity validation |
-| `src/organization-progress.js` | TTY, plain CI, JSONL, and quiet progress rendering |
-| `src/classify.js` | Config-relative auth classification |
-| `src/policies.js` | Policy validation and deterministic evaluation |
-| `src/report.js`, `src/schema.js` | Versioned report contract |
-| `src/formatters/` | JSON-adjacent, Markdown, terminal, and OpenAPI output |
-| `src/cli.js` | CLI parsing, validation, artifacts, and exit codes |
-| `src/mcp/server.js` | Static local MCP tool surface |
-| `testcases/fixtures/` | Small repositories encoding scanner behavior |
-| `skills/` | Bundled audit and OpenAPI workflows for coding agents |
+| Area                                | Responsibility                                                          |
+| ----------------------------------- | ----------------------------------------------------------------------- |
+| `src/static/`                       | Shared AST/resolution limits plus Express, Fastify, and NestJS adapters |
+| `src/runtime/`                      | Trusted app boot worker and runtime route observation                   |
+| `src/discover.js`                   | Packages, apps, entries, and API-document discovery                     |
+| `src/docs.js`                       | OpenAPI/JSDoc/inventory reconciliation and drift evidence               |
+| `src/review.js`                     | Bounded middleware evidence and advisory assessment validation          |
+| `src/repository.js`                 | Non-executing Git acquisition/materialization                           |
+| `src/organization.js`               | GitHub pagination, bounded worker orchestration, aggregate inventory    |
+| `src/organization-checkpoint.js`    | Atomic resume checkpoints and artifact integrity validation             |
+| `src/organization-progress.js`      | TTY, plain CI, JSONL, and quiet progress rendering                      |
+| `src/organization-compare.js`       | Bounded organization baseline and route-change comparison               |
+| `src/classify.js`                   | Config-relative auth classification                                     |
+| `src/policies.js`                   | Policy validation and deterministic evaluation                          |
+| `src/report.js`, `src/schema.js`    | Versioned report contract                                               |
+| `src/formatters/`                   | JSON-adjacent, Markdown, terminal, and OpenAPI output                   |
+| `src/html.js`, `src/html-assets.js` | Offline report sites, packaged Swagger UI, and output ownership         |
+| `src/cli.js`                        | CLI parsing, validation, artifacts, and exit codes                      |
+| `src/mcp/server.js`                 | Static local MCP tool surface                                           |
+| `testcases/fixtures/`               | Small repositories encoding scanner behavior                            |
+| `skills/`                           | Bundled audit and OpenAPI workflows for coding agents                   |
 
 ## Design invariants
 
 - Static/offline is the default. Never import target code during discovery,
   static inventory, docs reconciliation, middleware review, or remote scans.
+- Rendered sites must remain usable through `file://`: package browser assets
+  locally, keep organization OpenAPI pages on one shared bundle, keep request
+  execution and browser connections disabled, retain third-party license
+  notices, and list every generated file in the manifest.
+- Preserve bounded render-input discovery plus sibling output derivation in the
+  CLI. Never recurse through source to guess a report or choose among multiple
+  saved scans.
 - Inventory records evidence; audit applies reviewed security decisions. Do not
   add auth judgment to inventory output.
 - `public` and `proven` are relative to explicit configuration. Neither is a
   deployment/reachability claim.
-- Keep separate Express application identities separate across findings,
-  baselines, policies, hybrid reconciliation, and OpenAPI metadata.
+- Keep separate framework/application identities separate across findings,
+  baselines, policies, comparison, and OpenAPI metadata.
 - Preserve partial and conflicting evidence. Do not silently drop routes that
   cannot be fully resolved.
 - Output ordering, paths, fingerprints, and diagnostics must be deterministic
   across machines.
 - Limits and parse/read failures must make coverage incomplete and remain
   visible in machine output.
-- Runtime/hybrid is an explicit trusted-code boundary. The worker is not an OS
-  sandbox.
+- Runtime/hybrid is an explicit, Express-only trusted-code boundary. The worker
+  is not an OS sandbox.
 - AI middleware classification is advisory. Only reviewed config may influence
   a deterministic audit.
 - Remote acquisition never installs dependencies, checks out a worktree,
@@ -78,6 +105,9 @@ broader changes are intentional.
 - Organization concurrency must retain per-repository cleanup, token redaction,
   failure isolation, and an incomplete rather than negative classification when
   evidence is truncated.
+- Organization CLI scans must remain durable by default under
+  `.express-recon/<lowercase-organization>`; never restore the unbounded
+  aggregate-on-stdout path or weaken existing resume/overwrite conflict checks.
 - Organization progress stays on stderr, uses versioned events, reports only
   monotonic terminal counters, and never changes scan evidence when an observer
   or output stream fails.
@@ -141,6 +171,9 @@ node --test testcases/docs.test.js
 
 # Coverage gates
 npm run test:coverage
+
+# Public documentation coverage
+npm run docs:coverage
 ```
 
 Prefer minimal text fixtures over mocks for AST/resolution behavior. Temporary
@@ -157,6 +190,13 @@ schema, and configuration detail in the reference; AI-specific rules in the
 agent guide; and reconciliation detail in the OpenAPI guide. Examples must use
 current command names and preserve the offline/trusted-code distinction.
 
+Documentation coverage is an enforced public-surface metric, not a prose line
+count. The checker requires coverage for every CLI command and long option,
+environment variable exposed in help, package export, validated configuration
+field, and example file. Every public function also needs adjacent JSDoc, and
+every package export needs an `ExpressReconAPI` property comment in
+`src/index.js`. The total must remain 100%; exclusions are not supported.
+
 When behavior changes, update all affected surfaces:
 
 - CLI `--help`;
@@ -164,6 +204,10 @@ When behavior changes, update all affected surfaces:
 - bundled skill instructions;
 - MCP tool description, if applicable;
 - package contents and documentation-link tests.
+
+If a public export changes, update [docs/api.md](./docs/api.md) and its JSDoc. If
+a validated configuration key changes, update the complete field index in
+[docs/reference.md](./docs/reference.md#complete-configuration-field-index).
 
 ## Pull requests
 

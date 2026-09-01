@@ -112,6 +112,29 @@ test("reports incomplete coverage when a source file cannot be parsed", () => {
   );
 });
 
+test("TypeScript declaration files do not affect executable source coverage", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-declarations-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      'const express = require("express"); const app = express(); app.get("/ready", handler);',
+    );
+    fs.writeFileSync(
+      path.join(dir, "legacy.d.ts"),
+      "declare module Legacy { export interface Broken { [key?: string]: unknown } }",
+    );
+    const result = scanRepo(dir, CONFIG);
+    assert.equal(result.scanCoverage.complete, true);
+    assert.equal(result.scanCoverage.discovered, 1);
+    assert.deepEqual(
+      result.routes.map((route) => route.path),
+      ["/ready"],
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("scan file-count and total-byte limits fail coverage closed", () => {
   const byCount = audit({ mode: "static", src: FIXTURE, maxFiles: 1 }, CONFIG);
   assert.equal(byCount.scanCoverage.complete, false);

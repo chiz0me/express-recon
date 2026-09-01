@@ -1,0 +1,8 @@
+# Copy this file to .express-recon-org-ignore in the inventory repository.
+# It replaces each target repository's own .express-reconignore, so only add
+# centrally reviewed, root-relative exclusions here. Built-in dependency,
+# generated-build, VCS, and test-fixture exclusions still apply.
+
+# Example organization-wide exclusions:
+# generated-clients/**
+# vendor-owned/**

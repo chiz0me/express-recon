@@ -1,7 +1,8 @@
 # OpenAPI and swagger-jsdoc guide
 
 express-recon can build a deterministic OpenAPI 3.1 skeleton or reconcile that
-skeleton with documentation already present in an Express repository. It does
+skeleton with documentation already present in an Express, Fastify, or NestJS
+repository. It does
 not claim that code-derived placeholder schemas are a finished API contract.
 
 ## Pick the right command
@@ -23,13 +24,44 @@ code-derived skeleton:
 express-recon inventory --src . --format openapi --out .express-recon
 ```
 
+Render any completed OpenAPI 3 JSON/YAML document as a standalone reference with
+the packaged Swagger UI:
+
+```bash
+express-recon render --input .express-recon/openapi.json \
+  --out .express-recon/api-reference
+```
+
+Passing an organization scan folder renders every valid OpenAPI artifact tied
+to a confirmed supported-framework repository, as well as the organization overview and
+repository reports:
+
+```bash
+express-recon render --input .express-recon/acme
+```
+
+That command derives `.express-recon/acme-html`, writes per-repository API pages
+under `openapi/`, and shares one packaged Swagger UI bundle across them. A
+unsupported entry does not get an API page merely because its artifact folder
+contains an OpenAPI-looking file. With exactly one saved result under
+`.express-recon/`, `express-recon render` can also infer both paths; scripts and
+CI should normally keep `--input` explicit.
+
+This rendering step does not scan or reconcile the repository. It works through
+`file://`, contacts no network service, executes no target code, and invokes no
+model. Request submission and Swagger's online validator are disabled. Because
+the page CSP blocks all browser connections, external `$ref` targets—relative or
+remote—remain unresolved; bundle them into the input document when a fully
+self-contained view is required. The result is a review surface, not evidence
+that runtime behavior matches the contract.
+
 An inventory skeleton has no auth classification. An audit skeleton can emit
 per-operation security only when configuration explicitly maps reviewed auth
 tags to OpenAPI security schemes.
 
 ## Select one application
 
-Discovery gives every `express()` root a stable ID and owning package. `docs`
+Discovery gives every supported application root a stable ID and owning package. `docs`
 automatically selects an unambiguous app in the existing specification's
 package. Multiple matches and cross-package merges require `--app-id <id>` so
 an unrelated spec or app does not contaminate the result—even when only one app
@@ -88,7 +120,8 @@ The report separates:
 - `conflicts`: authored values that disagree, with JSON pointers and sources;
 - `dynamicOperations`: paths containing an unresolved dynamic segment;
 - `duplicateOperations`: method/path collisions that OpenAPI cannot represent;
-- `scanCoverage` and diagnostics.
+- `scanCoverage`, `routeGraph` (including partial-route and opaque-provider
+  counts), and diagnostics.
 
 Useful CI gates are:
 
@@ -137,7 +170,7 @@ configuration. Generated public operations receive `security: []`. Proven
 operations receive security only for mapped auth tags; unmapped tags remain in
 `x-express-recon.unmappedAuthTags` rather than being guessed. Multiple mapped
 guards on a route are written in one Security Requirement Object because the
-observed Express guard chain is conjunctive.
+observed lifecycle guard chain is conjunctive.
 
 `public` remains configuration-relative and does not mean internet-reachable.
 Do not publish an operation as unauthenticated without also reviewing deployment
@@ -148,15 +181,16 @@ and upstream controls.
 Each generated operation retains `x-express-recon` evidence:
 
 - `applicationId`;
+- `framework` (`express`, `fastify`, or `nestjs`);
 - route `source`;
 - `authStatus`, `authTags`, roles, and scopes when audited;
-- middleware names;
+- middleware names and aligned `middlewareStages` lifecycle roles;
 - `pathConfidence`;
 - `handlerResolved`, `handlerName`, and `handlerSource` hints;
-- original Express method;
+- original HTTP method;
 - hybrid observations when present.
 
-The document-level extension records the command/mode and sets
+The document-level extension records the command/mode, detected `frameworks`, and sets
 `schemasArePlaceholders: true`. Code-derived parameters, request bodies, and
 responses carry explicit placeholder text or
 `x-express-recon-unrefined: true`. They are hints mined from field access and

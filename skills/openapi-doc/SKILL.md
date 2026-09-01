@@ -1,26 +1,27 @@
 ---
 name: openapi-doc
 description: >-
-  Generate an AI-documented OpenAPI 3.1 (Swagger) spec for an Express 4/5
-  codebase. Use when asked to "generate an OpenAPI/Swagger spec", "document the
-  API", "produce API docs from the routes", or "describe each endpoint's request
-  and response". Drives express-recon to build a deterministic skeleton, then
-  reviews each handler's code to fill in real request/response schemas and notes.
+  Generate an AI-documented OpenAPI 3.1 (Swagger) spec for an Express, Fastify,
+  or NestJS codebase. Use when asked to "generate an OpenAPI/Swagger spec",
+  "document the API", "produce API docs from the routes", or "describe each
+  endpoint's request and response". Drives express-recon to build a
+  deterministic skeleton, then reviews handler code to fill real schemas and
+  notes.
   Triggers: "openapi", "swagger", "api docs", "document the api", "generate a
   spec", "request/response schemas".
 ---
 
 # OpenAPI/Swagger documentation (express-recon)
 
-Turns an Express codebase into a documented **OpenAPI 3.1** document in two
+Turns a supported HTTP codebase into a documented **OpenAPI 3.1** document in two
 layers:
 
 1. **Skeleton (deterministic).** `express-recon` emits paths, methods,
    path/query/header parameters, response status codes, per-operation `security`
    (only from explicit auth-tag/security-scheme mapping), and statically-mined
-   request/response *hints* —
+   request/response _hints_ —
    plus an `x-express-recon` extension per operation carrying the handler
-   `source` file:line, `applicationId`, `authStatus`, middleware chain,
+   `source` file:line, `framework`, `applicationId`, `authStatus`, middleware chain,
    `handlerResolved`, `handlerName`, and `handlerSource`.
 2. **Enrichment (AI code review — this skill).** You read each handler at its
    `source`, refine the placeholder schemas into real JSON Schema, and write a
@@ -65,7 +66,7 @@ with `authMiddleware`, `openapi.securitySchemes`, and
 name. The `docs` command uses audit classification only when this explicit
 OpenAPI mapping exists.
 
-For trusted dynamic apps, first produce a hybrid inventory/OpenAPI skeleton
+For a trusted dynamic Express app, first produce a hybrid inventory/OpenAPI skeleton
 with an explicit `--app <entry>` (or unambiguous `auto --allow-exec`) and merge
 its refinements carefully. Never execute a remote/untrusted repository.
 
@@ -73,9 +74,9 @@ Read the skeleton. Each operation has:
 
 - `operationId`, `tags`, `parameters`, `requestBody`/`responses` (placeholders),
   `security`.
-- `x-express-recon`: `{ applicationId, source: {file, line}, authStatus,
-  authTags, roles, scopes, middlewares[], pathConfidence, handlerResolved,
-  handlerName, handlerSource, method }`.
+- `x-express-recon`: `{ framework, applicationId, source: {file, line}, authStatus,
+authTags, roles, scopes, middlewares[], pathConfidence, handlerResolved,
+handlerName, handlerSource, method }`.
 
 ## 2. Document each operation (the AI pass)
 
@@ -105,7 +106,7 @@ Finding the handler (by `x-express-recon` fields):
   you at the symbol:
   - `controllers.<area>.<method>` → `<area>` controller file, that method. This
     is the common DI shape (`module.exports = (controllers) => { router.get('/x',
-    controllers.foo.bar) }`).
+controllers.foo.bar) }`).
   - A non-standard name (`v2Controllers.smallboardController`,
     `depositHandler.getDeposits`) → **grep the repo** for the symbol to find its
     file; the convention above won't locate it.
@@ -119,7 +120,7 @@ Finding the handler (by `x-express-recon` fields):
 
 Schema guidance:
 
-- **Look for a shared response envelope first.** Many Express apps wrap every
+- **Look for a shared response envelope first.** Many HTTP apps wrap every
   response in a helper (e.g. `createRes(success, errors, data)` /
   `res.json({ success, data, error })`). Model it **once** as a
   `components/schemas` entry and `$ref` it, with the per-endpoint `data` shape as
@@ -151,14 +152,30 @@ Schema guidance:
   every `$ref` resolves against `components/schemas`. If Redocly is already
   installed, run `npx --no-install @redocly/cli lint <outDir>/openapi.json` and
   fix what it flags. Do not let `npx` fetch tooling in an offline workflow.
-- Rendering HTML is optional and outside express-recon. If Redocly is installed,
-  run `npx --no-install @redocly/cli build-docs <outDir>/openapi.json -o
-  <outDir>/api.html`. Ask before using a CDN or installing a renderer because
-  either adds a network step.
+- Rendering HTML is optional and model-free. When the user wants a browsable
+  contract, use express-recon's packaged Swagger UI instead of installing another
+  renderer or using a CDN:
+
+  ```bash
+  express-recon render --input <outDir>/openapi.json \
+    --out <outDir>/api-reference
+  ```
+
+  Keep both paths explicit in agent workflows so the chosen evidence and handoff
+  location are visible, even though the CLI can safely derive a sibling `-html`
+  output or find one unambiguous result under `.express-recon/` for interactive
+  use.
+
+  Return `<outDir>/api-reference/index.html` without reading the generated UI
+  bundle into model context. The page is self-contained and works through
+  `file://`; request submission, online validation, and browser connections are
+  disabled. External `$ref` values—relative or remote—remain unresolved, so
+  bundle the specification first when complete schema expansion is required.
+
 - Report coverage to the user: operations documented vs. left as placeholders,
   which controllers/tags are complete, and any handlers that couldn't be resolved
   (so they know where the docs are weakest). Give the path of `openapi.json` and,
-  only when rendered, `api.html`.
+  only when rendered, `api-reference/index.html`.
 
 ## Scaling to large APIs
 
@@ -180,6 +197,6 @@ step 2) keeps their `components/schemas` consistent so the fragments merge clean
 
 - The skeleton alone (no AI pass) is already a usable, if under-specified, spec —
   hand it over as-is if the user only wants the structure.
-- Never run `--mode runtime`/`hybrid` on a repo you don't trust to import.
+- Runtime/hybrid is Express-only; never use it on a repo you do not trust to import.
 - This complements the `express-recon-audit` skill: the OpenAPI document is the
   structural view, while the audit provides configuration-relative auth posture.

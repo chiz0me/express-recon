@@ -71,13 +71,22 @@ function runtimeInventory(opts) {
 }
 
 function hybridApplicationId(opts, staticRegistry) {
-  const ids = new Set((staticRegistry.applications || []).map((application) => application.id));
+  const applications = staticRegistry.applications || [];
+  const ids = new Set(applications.map((application) => application.id));
+  const assertExpressRuntime = (application) => {
+    if (application?.framework && application.framework !== "express") {
+      throw new Error(
+        `hybrid runtime observation currently supports Express applications only; ${application.id} is ${application.framework}`,
+      );
+    }
+  };
   if (opts.applicationId) {
     if (!ids.has(opts.applicationId)) {
       throw new Error(
         `hybrid applicationId ${JSON.stringify(opts.applicationId)} was not found by static discovery`,
       );
     }
+    assertExpressRuntime(applications.find((application) => application.id === opts.applicationId));
     return opts.applicationId;
   }
   if (!opts.runtimeEntry) return null;
@@ -85,6 +94,7 @@ function hybridApplicationId(opts, staticRegistry) {
   const matches = (staticRegistry.applications || []).filter(
     (application) => application.source?.file && path.resolve(application.source.file) === entry,
   );
+  if (matches.length === 1) assertExpressRuntime(matches[0]);
   return matches.length === 1 ? matches[0].id : null;
 }
 
@@ -99,6 +109,8 @@ function hybridRuntimeInventory(opts, staticRegistry) {
       {
         ...(registry.applications?.[0] || {
           name: "runtime application",
+          framework: "express",
+          adapter: "express",
           source: null,
           globalMiddleware: registry.globalMiddleware || [],
         }),

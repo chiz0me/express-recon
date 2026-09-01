@@ -324,7 +324,7 @@ function selectApplication(report, requested, discovery, specification) {
       if (knownPackages.length === ids.length) {
         throw applicationSelectionError(
           `OpenAPI document ${JSON.stringify(specification.path)} belongs to ${specification.packageId}, ` +
-            `but the detected Express application package(s) are ${[...new Set(knownPackages)].join(", ")}. ` +
+            `but the detected application package(s) are ${[...new Set(knownPackages)].join(", ")}. ` +
             "Choose --app-id <id> to confirm an intentional cross-package merge.",
           ids,
         );
@@ -338,7 +338,7 @@ function selectApplication(report, requested, discovery, specification) {
         (item) => item.id === applicationPackageId,
       );
       throw applicationSelectionError(
-        `OpenAPI document ${JSON.stringify(specification.path)} is outside the detected Express ` +
+        `OpenAPI document ${JSON.stringify(specification.path)} is outside the detected ` +
           `application package ${applicationPackage?.root || applicationPackageId}. ` +
           "Choose --app-id <id> to confirm an intentional cross-package merge.",
         ids,
@@ -355,7 +355,7 @@ function selectApplication(report, requested, discovery, specification) {
   }
   if (ids.length > 1) {
     throw applicationSelectionError(
-      `Multiple Express applications were found; choose --app-id <id> or use --app-id all intentionally. Found: ${ids.join(", ")}`,
+      `Multiple applications were found; choose --app-id <id> or use --app-id all intentionally. Found: ${ids.join(", ")}`,
       ids,
     );
   }
@@ -431,6 +431,11 @@ function routeGraphUncertainty(report, selection) {
     (route) => route.applicationId === null,
   ).length;
   const orphanRoutes = report.routeGraph?.orphanRoutes ?? fallbackOrphans;
+  const partialRoutes = (report.routes || []).filter(
+    (route) =>
+      route.pathConfidence === "partial" &&
+      (selection.id === "all" || route.applicationId === selection.id),
+  ).length;
   const opaqueMounts = (report.routeGraph?.opaqueMounts || []).filter(
     (mount) =>
       selection.id === "all" ||
@@ -438,8 +443,9 @@ function routeGraphUncertainty(report, selection) {
       mount.applicationId === selection.id,
   );
   return {
-    incomplete: orphanRoutes > 0 || opaqueMounts.length > 0,
+    incomplete: orphanRoutes > 0 || partialRoutes > 0 || opaqueMounts.length > 0,
     orphanRoutes,
+    partialRoutes,
     registrarRoutes: report.routeGraph?.registrarRoutes || 0,
     opaqueMounts,
   };
@@ -459,6 +465,11 @@ function underOpaqueMount(operation, mount) {
   return prefix === "/" || documentedPath === prefix || documentedPath.startsWith(`${prefix}/`);
 }
 
+/**
+ * Merge authored OpenAPI, swagger-jsdoc blocks, and an inventory report using
+ * deterministic precedence. Repository JavaScript is parsed as data and is
+ * never imported or executed by this path.
+ */
 function reconcileDocumentation(report, opts = {}) {
   const root = fs.realpathSync(path.resolve(opts.root || process.cwd()));
   const limits = scanLimits(opts.scan || {});
@@ -593,6 +604,7 @@ function reconcileDocumentation(report, opts = {}) {
     routeGraph: {
       complete: !graph.incomplete,
       orphanRoutes: graph.orphanRoutes,
+      partialRoutes: graph.partialRoutes,
       registrarRoutes: graph.registrarRoutes,
       opaqueMounts: graph.opaqueMounts,
     },

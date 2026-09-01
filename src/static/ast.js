@@ -25,22 +25,31 @@ const TS_WRAPPERS = new Set([
  * @returns {object|null}
  */
 function parse(code, filename, onError) {
-  try {
-    const result = oxc.parseSync(filename, code);
-    if (result && Array.isArray(result.errors) && result.errors.length > 0) {
-      const first = result.errors[0];
-      const extra = result.errors.length > 1 ? ` (+${result.errors.length - 1} more)` : "";
-      onError?.(`${first.message || "parse error"}${extra}`);
-      return null;
+  const attempts = [filename];
+  // Babel/SWC projects commonly keep JSX in `.js` files. oxc deliberately
+  // infers the grammar from the filename, so retrying with a virtual `.jsx`
+  // suffix recovers those files without renaming or executing repository code.
+  if (/\.js$/i.test(filename)) attempts.push(filename.replace(/\.js$/i, ".jsx"));
+
+  let firstFailure = null;
+  for (const attempt of attempts) {
+    try {
+      const result = oxc.parseSync(attempt, code);
+      if (result && Array.isArray(result.errors) && result.errors.length > 0) {
+        const first = result.errors[0];
+        const extra = result.errors.length > 1 ? ` (+${result.errors.length - 1} more)` : "";
+        firstFailure ||= `${first.message || "parse error"}${extra}`;
+        continue;
+      }
+      const program = result && result.program;
+      if (program && Array.isArray(program.body)) return program;
+      firstFailure ||= "parser returned no usable program";
+    } catch (err) {
+      firstFailure ||= err && err.message ? err.message : String(err);
     }
-    const program = result && result.program;
-    if (program && Array.isArray(program.body)) return program;
-    onError?.("parser returned no usable program");
-    return null;
-  } catch (err) {
-    onError?.(err && err.message ? err.message : String(err));
-    return null;
   }
+  onError?.(firstFailure || "parser returned no usable program");
+  return null;
 }
 
 /** Depth-first pre-order visit of every ESTree node, in document order. */

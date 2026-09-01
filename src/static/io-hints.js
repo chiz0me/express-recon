@@ -50,7 +50,8 @@ function resChain(callNode, resName) {
     if (obj.type === "CallExpression") {
       const inner = unwrap(obj.callee);
       if (!inner || inner.type !== "MemberExpression" || inner.computed) return null;
-      if (inner.property.name === "status") {
+      // Express uses `status()`, while Fastify's reply object uses `code()`.
+      if (inner.property.name === "status" || inner.property.name === "code") {
         const n = numericArg(obj.arguments[0]);
         if (n != null) status = n;
       }

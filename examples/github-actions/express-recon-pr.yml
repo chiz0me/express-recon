@@ -1,13 +1,13 @@
 # Express Recon PR security review (JSON/Markdown; intentionally no SARIF).
 #
-# Prerequisites in the consuming Express repository:
+# Prerequisites in the consuming HTTP service repository:
 #   1. Add express-recon as a pinned devDependency and commit package-lock.json.
 #   2. Commit a data-only recon.config.json.
 #   3. Protect this workflow, package-lock.json, recon.config.json, and
 #      .express-reconignore with CODEOWNERS/required review.
 #
 # Copy this file to .github/workflows/express-recon.yml.
-name: Express route security review
+name: API route security review
 
 on:
   pull_request:

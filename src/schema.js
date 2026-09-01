@@ -9,6 +9,10 @@ const descriptor = {
     name: { type: "string", description: "Identifier, dotted callee, or '<anonymous>'" },
     kind: { enum: ["identifier", "call", "anonymous", "unknown"] },
     raw: { type: "string", description: "Best-effort source snippet" },
+    stage: {
+      enum: ["middleware", "hook", "guard", "interceptor", "pipe", "filter"],
+      description: "Framework lifecycle role when statically identifiable",
+    },
     inner: {
       type: "array",
       items: { type: "string" },
@@ -94,6 +98,7 @@ const route = {
   type: "object",
   additionalProperties: false,
   properties: {
+    framework: { enum: ["express", "fastify", "nestjs"] },
     applicationId: { type: ["string", "null"] },
     method: { type: "string", description: "HTTP verb, or 'ALL' for router.all() routes" },
     path: {
@@ -161,6 +166,8 @@ const application = {
   properties: {
     id: { type: "string" },
     name: { type: "string" },
+    framework: { enum: ["express", "fastify", "nestjs"] },
+    adapter: { enum: ["express", "fastify", "unknown"] },
     source,
     routeCount: { type: "integer", minimum: 0 },
     globalMiddleware: { type: "array", items: descriptor },
@@ -193,7 +200,7 @@ const finding = {
     confidence: { enum: ["high", "medium", "low"] },
     applicationId: {
       type: ["string", "null"],
-      description: "Express application identity; null for legacy/global evidence",
+      description: "Framework application identity; null for unmounted or legacy/global evidence",
     },
     method: { type: "string" },
     path: { type: "string" },
@@ -409,10 +416,11 @@ const REPORT_SCHEMA = {
       type: "object",
       additionalProperties: false,
       description:
-        "Static app-to-router graph confidence, including unresolved routes and opaque use() mounts",
+        "Static application route-graph confidence, including unresolved routes and opaque framework registrations",
       properties: {
         complete: { type: "boolean" },
         orphanRoutes: { type: "integer", minimum: 0 },
+        partialRoutes: { type: "integer", minimum: 0 },
         registrarRoutes: { type: "integer", minimum: 0 },
         opaqueMounts: {
           type: "array",
