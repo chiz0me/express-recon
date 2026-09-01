@@ -236,6 +236,25 @@ test("HTML renderer escapes untrusted report content and creates an offline rout
           ...routeReport().routes[0],
           path: payload,
           middlewares: [{ name: payload, kind: "unknown", raw: payload }],
+          io: {
+            schemas: {
+              request: {
+                body: {
+                  schema: { type: "object" },
+                  evidence: [{ kind: "zod", confidence: "high" }],
+                },
+              },
+              responses: [],
+              conflicts: [
+                {
+                  location: "request.body.value",
+                  kind: "type-mismatch",
+                  message: payload,
+                  evidence: [],
+                },
+              ],
+            },
+          },
         },
       ],
     });
@@ -253,6 +272,9 @@ test("HTML renderer escapes untrusted report content and creates an offline rout
     assert.match(html, /assets\/report\.css/);
     assert.match(html, /data-filter-search/);
     assert.match(html, /Incomplete scan coverage/);
+    assert.match(html, /I\/O schema evidence/);
+    assert.match(html, /high · zod · 1 conflict/);
+    assert.match(html, /Typed I\/O routes/);
     assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
     assert.doesNotMatch(html, /<img src=x/);
     assert.doesNotMatch(html, /<script>alert/);

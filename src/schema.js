@@ -35,6 +35,27 @@ const source = {
   ],
 };
 
+const schemaEvidence = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", description: "static evidence source, such as zod or fastify-schema" },
+    confidence: { enum: ["low", "medium", "high"] },
+    source,
+  },
+  required: ["kind", "confidence"],
+};
+
+const schemaContract = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    schema: { type: "object", description: "bounded JSON Schema fragment" },
+    evidence: { type: "array", minItems: 1, items: schemaEvidence },
+  },
+  required: ["schema", "evidence"],
+};
+
 const io = {
   type: "object",
   additionalProperties: false,
@@ -65,6 +86,47 @@ const io = {
       },
     },
     statusCodes: { type: "array", items: { type: "integer" } },
+    schemas: {
+      type: "object",
+      additionalProperties: false,
+      description: "typed request/response contracts with provenance and visible disagreements",
+      properties: {
+        request: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            body: schemaContract,
+            query: schemaContract,
+            params: schemaContract,
+            headers: schemaContract,
+          },
+        },
+        responses: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: { status: { type: ["integer", "null"] }, contract: schemaContract },
+            required: ["status", "contract"],
+          },
+        },
+        conflicts: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              location: { type: "string" },
+              kind: { type: "string" },
+              message: { type: "string" },
+              evidence: { type: "array", items: schemaEvidence },
+            },
+            required: ["location", "kind", "message", "evidence"],
+          },
+        },
+      },
+      required: ["request", "responses", "conflicts"],
+    },
     handlerResolved: {
       type: "boolean",
       description: "false when the handler couldn't be resolved to a function body to mine",

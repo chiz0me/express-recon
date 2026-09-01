@@ -883,6 +883,12 @@ Important fields:
 - `routes[].applicationId`: app identity or `null` for unresolved/orphan routes.
 - `routes[].source`: repository-relative file and line when known.
 - `routes[].io`: best-effort request/response/handler hints from static analysis.
+  The compatible `request` field-name arrays, `responses[].bodyKeys`, and
+  `statusCodes` remain available. Optional `io.schemas.request` and
+  `io.schemas.responses` contracts add bounded JSON Schema, evidence kind,
+  confidence, and source. `io.schemas.conflicts` keeps type, requiredness, and
+  constraint disagreements, or fields seen by weaker evidence but absent from a
+  stronger schema.
 - `routes[].pathConfidence`: `full` or `partial`.
 - `routes[].middlewares[].stage`: optional lifecycle role (`middleware`, `hook`,
   `guard`, `interceptor`, `pipe`, or `filter`) when the source API proves it.
@@ -984,7 +990,9 @@ Fastify resolution includes:
   remain fail-visible;
 - `onRequest`, `preParsing`, `preValidation`, and `preHandler` evidence at
   plugin and per-route scope; and
-- handler request/response hints where the function is statically resolvable.
+- handler request/response hints where the function is statically resolvable;
+  plus static `body`, `querystring`/`query`, `params`, `headers`, and per-status
+  `response` schemas from route options.
 
 NestJS resolution includes:
 
@@ -1000,7 +1008,17 @@ NestJS resolution includes:
 - `MiddlewareConsumer.apply().exclude().forRoutes()` for static controller,
   path, and `RequestMethod` scopes; and
 - decorated request fields, `HttpCode`, default response codes, and returned
-  object keys as bounded handler hints.
+  object shapes as bounded handler hints; and
+- TypeScript parameter/property types, local or one-hop imported DTOs,
+  `class-validator` constraints, and `@nestjs/swagger` property metadata.
+
+Express handler I/O additionally recognizes same-file Zod/Joi schemas used by
+`parse`, `safeParse`, `validate`, or `validateAsync`, route-level
+`express-validator` chains and `checkSchema()`, nested field paths, direct
+request reads, and literal response shapes. Static validator interpretation is
+bounded and never imports or executes the validation package. Dynamic schema
+factories, arbitrary refinements/transforms, conditional validation, and
+unsupported helper composition remain open evidence for review.
 
 The scanner retains partial or opaque evidence for dynamic/data-driven
 registration, registrar functions, computed paths/scopes, unresolved dependency

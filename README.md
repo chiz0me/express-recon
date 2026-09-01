@@ -139,11 +139,11 @@ policies, and OpenAPI trace metadata.
 
 ### Framework support
 
-| Framework | Static inventory and audit                                                                         | Lifecycle evidence                                             | Runtime / hybrid                             |
-| --------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------- |
-| Express   | Apps, routers, mounts, direct registrars, aliased/inline factories, middleware ordering            | `use()` and route middleware                                   | Supported for trusted local Express 4/5 code |
-| Fastify   | Roots, shorthand routes, `route()`, plugins, `register()` prefixes, and direct instance registrars | Request-stage hooks and per-route hooks                        | Not yet; use `--mode static`                 |
-| NestJS    | Factory roots, modules, controllers, global/router prefixes, Express/Fastify platform detection    | Middleware consumers, guards, interceptors, pipes, and filters | Not yet; use `--mode static`                 |
+| Framework | Static inventory and audit                                                                    | Lifecycle evidence                                             | Runtime / hybrid                             |
+| --------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------- |
+| Express   | Apps, routers, mounts, direct registrars, plus Zod/Joi and `express-validator` input evidence | `use()` and route middleware                                   | Supported for trusted local Express 4/5 code |
+| Fastify   | Roots, routes, plugins, prefixes, direct registrars, and static route `schema` options        | Request-stage hooks and per-route hooks                        | Not yet; use `--mode static`                 |
+| NestJS    | Factory/module/controller graphs plus TypeScript DTO and `class-validator` evidence           | Middleware consumers, guards, interceptors, pipes, and filters | Not yet; use `--mode static`                 |
 
 Dynamic Fastify plugins become opaque route-provider evidence. Dynamic NestJS
 middleware scopes become `unknown` review evidence, while host routing,
@@ -171,6 +171,9 @@ express-recon deliberately separates facts from decisions:
 - Express `hybrid` retains both static and runtime observations. Runtime evidence is
   authoritative only when route/app identity is unambiguous; otherwise the
   observations remain separate.
+- `routes[].io.schemas` keeps typed request/response contracts separate from the
+  legacy field-name hints. Every contract identifies its evidence kind,
+  confidence, and source; disagreements remain in `schemas.conflicts`.
 - AI review may suggest configuration, but only explicit reviewed configuration
   can change an audit classification.
 
@@ -215,8 +218,9 @@ npx --no-install express-recon docs --src . --app-id 'app:src/app.js#app' \
 
 Precedence is deterministic: existing OpenAPI wins, JSDoc fills missing fields,
 and generated inventory fills the remainder. `docs-report.json` records
-code-only/docs-only operations, authored conflicts, duplicates, dynamic paths,
-and incomplete discovery. Data-only JavaScript/TypeScript OpenAPI modules are
+code-only/docs-only operations, authored and static-schema conflicts,
+duplicates, dynamic paths, and incomplete discovery. Data-only
+JavaScript/TypeScript OpenAPI modules are
 reconstructed with a bounded static interpreter; repository code is never
 imported or run, external package code is never loaded, and unsupported helpers
 or computation fail closed. Swagger 2 is detected but must be converted before
@@ -651,8 +655,10 @@ API JSDoc coverage.
   when unresolved route graphs or opaque route providers prevent a sound stale-
   documentation conclusion.
 - Auth classification is only as sound as the reviewed middleware allowlist.
-- OpenAPI request/response schemas are placeholders until grounded in handler or
-  validator code. The bundled `openapi-doc` skill provides that AI-assisted pass.
+- OpenAPI generation prefers statically resolved framework schemas, validators,
+  DTOs, and returned literals over field-name placeholders. Unsupported
+  computation and low/medium-confidence fragments remain explicitly unrefined;
+  the bundled `openapi-doc` skill provides the deeper AI-assisted pass.
 - `scan-repo` is non-executing, but Git protocol parsing and network transfer
   still process untrusted remote data.
 - Organization scans are API-visible rather than proof of every repository that

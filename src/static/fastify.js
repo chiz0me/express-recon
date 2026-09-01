@@ -2,6 +2,13 @@
 
 const path = require("node:path");
 const { walk, unwrap, calleeName, staticString, middlewareFromArg } = require("./ast");
+const {
+  addRequestSchema,
+  addResponseSchema,
+  contract,
+  evidence,
+  staticValue,
+} = require("./schema-evidence");
 const { joinPath } = require("../walk");
 
 const ROUTE_METHODS = new Map([
@@ -396,6 +403,37 @@ function methodsFrom(node, consts) {
     .filter((value) => value && [...ROUTE_METHODS.values()].includes(value));
 }
 
+/** Fold Fastify's static route `schema` option into the common I/O contract. */
+function applyFastifySchema(io, schemaNode, ctx) {
+  if (!schemaNode) return;
+  const value = staticValue(schemaNode, {
+    bindings: ctx.valueBindings,
+    consts: ctx.consts,
+  });
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const source = { file: ctx.filePath, line: ctx.lineAt(schemaNode.start) };
+  const requestKeys = new Map([
+    ["body", "body"],
+    ["querystring", "query"],
+    ["query", "query"],
+    ["params", "params"],
+    ["headers", "headers"],
+  ]);
+  for (const [key, bucket] of requestKeys) {
+    const schema = value[key];
+    if (schema && typeof schema === "object" && !Array.isArray(schema)) {
+      addRequestSchema(io, bucket, contract(schema, evidence("fastify-schema", "high", source)));
+    }
+  }
+  const responses = value.response;
+  if (!responses || typeof responses !== "object" || Array.isArray(responses)) return;
+  for (const [rawStatus, schema] of Object.entries(responses)) {
+    if (!schema || typeof schema !== "object" || Array.isArray(schema)) continue;
+    const status = /^\d{3}$/.test(rawStatus) ? Number(rawStatus) : null;
+    addResponseSchema(io, status, contract(schema, evidence("fastify-schema", "high", source)));
+  }
+}
+
 function addRoute(
   owner,
   method,
@@ -426,6 +464,7 @@ function addRoute(
       line: ctx.lineAt(node.callee?.property?.start ?? node.start),
     };
     ctx.attachIo(route, handler, ctx);
+    applyFastifySchema(route.io, objectProperty(options, "schema"), ctx);
     owner.routes.push(route);
   }
   model.routeCallStarts.add(node.start);

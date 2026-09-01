@@ -3,7 +3,9 @@
 express-recon can build a deterministic OpenAPI 3.1 skeleton or reconcile that
 skeleton with documentation already present in an Express, Fastify, or NestJS
 repository. It does
-not claim that code-derived placeholder schemas are a finished API contract.
+not claim that code-derived schemas are a finished API contract: explicit
+framework/validator metadata can be high confidence, while inferred field reads
+and returned expressions remain review evidence.
 
 ## Pick the right command
 
@@ -82,8 +84,11 @@ The merge is fill-only and deterministic:
 
 Authored disagreements between the base document and JSDoc are recorded in
 `docs-report.json`; authored values are never silently overwritten. Differences
-between authored descriptions/schemas and generated placeholders are not
-treated as conflicts because authored content intentionally wins.
+between authored descriptions/schemas and generated contracts are not treated
+as authored conflicts because authored content intentionally wins. Disagreements
+inside static code evidence—for example a handler reading a field excluded by a
+stronger Fastify schema—are reported separately as `schemaConflicts` and count
+toward the `docs-conflict` gate.
 
 `--spec` selects an OpenAPI JSON/YAML file or data-only JavaScript/TypeScript
 module when discovery finds more than one. CommonJS and ESM module exports are
@@ -141,6 +146,8 @@ The report separates:
   opaque route providers prevent the static scan from disproving;
 - `documentedOperations`: present in both;
 - `conflicts`: authored values that disagree, with JSON pointers and sources;
+- `schemaConflicts`: disagreements between structured static schema evidence,
+  annotated with the affected operation and evidence sources;
 - `dynamicOperations`: paths containing an unresolved dynamic segment;
 - `duplicateOperations`: method/path collisions that OpenAPI cannot represent;
 - `scanCoverage`, `routeGraph` (including partial-route and opaque-provider
@@ -199,6 +206,34 @@ observed lifecycle guard chain is conjunctive.
 Do not publish an operation as unauthenticated without also reviewing deployment
 and upstream controls.
 
+## Static schema evidence
+
+`routes[].io` retains the original flat field/status hints for compatibility and
+adds `io.schemas` when structured evidence is available. Request and response
+contracts contain a bounded JSON Schema fragment plus evidence records with a
+`kind`, `confidence`, and repository-relative source location. Current sources
+include:
+
+- direct request field reads (`field-access`, low confidence) and returned
+  literals (`response-literal`, medium confidence);
+- same-file Zod/Joi schemas used by `parse`, `safeParse`, `validate`, or
+  `validateAsync`, plus route-level `express-validator` chains and
+  `checkSchema()` (high confidence);
+- Fastify `schema` options on shorthand and `route()` registrations, including
+  `body`, `querystring`/`query`, `params`, `headers`, and `response` (high
+  confidence); and
+- NestJS TypeScript parameter types, same-file or one-hop imported DTOs,
+  `class-validator`, and `@nestjs/swagger` property metadata. Runtime validation
+  still depends on the application's configured pipes; partially decorated DTOs
+  remain medium confidence rather than promoting TypeScript-only fields.
+
+The interpreters are bounded and data-only. They resolve immutable local
+bindings but do not import packages, call schema factories, follow arbitrary
+helpers, execute transforms, or claim that TypeScript types exist at runtime.
+Unknown pieces stay open (`{}`). Stronger evidence wins; incompatible or missing
+fields are retained under `io.schemas.conflicts` instead of being silently
+combined.
+
 ## Trace metadata and placeholders
 
 Each generated operation retains `x-express-recon` evidence:
@@ -210,18 +245,21 @@ Each generated operation retains `x-express-recon` evidence:
 - middleware names and aligned `middlewareStages` lifecycle roles;
 - `pathConfidence`;
 - `handlerResolved`, `handlerName`, and `handlerSource` hints;
+- structured `schemaEvidence` and any `schemaConflicts`;
 - original HTTP method;
 - hybrid observations when present.
 
-The document-level extension records the command/mode, detected `frameworks`, and sets
-`schemasArePlaceholders: true`. Code-derived parameters, request bodies, and
-responses carry explicit placeholder text or
-`x-express-recon-unrefined: true`. They are hints mined from field access and
-response calls, not inferred domain models.
+The document-level extension records the command/mode, detected `frameworks`,
+sets `structuredSchemaEvidence` when present, and keeps
+`schemasArePlaceholders: true` while any generated surface may still be
+under-specified. Low/medium-confidence schema fragments carry
+`x-express-recon-unrefined: true`; high-confidence static validator/framework
+fragments omit that marker but still require runtime verification.
 
 Do not remove placeholder markers until the relevant handler or validator has
-been reviewed. Preserve operation security and all `x-express-recon` trace data
-during enrichment.
+been reviewed. Do not discard high-confidence schema evidence or conflicts
+without resolving them. Preserve operation security and all `x-express-recon`
+trace data during enrichment.
 
 ## Grounded enrichment workflow
 
@@ -288,5 +326,8 @@ the resulting auth tag appears on the route, and that tag is present in
 
 ### The result still looks generic
 
-That is expected for the deterministic skeleton. Review handlers, validators,
-DTOs, and response helpers, then replace only the grounded placeholder content.
+Inspect the operation's `schemaEvidence` first: high-confidence validator or
+framework fragments should already be present. Generic fragments mean the
+schema was dynamic, imported beyond the supported hop, hidden behind a helper,
+or inferred only from field reads/returned expressions. Review those handlers,
+validators, DTOs, and response helpers before refining the marked content.

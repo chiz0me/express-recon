@@ -39,6 +39,25 @@ function report() {
         roles: [],
         scopes: [],
         authEvidence: { matched: [] },
+        io: {
+          schemas: {
+            request: {
+              query: {
+                schema: { type: "object" },
+                evidence: [{ kind: "zod", confidence: "high" }],
+              },
+            },
+            responses: [],
+            conflicts: [
+              {
+                location: "request.query.limit",
+                kind: "type-mismatch",
+                message: "static evidence disagrees on type",
+                evidence: [],
+              },
+            ],
+          },
+        },
       },
     ],
     globalMiddleware: [],
@@ -90,6 +109,9 @@ test("markdown exposes severity, fingerprint, locations, and baseline deltas", (
   assert.match(output, /Authentication regressions/);
   assert.match(output, /proven → \*\*public\*\*/);
   assert.match(output, /Net-new findings/);
+  assert.match(output, /I\/O schema evidence/);
+  assert.match(output, /high · zod · 1 conflict/);
+  assert.match(output, /Static I\/O schema conflicts/);
 });
 
 test("pretty output summarizes auth and delta state without mutating routes", () => {

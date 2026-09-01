@@ -3,6 +3,15 @@
 const path = require("node:path");
 const { walk, unwrap, calleeName, staticString, snippet, middlewareFromArg } = require("./ast");
 const { extractIoHints } = require("./io-hints");
+const {
+  addRequestSchema,
+  addResponseSchema,
+  contract,
+  dataObject,
+  evidence,
+  schemaFromExpression,
+} = require("./schema-evidence");
+const { buildDtoModels, parameterSchema } = require("./nest-dto");
 const { joinPath } = require("../walk");
 
 const COMMON = "@nestjs/common";
@@ -312,10 +321,62 @@ function nativeHandlerIo(fn, ctx) {
       .map((decorator) => decoratorCall(decorator, ctx, COMMON)?.name)
       .filter(Boolean),
   );
-  return firstNames.has("Req") && secondNames.has("Res") ? extractIoHints(fn) : null;
+  return firstNames.has("Req") && secondNames.has("Res")
+    ? extractIoHints(fn, {
+        file: ctx.filePath,
+        lineAt: ctx.lineAt,
+        bindings: ctx.valueBindings,
+        consts: ctx.consts,
+        requires: ctx.requires,
+      })
+    : null;
 }
 
-function nestIo(method, httpMethod, ctx, className) {
+function parameterSchemas(io, fn, ctx, model) {
+  for (const parameter of fn?.params || []) {
+    for (const decorator of parameter.decorators || []) {
+      const call = decoratorCall(decorator, ctx, COMMON);
+      const bucket = call && PARAMETER_DECORATORS.get(call.name);
+      if (!bucket) continue;
+      const info = parameterSchema(parameter, ctx, model.dtoSchemas);
+      const key = staticString(call.arguments[0], ctx.consts);
+      if (call.arguments.length > 0 && key === null) continue;
+      const source = { file: ctx.filePath, line: ctx.lineAt(parameter.start) };
+      const provenance = info.evidenceKinds.map((kind) =>
+        evidence(kind, info.confidence || "medium", source),
+      );
+      if (key !== null) {
+        addRequestSchema(
+          io,
+          bucket,
+          contract(
+            {
+              type: "object",
+              properties: dataObject([[key, info.schema]]),
+              ...(!parameter.optional ? { required: [key] } : {}),
+            },
+            provenance,
+          ),
+        );
+      } else if (info.ref) {
+        io.__nestSchemaRefs ||= [];
+        io.__nestSchemaRefs.push({ bucket, ref: info.ref, source });
+      } else if (Object.keys(info.schema).length) {
+        addRequestSchema(io, bucket, contract(info.schema, provenance));
+      }
+    }
+  }
+}
+
+function returnedExpression(fn) {
+  if (!fn?.body) return null;
+  if (fn.expression) return fn.body;
+  return (
+    (fn.body.body || []).find((statement) => statement.type === "ReturnStatement")?.argument || null
+  );
+}
+
+function nestIo(method, httpMethod, ctx, className, model) {
   const fn = method.value;
   const native = nativeHandlerIo(fn, ctx);
   const request = parameterHints(fn, ctx);
@@ -327,7 +388,7 @@ function nestIo(method, httpMethod, ctx, className) {
   const explicit = statusCode(method, ctx);
   const status = explicit || (httpMethod === "POST" ? 201 : 200);
   const keys = returnKeys(fn);
-  return {
+  const io = {
     request,
     responses: native?.responses?.length
       ? native.responses
@@ -339,6 +400,29 @@ function nestIo(method, httpMethod, ctx, className) {
     handlerName: `${className}.${method.key?.name || "handler"}`,
     handlerSource: { file: ctx.filePath, line: ctx.lineAt(method.value?.start || method.start) },
   };
+  if (native?.schemas) io.schemas = native.schemas;
+  parameterSchemas(io, fn, ctx, model);
+  const returned = returnedExpression(fn);
+  if (returned) {
+    const schema = schemaFromExpression(returned, {
+      bindings: ctx.valueBindings,
+      consts: ctx.consts,
+    });
+    if (Object.keys(schema).length) {
+      addResponseSchema(
+        io,
+        status,
+        contract(
+          schema,
+          evidence("response-literal", "medium", {
+            file: ctx.filePath,
+            line: ctx.lineAt(returned.start),
+          }),
+        ),
+      );
+    }
+  }
+  return io;
 }
 
 function collectController(node, call, model, code, ctx) {
@@ -390,7 +474,7 @@ function collectController(node, call, model, code, ctx) {
         path: routePath,
         middlewares,
         source: { file: ctx.filePath, line: ctx.lineAt(routeCall.node.start) },
-        io: nestIo(method, httpMethod, ctx, controller.name),
+        io: nestIo(method, httpMethod, ctx, controller.name, model),
         partial: versioned,
       });
     }
@@ -704,7 +788,13 @@ function collectModule(node, call, model, code, ctx) {
 function collectClasses(program, model, code, ctx) {
   walk(program, (node) => {
     if (node.type !== "ClassDeclaration" || !node.id) return;
-    model.classes.set(node.id.name, { kind: "class", file: ctx.filePath, name: node.id.name });
+    const dto = model.dtoSchemas.get(node.id.name);
+    model.classes.set(node.id.name, {
+      kind: "class",
+      file: ctx.filePath,
+      name: node.id.name,
+      ...dto,
+    });
   });
   walk(program, (node) => {
     if (node.type !== "ClassDeclaration" || !node.id) return;
@@ -870,6 +960,7 @@ function analyzeNestjs(program, code, ctx) {
     exportAll: [],
     diagnostics: [],
     dynamicRouterMappings: 0,
+    dtoSchemas: buildDtoModels(program, ctx),
   };
   collectClasses(program, model, code, ctx);
   collectExports(program, model, ctx);
@@ -1080,9 +1171,40 @@ function middlewareForNestRoute(state, controller, controllerPath, route, models
   return result;
 }
 
+function resolveNestSchemaRefs(io, fromFile, models, resolve) {
+  for (const pending of io.__nestSchemaRefs || []) {
+    const target = resolveClass(fromFile, pending.ref, models, resolve);
+    if (!target?.schema) continue;
+    const kinds = target.evidenceKinds || ["nestjs-dto"];
+    addRequestSchema(
+      io,
+      pending.bucket,
+      contract(
+        target.schema,
+        kinds.map((kind) =>
+          evidence(kind, target.confidence || "medium", {
+            file: target.file,
+            line: target.line || null,
+          }),
+        ),
+      ),
+    );
+  }
+  delete io.__nestSchemaRefs;
+  return io;
+}
+
 function emitController(controller, options, output) {
-  const { applicationId, rootPrefix, modulePrefix, inherited, partial, middlewareForRoute } =
-    options;
+  const {
+    applicationId,
+    rootPrefix,
+    modulePrefix,
+    inherited,
+    partial,
+    middlewareForRoute,
+    models,
+    resolve,
+  } = options;
   const normalizedRoot = rootPrefix ? joinPath("", rootPrefix) : "";
   for (const controllerPath of controller.paths) {
     for (const route of controller.routes) {
@@ -1102,7 +1224,7 @@ function emitController(controller, options, output) {
           route.middlewares,
         ),
         source: route.source,
-        io: route.io,
+        io: resolveNestSchemaRefs(route.io, controller.file, models, resolve),
         pathConfidence:
           partial ||
           controller.partial ||
@@ -1162,6 +1284,8 @@ function buildNestjsRegistry(files, resolve, root) {
               inherited: state.globalMiddleware,
               middlewareForRoute: (controllerPath, route) =>
                 middlewareForNestRoute(state, controller, controllerPath, route, models, resolve),
+              models,
+              resolve,
               partial:
                 application.prefixPartial ||
                 application.versioning ||
@@ -1198,6 +1322,8 @@ function buildNestjsRegistry(files, resolve, root) {
           modulePrefix: "",
           inherited: [],
           middlewareForRoute: () => [],
+          models,
+          resolve,
           partial: true,
         },
         routes,

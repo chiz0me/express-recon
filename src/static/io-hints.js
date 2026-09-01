@@ -1,6 +1,14 @@
 "use strict";
 
 const { walk, unwrap, staticString } = require("./ast");
+const {
+  addInferredSchemas,
+  addResponseSchema,
+  contract,
+  evidence,
+  schemaFromExpression,
+} = require("./schema-evidence");
+const { enrichHandlerSchemas } = require("./validators");
 
 const REQUEST_SOURCES = new Set(["body", "query", "params"]);
 const HEADER_ACCESSORS = new Set(["get", "header"]);
@@ -75,7 +83,7 @@ function addResponse(responses, status, bodyKeys) {
   for (const k of bodyKeys) existing.add(k);
 }
 
-function collectResponse(node, resName, responses, statusCodes) {
+function collectResponse(node, resName, responses, statusCodes, responseSchemas, options) {
   const chain = resChain(node, resName);
   if (!chain) return;
   const { method, status } = chain;
@@ -83,8 +91,20 @@ function collectResponse(node, resName, responses, statusCodes) {
     if (status != null) statusCodes.add(status);
   } else if (method === "json") {
     addResponse(responses, status ?? 200, objectKeys(node.arguments[0]) || []);
+    if (node.arguments[0]) {
+      responseSchemas.push({
+        status: status ?? 200,
+        schema: schemaFromExpression(node.arguments[0], options),
+      });
+    }
   } else if (method === "send") {
     addResponse(responses, status ?? 200, objectKeys(node.arguments[0]));
+    if (node.arguments[0]) {
+      responseSchemas.push({
+        status: status ?? 200,
+        schema: schemaFromExpression(node.arguments[0], options),
+      });
+    }
   } else if (method === "sendStatus") {
     const code = numericArg(node.arguments[0]);
     if (code != null) addResponse(responses, code, null);
@@ -141,23 +161,45 @@ function toSortedArray(set) {
 }
 
 /**
+ * Add direct function-body consts on top of module bindings. Nested scopes are
+ * deliberately excluded: resolving them correctly requires call-site lexical
+ * scope, and guessing could associate a same-named schema from another branch.
+ */
+function handlerBindings(fnNode, inherited) {
+  const bindings = new Map(inherited || []);
+  if (fnNode.body?.type !== "BlockStatement") return bindings;
+  for (const statement of fnNode.body.body || []) {
+    if (statement.type !== "VariableDeclaration" || statement.kind !== "const") continue;
+    for (const declaration of statement.declarations || []) {
+      if (declaration.id.type === "Identifier" && declaration.init) {
+        bindings.set(declaration.id.name, declaration.init);
+      }
+    }
+  }
+  return bindings;
+}
+
+/**
  * Statically mine request/response shape hints from a route handler's AST body.
  * A best-effort audit aid: it captures field names the code references, not a
  * complete schema (which an AI pass refines). `req`/`res` are matched by their
  * parameter identifiers; a destructured parameter disables that half.
  *
  * @param {object} fnNode  a Function/Arrow node (the handler)
+ * @param {{file?: string, lineAt?: (offset: number) => number, bindings?: Map}} [options]
  * @returns {{request: {body: string[], query: string[], params: string[], headers: string[]},
  *            responses: {status: number|null, bodyKeys: string[]|null}[],
  *            statusCodes: number[]}}
  */
-function extractIoHints(fnNode) {
+function extractIoHints(fnNode, options = {}) {
   const request = { body: new Set(), query: new Set(), params: new Set(), headers: new Set() };
   const responses = new Map();
   const statusCodes = new Set();
+  const responseSchemas = [];
   const reqName = paramName(fnNode.params, 0);
   const resName = paramName(fnNode.params, 1);
   const body = fnNode.body;
+  const scopedOptions = { ...options, bindings: handlerBindings(fnNode, options.bindings) };
   if (body) {
     walk(body, (node) => {
       if (reqName) {
@@ -165,14 +207,15 @@ function extractIoHints(fnNode) {
         else if (node.type === "CallExpression") collectHeaderCall(node, reqName, request);
         else if (node.type === "VariableDeclarator") collectDestructure(node, reqName, request);
       }
-      if (resName && node.type === "CallExpression")
-        collectResponse(node, resName, responses, statusCodes);
+      if (resName && node.type === "CallExpression") {
+        collectResponse(node, resName, responses, statusCodes, responseSchemas, scopedOptions);
+      }
     });
   }
   const responseList = [...responses.entries()]
     .map(([status, keys]) => ({ status, bodyKeys: keys === null ? null : toSortedArray(keys) }))
     .sort((a, b) => (a.status ?? 0) - (b.status ?? 0));
-  return {
+  const io = {
     request: {
       body: toSortedArray(request.body),
       query: toSortedArray(request.query),
@@ -182,6 +225,36 @@ function extractIoHints(fnNode) {
     responses: responseList,
     statusCodes: [...statusCodes].sort((a, b) => a - b),
   };
+  const handlerSource =
+    options.file && options.lineAt
+      ? { file: options.file, line: options.lineAt(fnNode.start) }
+      : null;
+  addInferredSchemas(io, handlerSource);
+  enrichHandlerSchemas(io, fnNode, {
+    file: options.file,
+    lineAt: options.lineAt,
+    bindings: scopedOptions.bindings,
+    consts: options.consts,
+    requires: options.requires,
+  });
+  const byStatus = new Map();
+  for (const item of responseSchemas) {
+    const key = item.status;
+    const serialized = JSON.stringify(item.schema);
+    if (serialized === "{}") continue;
+    if (!byStatus.has(key)) byStatus.set(key, new Map());
+    byStatus.get(key).set(serialized, item.schema);
+  }
+  for (const [status, variants] of byStatus) {
+    const values = [...variants.values()];
+    const schema = values.length === 1 ? values[0] : { anyOf: values };
+    addResponseSchema(
+      io,
+      status,
+      contract(schema, evidence("response-literal", "medium", handlerSource)),
+    );
+  }
+  return io;
 }
 
 module.exports = { extractIoHints };

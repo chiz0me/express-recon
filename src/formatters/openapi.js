@@ -2,8 +2,8 @@
 
 const PLACEHOLDER = "AI-unrefined placeholder — refine via handler code review";
 const UNREFINED_NOTE =
-  "Schemas, parameters, and descriptions are AI-unrefined placeholders derived from static " +
-  "analysis; refine them via handler code review.";
+  "Schemas and parameters combine explicit static validator/framework evidence with " +
+  "AI-unrefined field-access placeholders; verify them against runtime behavior.";
 
 // router.all() answers every verb; expand it across the concrete methods so the
 // spec stays valid (OpenAPI has no "all" operation key).
@@ -59,34 +59,107 @@ function placeholderObjectSchema(keys) {
   return { type: "object", properties, "x-express-recon-unrefined": true };
 }
 
+function requestContract(io, bucket) {
+  const value = io?.schemas?.request?.[bucket] || null;
+  if (!value || contractConfidence(value) !== "low" || !io?.request?.[bucket]?.length) return value;
+  const properties = Object.fromEntries(Object.entries(objectProperties(value)));
+  for (const name of io.request[bucket]) {
+    if (!Object.hasOwn(properties, name)) {
+      Object.defineProperty(properties, name, {
+        value: {},
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+  }
+  return { ...value, schema: { ...value.schema, type: "object", properties } };
+}
+
+function responseContract(io, status) {
+  return io?.schemas?.responses?.find((item) => item.status === status)?.contract || null;
+}
+
+function contractConfidence(value) {
+  const ranks = { low: 1, medium: 2, high: 3 };
+  return (value?.evidence || []).reduce(
+    (best, item) => (ranks[item.confidence] > ranks[best] ? item.confidence : best),
+    "low",
+  );
+}
+
+function contractSchema(value) {
+  if (!value) return null;
+  const schema = structuredClone(value.schema);
+  if (contractConfidence(value) !== "high") schema["x-express-recon-unrefined"] = true;
+  return schema;
+}
+
+function objectProperties(value) {
+  return value?.schema?.type === "object" && value.schema.properties ? value.schema.properties : {};
+}
+
+function objectRequired(value) {
+  return new Set(Array.isArray(value?.schema?.required) ? value.schema.required : []);
+}
+
+function parameterDescription(value) {
+  return value && contractConfidence(value) === "high"
+    ? "Derived from static validator or framework schema evidence; verify runtime transforms."
+    : PLACEHOLDER;
+}
+
 function buildParameters(pathParams, io) {
+  const pathSchema = requestContract(io, "params");
+  const pathProperties = objectProperties(pathSchema);
   const params = pathParams.map((name) => ({
     name,
     in: "path",
     required: true,
-    schema: { type: "string" },
-    description: PLACEHOLDER,
+    schema: Object.hasOwn(pathProperties, name)
+      ? contractSchema({ ...pathSchema, schema: pathProperties[name] })
+      : { type: "string" },
+    description: parameterDescription(pathSchema),
   }));
-  if (io) {
-    for (const name of io.request.query)
-      params.push({ name, in: "query", required: false, schema: {}, description: PLACEHOLDER });
-    for (const name of io.request.headers)
-      params.push({
-        name,
-        in: "header",
-        required: false,
-        schema: { type: "string" },
-        description: PLACEHOLDER,
-      });
+  if (io?.request) {
+    for (const [bucket, location, fallback] of [
+      ["query", "query", {}],
+      ["headers", "header", { type: "string" }],
+    ]) {
+      const value = requestContract(io, bucket);
+      const properties = objectProperties(value);
+      const required = objectRequired(value);
+      const names = [
+        ...new Set([...(io.request[bucket] || []), ...Object.keys(properties)]),
+      ].sort();
+      for (const name of names) {
+        params.push({
+          name,
+          in: location,
+          required: required.has(name),
+          schema: Object.hasOwn(properties, name)
+            ? contractSchema({ ...value, schema: properties[name] })
+            : fallback,
+          description: parameterDescription(value),
+        });
+      }
+    }
   }
   return params;
 }
 
 function buildRequestBody(verb, io) {
-  if (!BODY_METHODS.has(verb) || !io || io.request.body.length === 0) return null;
+  const value = requestContract(io, "body");
+  if (!BODY_METHODS.has(verb) || !io?.request || (!value && (io.request.body || []).length === 0)) {
+    return null;
+  }
   return {
-    required: false,
-    content: { "application/json": { schema: placeholderObjectSchema(io.request.body) } },
+    required: Boolean(value?.schema?.required?.length),
+    content: {
+      "application/json": {
+        schema: value ? contractSchema(value) : placeholderObjectSchema(io.request.body || []),
+      },
+    },
   };
 }
 
@@ -95,15 +168,30 @@ function buildResponses(io) {
   if (io) {
     for (const r of io.responses) {
       if (r.status == null) continue;
-      const resp = { description: PLACEHOLDER };
-      if (r.bodyKeys && r.bodyKeys.length)
+      const value = responseContract(io, r.status);
+      const resp = { description: parameterDescription(value) };
+      if (value) resp.content = { "application/json": { schema: contractSchema(value) } };
+      else if (r.bodyKeys && r.bodyKeys.length) {
         resp.content = { "application/json": { schema: placeholderObjectSchema(r.bodyKeys) } };
+      }
       responses[String(r.status)] = resp;
     }
-    for (const code of io.statusCodes)
-      if (!responses[String(code)]) responses[String(code)] = { description: PLACEHOLDER };
+    for (const code of io.statusCodes) {
+      if (responses[String(code)]) continue;
+      const value = responseContract(io, code);
+      responses[String(code)] = {
+        description: parameterDescription(value),
+        ...(value ? { content: { "application/json": { schema: contractSchema(value) } } } : {}),
+      };
+    }
   }
-  responses.default = { description: "AI-unrefined default response" };
+  const defaultValue = responseContract(io, null);
+  responses.default = defaultValue
+    ? {
+        description: parameterDescription(defaultValue),
+        content: { "application/json": { schema: contractSchema(defaultValue) } },
+      }
+    : { description: "AI-unrefined default response" };
   return responses;
 }
 
@@ -170,6 +258,23 @@ function buildOperation(route, verb, opId, tag, isAudit, pathParams, openapi, us
     handlerName: route.io ? (route.io.handlerName ?? null) : null,
     handlerSource: route.io ? (route.io.handlerSource ?? null) : null,
     method: route.method,
+    ...(route.io?.schemas
+      ? {
+          schemaEvidence: [
+            ...Object.entries(route.io.schemas.request || {}).map(([location, value]) => ({
+              location: `request.${location}`,
+              evidence: value.evidence,
+            })),
+            ...(route.io.schemas.responses || []).map((value) => ({
+              location: `response.${value.status ?? "default"}`,
+              evidence: value.contract.evidence,
+            })),
+          ],
+          ...(route.io.schemas.conflicts?.length
+            ? { schemaConflicts: route.io.schemas.conflicts }
+            : {}),
+        }
+      : {}),
     ...(unmappedAuthTags.length ? { unmappedAuthTags } : {}),
     ...(route.observations ? { observations: route.observations } : {}),
   };
@@ -279,6 +384,7 @@ function build(report) {
       ]),
     ].sort(),
     schemasArePlaceholders: true,
+    structuredSchemaEvidence: report.routes.some((route) => Boolean(route.io?.schemas)),
     ...(duplicateOperations.length ? { duplicateOperations } : {}),
   };
   return doc;

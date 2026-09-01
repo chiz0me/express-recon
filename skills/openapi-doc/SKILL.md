@@ -19,17 +19,21 @@ layers:
 1. **Skeleton (deterministic).** `express-recon` emits paths, methods,
    path/query/header parameters, response status codes, per-operation `security`
    (only from explicit auth-tag/security-scheme mapping), and statically-mined
-   request/response _hints_ —
+   request/response hints and any statically resolved validator/framework
+   schemas —
    plus an `x-express-recon` extension per operation carrying the handler
    `source` file:line, `framework`, `applicationId`, `authStatus`, middleware chain,
    `handlerResolved`, `handlerName`, and `handlerSource`.
-2. **Enrichment (AI code review — this skill).** You read each handler at its
-   `source`, refine the placeholder schemas into real JSON Schema, and write a
-   human `summary`/`description` (notes) per operation.
+2. **Enrichment (AI code review — this skill).** You inspect the schema evidence,
+   read handlers where evidence remains incomplete or contradictory, refine the
+   unresolved JSON Schema, and write a human `summary`/`description` per
+   operation.
 
-The skeleton's schemas are placeholders (`x-express-recon-unrefined: true`, and a
-top-level `x-express-recon.schemasArePlaceholders: true`). Your job is to replace
-them with schemas grounded in the actual handler code.
+The document-level `x-express-recon.schemasArePlaceholders: true` means some
+generated surface may remain under-specified. Low/medium-confidence fragments
+carry `x-express-recon-unrefined: true`; high-confidence static Fastify,
+Zod/Joi, `express-validator`, or NestJS validator/Swagger evidence does not.
+Your job is to verify that evidence and refine only what remains ungrounded.
 
 ## 0. Locate the tool
 
@@ -55,9 +59,10 @@ express-recon docs --src <repoDir> --app-id <id-from-discovery> --out <outDir>
 
 `docs` preserves an existing OpenAPI 3 document, fills its gaps from all
 `@openapi`/`@swagger` blocks, then adds generated code-only operations. Authored
-OpenAPI wins over JSDoc, and JSDoc wins over generated placeholders. Review
-`docs-report.json` for code-only/docs-only operations, conflicts, dynamic or
-duplicate operations, and incomplete discovery/scan coverage. Use `--spec` when
+OpenAPI wins over JSDoc, and JSDoc wins over generated evidence. Review
+`docs-report.json` for code-only/docs-only operations, authored conflicts,
+`schemaConflicts`, dynamic or duplicate operations, and incomplete
+discovery/scan coverage. Use `--spec` when
 multiple specs exist; Swagger 2 must be converted before merging.
 
 For `scan-repo --out` or `scan-org`, treat documentation status `cataloged` as
@@ -79,11 +84,10 @@ its refinements carefully. Never execute a remote/untrusted repository.
 
 Read the skeleton. Each operation has:
 
-- `operationId`, `tags`, `parameters`, `requestBody`/`responses` (placeholders),
-  `security`.
+- `operationId`, `tags`, `parameters`, `requestBody`/`responses`, `security`.
 - `x-express-recon`: `{ framework, applicationId, source: {file, line}, authStatus,
 authTags, roles, scopes, middlewares[], pathConfidence, handlerResolved,
-handlerName, handlerSource, method }`.
+handlerName, handlerSource, method, schemaEvidence[], schemaConflicts[] }`.
 
 ## 2. Document each operation (the AI pass)
 
@@ -127,6 +131,14 @@ controllers.foo.bar) }`).
 
 Schema guidance:
 
+- **Start with `schemaEvidence`.** Prefer high-confidence explicit
+  validator/framework metadata over low-confidence field-access hints.
+  Partially supported validator chains, partially decorated DTOs, TypeScript
+  types, and returned literals remain medium confidence and do not prove runtime
+  validation or serialization. Resolve every `schemaConflict` before
+  removing an unrefined marker; do not silently add a field that an explicit
+  closed schema rejects.
+
 - **Look for a shared response envelope first.** Many HTTP apps wrap every
   response in a helper (e.g. `createRes(success, errors, data)` /
   `res.json({ success, data, error })`). Model it **once** as a
@@ -149,9 +161,10 @@ Schema guidance:
 
 - Merge your schemas/notes onto the skeleton: the skeleton owns paths, methods,
   `security`, and `x-express-recon`; you own schema bodies, `summary`,
-  `description`, and `components/schemas`. Remove the `x-express-recon-unrefined`
-  markers from operations you've refined, and drop the top-level
-  `schemasArePlaceholders` once the pass is complete.
+  `description`, and `components/schemas`. Remove an
+  `x-express-recon-unrefined` marker only after verifying that fragment, and set
+  top-level `schemasArePlaceholders` to false only when every generated surface
+  has been reviewed.
 - Write the result to `<outDir>/openapi.json` (and `openapi.yaml` if the user
   wants YAML).
 - Validate it is a well-formed OpenAPI 3.1 document — parse the JSON and confirm
@@ -206,8 +219,9 @@ step 2) keeps their `components/schemas` consistent so the fragments merge clean
 
 ## Notes
 
-- The skeleton alone (no AI pass) is already a usable, if under-specified, spec —
-  hand it over as-is if the user only wants the structure.
+- The deterministic output alone may already contain useful typed contracts;
+  report its evidence/conflicts and hand it over as-is when the user only wants
+  the statically grounded structure.
 - Runtime/hybrid is Express-only; never use it on a repo you do not trust to import.
 - This complements the `express-recon-audit` skill: the OpenAPI document is the
   structural view, while the audit provides configuration-relative auth posture.

@@ -383,10 +383,17 @@ function resolveImportedHandlers(files, resolve) {
         const tf = target && byPath.get(target);
         const fn = tf && exportedFnNode(tf, ref.exportName, ref.props);
         if (fn) {
-          const hints = extractIoHints(fn);
+          const hints = extractIoHints(fn, {
+            file: tf.filePath,
+            lineAt: tf.lineAt,
+            bindings: tf.valueBindings,
+            consts: tf.consts,
+            requires: tf.requires,
+          });
           route.io.request = hints.request;
           route.io.responses = hints.responses;
           route.io.statusCodes = hints.statusCodes;
+          if (hints.schemas) route.io.schemas = hints.schemas;
           route.io.handlerResolved = true;
           route.io.handlerSource = { file: tf.filePath, line: tf.lineAt(fn.start) };
         }

@@ -11,6 +11,7 @@ const {
   HTTP_METHODS,
 } = require("./ast");
 const { extractIoHints } = require("./io-hints");
+const { enrichExpressValidatorSchemas } = require("./validators");
 const { STATIC_FRAMEWORK_ADAPTERS } = require("./adapters");
 
 /** Map a character offset to a 1-based line number via precomputed line starts. */
@@ -216,6 +217,30 @@ function collectStringConsts(program) {
   return consts;
 }
 
+/**
+ * Top-level immutable values available to bounded schema/validator
+ * interpreters. Function-local values are added while mining that function so
+ * identically named bindings in separate handlers cannot contaminate each
+ * other.
+ */
+function collectValueBindings(program) {
+  const bindings = new Map();
+  for (const statement of program.body || []) {
+    const declaration = ["ExportNamedDeclaration", "ExportDefaultDeclaration"].includes(
+      statement.type,
+    )
+      ? statement.declaration
+      : statement;
+    if (declaration?.type !== "VariableDeclaration" || declaration.kind !== "const") continue;
+    for (const item of declaration.declarations) {
+      if (item.id.type === "Identifier" && item.init) {
+        bindings.set(item.id.name, item.init);
+      }
+    }
+  }
+  return bindings;
+}
+
 /** First top-level `return` argument of a function (skips nested fn scopes). */
 function factoryReturnNode(fn) {
   if (fn.type === "ArrowFunctionExpression" && fn.expression) return fn.body;
@@ -352,12 +377,10 @@ function emptyIo() {
 }
 
 /** Mine a resolved handler function into an `io` object stamped with its source. */
-function mineFn(fn, lineAt, file) {
-  const hints = extractIoHints(fn);
+function mineFn(fn, lineAt, file, bindings, consts, requires) {
+  const hints = extractIoHints(fn, { file, lineAt, bindings, consts, requires });
   return {
-    request: hints.request,
-    responses: hints.responses,
-    statusCodes: hints.statusCodes,
+    ...hints,
     handlerResolved: true,
     handlerSource: { file, line: lineAt(fn.start) },
   };
@@ -378,10 +401,16 @@ function resolveHandler(handlerNode, ctx) {
   const node = handlerNode && unwrap(handlerNode);
   if (!node) return { io: emptyIo(), handlerRef: null, handlerName: null };
   if (FN_NODE.has(node.type))
-    return { io: mineFn(node, ctx.lineAt, ctx.filePath), handlerRef: null, handlerName: null };
+    return {
+      io: mineFn(node, ctx.lineAt, ctx.filePath, ctx.valueBindings, ctx.consts, ctx.requires),
+      handlerRef: null,
+      handlerName: null,
+    };
   if (node.type === "Identifier") {
     const fn = ctx.handlerIndex.get(node.name);
-    const io = fn ? mineFn(fn, ctx.lineAt, ctx.filePath) : emptyIo();
+    const io = fn
+      ? mineFn(fn, ctx.lineAt, ctx.filePath, ctx.valueBindings, ctx.consts, ctx.requires)
+      : emptyIo();
     const ref = fn ? null : refFromExpr(node, ctx);
     return { io, handlerRef: ref && ref.t === "module" ? ref : null, handlerName: node.name };
   }
@@ -409,6 +438,17 @@ function attachIo(route, handlerNode, ctx) {
   if (handlerName) io.handlerName = handlerName;
   route.io = io;
   if (handlerRef) route.__handlerRef = handlerRef;
+}
+
+/** Attach schema evidence from route-level express-validator middleware. */
+function attachValidatorSchemas(route, middlewareNodes, ctx) {
+  enrichExpressValidatorSchemas(route.io, middlewareNodes, {
+    file: ctx.filePath,
+    lineAt: ctx.lineAt,
+    bindings: ctx.valueBindings,
+    consts: ctx.consts,
+    requires: ctx.requires,
+  });
 }
 
 /**
@@ -554,6 +594,7 @@ function extractRoutes(program, code, ctx, out) {
         chainStart: target.chainStart,
       };
       attachIo(route, handlerNode, ctx);
+      attachValidatorSchemas(route, mwSource, ctx);
       collected.push(route);
     }
   });
@@ -804,6 +845,7 @@ function extractRegistrarRoutes(program, code, ctx, out) {
           registrarStart: fn.start,
         };
         attachIo(route, handlerNode, ctx);
+        attachValidatorSchemas(route, mwSource, ctx);
         out.registrarRoutes.push(route);
         registrar.routes.push(route);
       }
@@ -909,6 +951,7 @@ function analyzeFile(code, filePath, onParseError) {
   if (!program) return null;
   const { requires, routers, requireAliases } = collectBindings(program);
   const consts = collectStringConsts(program);
+  const valueBindings = collectValueBindings(program);
   const lineAt = lineCounter(code);
   const handlerIndex = collectHandlerIndex(program);
   const ctx = {
@@ -916,6 +959,7 @@ function analyzeFile(code, filePath, onParseError) {
     routers,
     requireAliases,
     consts,
+    valueBindings,
     lineAt,
     handlerIndex,
     filePath,
@@ -936,6 +980,8 @@ function analyzeFile(code, filePath, onParseError) {
     opaqueUses: [],
     globalMwByHost: new Map(),
     handlerIndex,
+    valueBindings,
+    consts,
     lineAt,
     frameworks,
   };

@@ -337,9 +337,21 @@ fields, and generated inventory fills remaining gaps. Report:
 
 - code-only and docs-only operations;
 - authored conflicts;
+- static `schemaConflicts` where stronger validator/framework metadata and
+  weaker code evidence disagree;
 - dynamic and duplicate operations;
 - incomplete inventory or documentation discovery;
-- placeholder schemas that still require handler/validator review.
+- structured `schemaEvidence` (kind, confidence, and source) and remaining
+  `x-express-recon-unrefined` schemas that require handler/validator review.
+
+Prefer high-confidence `fastify-schema`, `express-validator`, `zod`, `joi`,
+`class-validator`, or NestJS Swagger evidence over low-confidence field-access
+hints. Partially supported validator chains and partially decorated DTOs remain
+medium confidence, as do TypeScript and returned-literal shapes; do not assume
+runtime validation or serialization from types alone.
+If `schemaConflicts` is non-empty, report and resolve it before removing any
+unrefined marker; never silently union a field that an explicit closed schema
+rejects.
 
 The reconciler can statically reconstruct data-only CommonJS/ESM OpenAPI
 modules; it never imports target code. Treat an unsupported module diagnostic as

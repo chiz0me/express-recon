@@ -54,6 +54,39 @@ function normalizeObservation(observation, root) {
   return observation ? { ...observation, source: normalizeSource(observation.source, root) } : null;
 }
 
+function normalizeContract(contract, root) {
+  return {
+    ...contract,
+    evidence: (contract.evidence || []).map((item) => ({
+      ...item,
+      ...(item.source ? { source: normalizeSource(item.source, root) } : {}),
+    })),
+  };
+}
+
+function normalizeIoSchemas(schemas, root) {
+  if (!schemas) return undefined;
+  return {
+    request: Object.fromEntries(
+      Object.entries(schemas.request || {}).map(([bucket, value]) => [
+        bucket,
+        normalizeContract(value, root),
+      ]),
+    ),
+    responses: (schemas.responses || []).map((item) => ({
+      ...item,
+      contract: normalizeContract(item.contract, root),
+    })),
+    conflicts: (schemas.conflicts || []).map((conflict) => ({
+      ...conflict,
+      evidence: (conflict.evidence || []).map((item) => ({
+        ...item,
+        ...(item.source ? { source: normalizeSource(item.source, root) } : {}),
+      })),
+    })),
+  };
+}
+
 function normalizeRoute(route, root) {
   return {
     ...route,
@@ -64,6 +97,7 @@ function normalizeRoute(route, root) {
           io: {
             ...route.io,
             handlerSource: normalizeSource(route.io.handlerSource, root),
+            ...(route.io.schemas ? { schemas: normalizeIoSchemas(route.io.schemas, root) } : {}),
           },
         }
       : {}),

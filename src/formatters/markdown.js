@@ -43,18 +43,78 @@ function pathCell(r) {
   return r.path + (r.pathConfidence === "partial" ? " _(partial)_" : "");
 }
 
+function schemaEvidenceCell(io) {
+  const schemas = io?.schemas;
+  if (!schemas) return "—";
+  const contracts = [
+    ...Object.values(schemas.request || {}),
+    ...(schemas.responses || []).map((item) => item.contract),
+  ];
+  const provenance = contracts.flatMap((item) => item?.evidence || []);
+  if (!provenance.length) return "—";
+  const ranks = { low: 1, medium: 2, high: 3 };
+  const confidence = provenance.reduce(
+    (best, item) => (ranks[item.confidence] > ranks[best] ? item.confidence : best),
+    "low",
+  );
+  const kinds = [...new Set(provenance.map((item) => item.kind).filter(Boolean))].sort();
+  const conflicts = schemas.conflicts?.length || 0;
+  return [
+    confidence,
+    kinds.join(", "),
+    conflicts ? `${conflicts} conflict${conflicts === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function renderTable(routes, audit) {
   const sorted = routes.slice().sort(compareRoutes);
   const cols = audit
-    ? ["Framework", "Application", "Method", "Path", "Auth", "Source", "Middlewares"]
-    : ["Framework", "Application", "Method", "Path", "Source", "Middlewares"];
+    ? [
+        "Framework",
+        "Application",
+        "Method",
+        "Path",
+        "Auth",
+        "Source",
+        "Middlewares",
+        "I/O schema evidence",
+      ]
+    : [
+        "Framework",
+        "Application",
+        "Method",
+        "Path",
+        "Source",
+        "Middlewares",
+        "I/O schema evidence",
+      ];
   const body = sorted.map((r) => {
     const base = [r.framework || "express", r.applicationId || "—", r.method, pathCell(r)];
     if (audit) base.push(r.accepted ? "public (accepted)" : r.authStatus);
-    base.push(sourceLabel(r.source), mwNames(r.middlewares));
+    base.push(sourceLabel(r.source), mwNames(r.middlewares), schemaEvidenceCell(r.io));
     return renderRow(base);
   });
   return [renderRow(cols), renderRow(cols.map(() => "---")), ...body].join("\n");
+}
+
+function schemaConflictSection(routes) {
+  const conflicts = routes.flatMap((route) =>
+    (route.io?.schemas?.conflicts || []).map((conflict) => ({ route, conflict })),
+  );
+  if (!conflicts.length) return [];
+  return [
+    "## Static I/O schema conflicts",
+    "",
+    conflicts
+      .map(
+        ({ route, conflict }) =>
+          `- \`${route.method} ${route.path}\` · **${conflict.kind}** at \`${conflict.location}\` — ${conflict.message}`,
+      )
+      .join("\n"),
+    "",
+  ];
 }
 
 function findingList(findings, id, emptyMsg) {
@@ -187,6 +247,7 @@ function format(report) {
   if (audit) sections.push(...auditSections(report));
   else sections.push(`Total routes: **${report.routes.length}**`, "");
   if (report.delta) sections.push(...deltaSections(report.delta));
+  sections.push(...schemaConflictSection(report.routes));
   sections.push(
     "## Global middleware",
     "",

@@ -137,6 +137,29 @@ function middlewareLabel(middlewares) {
   return names.length ? names.join(" → ") : "—";
 }
 
+function schemaEvidenceLabel(ioValue) {
+  const schemas = object(object(ioValue).schemas);
+  const request = Object.values(object(schemas.request));
+  const responses = list(schemas.responses).map((item) => object(item).contract);
+  const contracts = [...request, ...responses].map(object);
+  const provenance = contracts.flatMap((item) => list(item.evidence));
+  if (!provenance.length) return "—";
+  const ranks = { low: 1, medium: 2, high: 3 };
+  const confidence = provenance.reduce(
+    (best, item) => (ranks[item.confidence] > ranks[best] ? item.confidence : best),
+    "low",
+  );
+  const kinds = [...new Set(provenance.map((item) => item.kind).filter(Boolean))].sort();
+  const conflicts = list(schemas.conflicts).length;
+  return [
+    confidence,
+    kinds.join(", "),
+    conflicts ? `${conflicts} conflict${conflicts === 1 ? "" : "s"}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function statusOptions(values) {
   return [...new Set(values.filter(Boolean))]
     .sort((a, b) => a.localeCompare(b))
@@ -166,6 +189,7 @@ function routeRows(report) {
         auth,
         sourceLabel(route.source),
         middlewareLabel(route.middlewares),
+        schemaEvidenceLabel(route.io),
         ...list(route.tags),
         ...list(route.roles),
         ...list(route.scopes),
@@ -183,6 +207,7 @@ function routeRows(report) {
         <td><code>${escapeHtml(display(route.applicationId))}</code></td>
         <td class="source"><code>${escapeHtml(sourceLabel(route.source))}</code></td>
         <td class="middleware">${escapeHtml(middlewareLabel(route.middlewares))}</td>
+        <td>${escapeHtml(schemaEvidenceLabel(route.io))}</td>
       </tr>`;
     })
     .join("");
@@ -192,7 +217,7 @@ function routeTable(report) {
   const routes = list(report.routes);
   const statuses = report.command === "audit" ? routes.map((route) => route.authStatus) : [];
   const body = routes.length
-    ? `<div class="table-wrap"><table id="routes-table"><thead><tr><th>Framework</th><th>Method</th><th>Path</th><th>Auth</th><th>Application</th><th>Source</th><th>Middleware chain</th></tr></thead><tbody>${routeRows(report)}</tbody></table></div>`
+    ? `<div class="table-wrap"><table id="routes-table"><thead><tr><th>Framework</th><th>Method</th><th>Path</th><th>Auth</th><th>Application</th><th>Source</th><th>Middleware chain</th><th>I/O schema evidence</th></tr></thead><tbody>${routeRows(report)}</tbody></table></div>`
     : `<div class="panel__body"><p class="empty">No routes were recorded.</p></div>`;
   return panel(
     "Routes",
@@ -342,6 +367,7 @@ function documentationPanel(documentationValue, apiReferences = []) {
             ["Code only", count(summary.codeOnlyOperations)],
             ["Docs only", count(summary.docsOnlyOperations)],
             ["Conflicts", count(summary.conflicts)],
+            ["Static schema conflicts", count(summary.schemaConflicts)],
           ])
         : ""
     }${
@@ -388,11 +414,18 @@ function reportSummary(report) {
   const summary = object(report.summary);
   const routes = list(report.routes);
   const coverage = object(report.scanCoverage);
+  const typedRoutes = routes.filter((route) => object(object(route).io).schemas).length;
+  const schemaConflicts = routes.reduce(
+    (total, route) => total + list(object(object(object(route).io).schemas).conflicts).length,
+    0,
+  );
   const base = [
     ["Routes", routes.length],
     ["Applications", list(report.applications).length],
     ["Mode", display(report.mode)],
     ["Coverage", completeness(coverage.complete)],
+    ["Typed I/O routes", typedRoutes],
+    ["Schema conflicts", schemaConflicts],
   ];
   if (report.command === "audit") {
     base.splice(

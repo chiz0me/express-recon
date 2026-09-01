@@ -587,6 +587,12 @@ function reconcileDocumentation(report, opts = {}) {
   const codeOnlyOperations = [...codeKeys].filter((key) => !authoredKeys.has(key)).sort();
   const docsOnlyOperations = [...authoredKeys].filter((key) => !codeKeys.has(key)).sort();
   const documentedOperations = [...codeKeys].filter((key) => authoredKeys.has(key)).sort();
+  const schemaConflicts = [...codeOps.entries()].flatMap(([operation, value]) =>
+    (value["x-express-recon"]?.schemaConflicts || []).map((conflict) => ({
+      operation,
+      ...conflict,
+    })),
+  );
   const dynamicOperations = [...codeOps.keys()].filter((key) => key.includes("{dynamic}"));
   const duplicateOperations = generated["x-express-recon"]?.duplicateOperations || [];
   const graph = routeGraphUncertainty(report, selection);
@@ -626,7 +632,9 @@ function reconcileDocumentation(report, opts = {}) {
       docsOnlyOperations: docsOnlyOperations.length,
       verifiedDocsOnlyOperations: verifiedDocsOnlyOperations.length,
       unverifiedDocsOnlyOperations: unverifiedDocsOnlyOperations.length,
-      conflicts: conflicts.length,
+      conflicts: conflicts.length + schemaConflicts.length,
+      authoredConflicts: conflicts.length,
+      schemaConflicts: schemaConflicts.length,
       dynamicOperations: dynamicOperations.length,
       duplicateOperations: duplicateOperations.length,
       incompleteInventory,
@@ -638,6 +646,7 @@ function reconcileDocumentation(report, opts = {}) {
     unverifiedDocsOnlyOperations,
     documentedOperations,
     conflicts,
+    schemaConflicts,
     dynamicOperations: dynamicOperations.sort(),
     duplicateOperations,
     scanCoverage: report.scanCoverage || null,
