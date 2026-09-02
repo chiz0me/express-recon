@@ -65,7 +65,7 @@
     "ajv": "8.20.0",
     "ajv-draft-04": "1.0.0",
     "ajv-formats": "3.0.1",
-    "oxc-parser": "0.135.0",
+    "oxc-parser": "0.147.0",
     "swagger-ui-dist": "5.32.14",
     "yaml": "2.9.0",
     "zod": "4.4.3"
