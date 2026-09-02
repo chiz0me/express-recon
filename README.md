@@ -129,6 +129,7 @@ operational failure.
 | Scan one Git ref                      | `scan-repo`                           |                No |        Yes, for Git fetch | provenance plus static results        |
 | Inventory a GitHub organization       | `scan-org`                            |                No | Yes, API plus Git fetches | per-repo reports plus aggregate index |
 | Browse saved reports                  | `render`                              |                No |                        No | offline HTML site                     |
+| Notify a trusted webhook              | `notify`                              |                No |       Yes, explicit POST | bounded signed change events          |
 | Recover dynamic wiring                | runtime/hybrid `inventory` or `audit` |           **Yes** |    Target code may use it | runtime observations                  |
 
 The repository is the acquisition and discovery boundary. Each detected root is
@@ -473,7 +474,9 @@ route changes retained for that repository.
 
 An individual OpenAPI 3 or Swagger 2 JSON/YAML file uses a packaged, stock
 Swagger UI rather than an express-recon-specific contract viewer. Its spec is embedded locally so
-the site works through `file://`; no CDN is required. Request submission, query
+the site works through `file://`; no CDN is required. The API page uses an explicit
+high-contrast light canvas so a dark host preference cannot leave light-theme
+Swagger UI text on a dark browser background. Request submission, query
 string configuration, credential persistence, and Swagger's online validator are
 disabled. The content security policy also blocks browser connections, so
 external `$ref` values—relative or remote—are not resolved in the offline view.
@@ -517,6 +520,23 @@ It consumes `delta.addedRoutes` from the audit artifact in a separate
 `workflow_run`, keeping the incoming webhook out of the pull-request job. The
 guide lists exactly which files to commit, how to configure the secret, how to
 preview the payload without sending it, and when a committed baseline is useful.
+
+For a receiver you control, use the
+[signed webhook example](./examples/github-actions/webhook-new-routes/README.md).
+The `notify` command emits bounded events for added/removed routes,
+authentication regressions, and incomplete scans from either a repository or
+organization comparison. Delivery uses HMAC-SHA256 Standard Webhooks headers,
+an exact committed hostname allowlist, HTTPS-only/no-redirect requests, current
+plus previous secret rotation, bounded retry, and deterministic event IDs for
+receiver-side deduplication. Secrets are read only from named environment
+variables; `--dry-run` needs neither a URL nor a secret.
+
+```bash
+npx --no-install express-recon notify \
+  --input current-results/routes.json \
+  --events routes.added,auth.regressed,scan.incomplete \
+  --dry-run
+```
 
 ## Runtime and hybrid trust boundary
 
@@ -596,6 +616,11 @@ const {
   scanRepository,
   scanOrganization,
   renderHtmlSite,
+  buildNotificationEvents,
+  deliverWebhook,
+  signWebhook,
+  validateNotificationEvent,
+  verifyWebhookSignature,
   executeRuntime,
   formatters,
 } = require("express-recon");

@@ -260,6 +260,41 @@ resolution, whether relative or remote. If complete schema expansion is required
 ask for or produce a self-contained specification before rendering rather than
 enabling network access in the generated site.
 
+### Prepare notifications without surprising side effects
+
+Building notification events is deterministic local report processing and does
+not invoke a model. Delivering them is an external network side effect. An agent
+must run `notify` without `--dry-run` only when the user explicitly asks to send,
+test delivery, or execute the configured CI notification. A request to inspect,
+recommend, document, or preview notifications authorizes only:
+
+```bash
+EXPRESS_RECON_CONTEXT=agent express-recon notify \
+  --input <routes-or-organization-report.json> \
+  --events routes.added,auth.regressed,scan.incomplete \
+  --dry-run
+```
+
+Do not request, print, read back, or place a webhook URL/signing key in command
+arguments. The trusted environment supplies `EXPRESS_RECON_WEBHOOK_URL` and
+`EXPRESS_RECON_WEBHOOK_SECRET`; `EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET` is
+optional during rotation. If delivery is explicitly authorized, require a
+reviewed exact `--allow-host` value and keep source locations excluded unless
+the user says that the receiver may receive them.
+
+An empty selected delta is a successful no-op. A missing baseline delta is an
+input error: create or request a compatible comparison rather than treating all
+current routes as new. For organization inputs, prefer the compact aggregate
+unless exact changed paths are needed; the full delta may contain many route and
+repository details. Report only the event types/counts, deterministic event IDs,
+and delivery status—never echo endpoint or signature values.
+
+The stdio MCP server has no notification or arbitrary-network tool. Do not work
+around that boundary. Use the CLI only under the same explicit external-action
+authorization, and keep privileged `workflow_run` jobs separate from untrusted
+pull-request execution as shown in the
+[signed webhook example](../examples/github-actions/webhook-new-routes/README.md).
+
 ### Audit with known guards
 
 Pass only confirmed middleware names to `audit_routes`. Dotted callees such as

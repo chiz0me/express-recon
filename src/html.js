@@ -6,7 +6,7 @@ const pkg = require("../package.json");
 const { getAbsoluteFSPath: swaggerUiPath } = require("swagger-ui-dist");
 const { describeRenderableSpecification, loadSpec } = require("./docs");
 const { isFrameworkStatus } = require("./frameworks");
-const { SCRIPT, STYLES } = require("./html-assets");
+const { OPENAPI_STYLES, SCRIPT, STYLES } = require("./html-assets");
 const {
   compareOrganizationReports,
   loadOrganizationSnapshot,
@@ -37,7 +37,8 @@ const SWAGGER_UI_FILES = new Map([
   ["LICENSE", "assets/swagger-ui-LICENSE.txt"],
   ["NOTICE", "assets/swagger-ui-NOTICE.txt"],
 ]);
-const SWAGGER_UI_ASSETS = [...SWAGGER_UI_FILES.values()];
+const OPENAPI_THEME_ASSET = "assets/openapi.css";
+const SWAGGER_UI_ASSETS = [...SWAGGER_UI_FILES.values(), OPENAPI_THEME_ASSET];
 const OPENAPI_ASSETS = [...SWAGGER_UI_ASSETS, "assets/openapi-config.js"];
 
 function escapeHtml(value) {
@@ -482,10 +483,11 @@ function openApiPage(document, options = {}) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <meta name="generator" content="express-recon ${escapeHtml(pkg.version)}">
   <title>${escapeHtml(title)} · express-recon</title>
   <link rel="stylesheet" href="${escapeHtml(assetPrefix)}assets/swagger-ui.css">
+  <link rel="stylesheet" href="${escapeHtml(assetPrefix)}${OPENAPI_THEME_ASSET}">
   <script src="${escapeHtml(assetPrefix)}assets/swagger-ui-bundle.js" defer></script>
   <script src="${escapeHtml(configSource)}" defer></script>
 </head>
@@ -1392,6 +1394,7 @@ function copySwaggerUiAssets(output) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(source, target);
   }
+  writeFile(path.join(output, OPENAPI_THEME_ASSET), OPENAPI_STYLES.trimStart());
 }
 
 function prepareOutput(output, kind) {

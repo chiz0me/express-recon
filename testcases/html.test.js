@@ -314,12 +314,15 @@ test("OpenAPI JSON renders with packaged Swagger UI and offline-safe defaults", 
       "assets/swagger-ui-bundle.js.LICENSE.txt",
       "assets/swagger-ui-LICENSE.txt",
       "assets/swagger-ui-NOTICE.txt",
+      "assets/openapi.css",
       "assets/openapi-config.js",
     ]);
     assert.match(html, /assets\/swagger-ui\.css/);
+    assert.match(html, /assets\/openapi\.css/);
     assert.match(html, /assets\/swagger-ui-bundle\.js/);
     assert.match(html, /assets\/openapi-config\.js/);
     assert.match(html, /connect-src 'none'/);
+    assert.match(html, /name="color-scheme" content="light"/);
     assert.match(html, /Payments &lt;\/script&gt;&lt;script&gt;/);
     assert.doesNotMatch(html, /<script>alert/);
     assert.doesNotMatch(html, /https?:\/\//);
@@ -331,6 +334,13 @@ test("OpenAPI JSON renders with packaged Swagger UI and offline-safe defaults", 
     assert.match(config, /tryItOutEnabled: false/);
     assert.match(config, /validatorUrl: null/);
     assert.doesNotMatch(config, /^\s*(?:configUrl|url):/m);
+
+    const theme = fs.readFileSync(path.join(output, "assets", "openapi.css"), "utf8");
+    assert.match(theme, /color-scheme: only light/);
+    assert.match(theme, /--openapi-page: #f6f8fa/);
+    assert.match(theme, /--openapi-surface: #ffffff/);
+    assert.match(theme, /--openapi-ink: #1f2328/);
+    assert.match(theme, /#swagger-ui\s*\{[^}]*background: var\(--openapi-surface\)/s);
 
     let swaggerConfiguration;
     const browserGlobal = {};
@@ -801,6 +811,7 @@ test("organization folders render supported-framework OpenAPI artifacts with one
     assert.match(overview, /fastify: application/);
     assert.match(detail, /\.\.\/openapi\/api\.html/);
     assert.match(reference, /\.\.\/assets\/swagger-ui\.css/);
+    assert.match(reference, /\.\.\/assets\/openapi\.css/);
     assert.match(reference, /src="api\.js"/);
     assert.match(config, /Organization API/);
     assert.doesNotMatch(config, /Embedded fallback/);
@@ -809,6 +820,7 @@ test("organization folders render supported-framework OpenAPI artifacts with one
       manifest.assets.filter((asset) => asset === "assets/swagger-ui-bundle.js").length,
       1,
     );
+    assert.equal(manifest.assets.filter((asset) => asset === "assets/openapi.css").length, 1);
     assert.deepEqual(
       manifest.pages.filter((page) => page.startsWith("openapi/")),
       ["openapi/api.html"],
@@ -1370,11 +1382,13 @@ test("rerendering switches cleanly between report and OpenAPI asset sets", () =>
     assert.equal(fs.existsSync(path.join(output, "assets", "report.css")), false);
     assert.equal(fs.existsSync(path.join(output, "assets", "report.js")), false);
     assert.ok(fs.existsSync(path.join(output, "assets", "swagger-ui.css")));
+    assert.ok(fs.existsSync(path.join(output, "assets", "openapi.css")));
     assert.ok(fs.existsSync(path.join(output, "assets", "openapi-config.js")));
 
     renderHtmlSite(reportFile, output);
     assert.ok(fs.existsSync(path.join(output, "assets", "report.css")));
     assert.equal(fs.existsSync(path.join(output, "assets", "swagger-ui.css")), false);
+    assert.equal(fs.existsSync(path.join(output, "assets", "openapi.css")), false);
     assert.equal(fs.existsSync(path.join(output, "assets", "openapi-config.js")), false);
     assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "unowned and preserved");
   });

@@ -22,6 +22,13 @@ const {
 const { acquireRepository, scanRepository } = require("./repository");
 const { listOrganizationRepositories, scanOrganization } = require("./organization");
 const { renderHtmlSite } = require("./html");
+const {
+  buildNotificationEvents,
+  deliverWebhook,
+  signWebhook,
+  validateNotificationEvent,
+  verifyWebhookSignature,
+} = require("./notify");
 
 /**
  * express-recon — an offline-first inventory and audit harness for Express,
@@ -44,6 +51,8 @@ const { renderHtmlSite } = require("./html");
  *   - `scanRepository()`            acquire one Git ref and statically scan it
  *   - `scanOrganization()`          enumerate API-visible repos and scan a bounded pool
  *   - `renderHtmlSite()`             render reports and optional baseline changes offline
+ *   - `buildNotificationEvents()`    create bounded route-change webhook events
+ *   - `deliverWebhook()`             deliver one signed, allowlisted HTTPS event
  *
  * `opts` is `{ mode: "static"|"runtime"|"hybrid", src?, app? }`.
  */
@@ -66,6 +75,11 @@ const { renderHtmlSite } = require("./html");
  * @property {typeof listOrganizationRepositories} listOrganizationRepositories Enumerate API-visible organization repositories.
  * @property {typeof scanOrganization} scanOrganization Build a bounded organization inventory.
  * @property {typeof renderHtmlSite} renderHtmlSite Render saved reports as an offline site.
+ * @property {typeof buildNotificationEvents} buildNotificationEvents Build bounded webhook events from report deltas.
+ * @property {typeof deliverWebhook} deliverWebhook Deliver one signed event to an allowlisted HTTPS endpoint.
+ * @property {typeof signWebhook} signWebhook Sign an exact request body using Standard Webhooks headers.
+ * @property {typeof validateNotificationEvent} validateNotificationEvent Validate a strict bounded event envelope.
+ * @property {typeof verifyWebhookSignature} verifyWebhookSignature Verify signed webhook headers and timestamp freshness.
  * @property {typeof audit} audit Classify inventory evidence using reviewed configuration.
  * @property {typeof suggestAuth} suggestAuth Rank possible authentication middleware names.
  * @property {typeof buildReport} buildReport Create the versioned portable report contract.
@@ -96,6 +110,11 @@ module.exports = {
   listOrganizationRepositories,
   scanOrganization,
   renderHtmlSite,
+  buildNotificationEvents,
+  deliverWebhook,
+  signWebhook,
+  validateNotificationEvent,
+  verifyWebhookSignature,
   audit,
   suggestAuth,
   buildReport,

@@ -68,6 +68,7 @@ broader changes are intentional.
 | `src/report.js`, `src/schema.js`    | Versioned report contract                                               |
 | `src/formatters/`                   | JSON-adjacent, Markdown, terminal, and OpenAPI output                   |
 | `src/html.js`, `src/html-assets.js` | Offline report sites, packaged Swagger UI, and output ownership         |
+| `src/notify.js`                     | Bounded events, Standard Webhooks signing, verification, and delivery   |
 | `src/cli.js`                        | CLI parsing, validation, artifacts, and exit codes                      |
 | `src/mcp/server.js`                 | Static local MCP tool surface                                           |
 | `testcases/fixtures/`               | Small repositories encoding scanner behavior                            |

@@ -428,6 +428,71 @@ every repository and turns each embedded report into an audit when applicable.
 Use this only for genuinely shared middleware conventions; names alone remain
 insufficient evidence.
 
+### `notify`
+
+Build bounded, provider-neutral change events from a baseline-aware route or
+organization report and optionally POST them to a receiver you control.
+
+```bash
+# Inspect the exact unsigned event bodies without a URL or secret:
+express-recon notify \
+  --input current-results/routes.json \
+  --events routes.added,auth.regressed,scan.incomplete \
+  --dry-run
+
+# Deliver them after the endpoint and key are provided through the environment:
+EXPRESS_RECON_WEBHOOK_URL=https://events.example.com/express-recon \
+EXPRESS_RECON_WEBHOOK_SECRET="$(openssl rand -base64 32)" \
+express-recon notify \
+  --input current-results/routes.json \
+  --allow-host events.example.com
+```
+
+`--input` is required and must be a non-symbolic regular JSON file no larger
+than 32 MiB. It accepts `routes.json`, `organization-inventory.json`, or the full
+`organization-delta.json`. Change events require comparison evidence produced by
+`audit`/`inventory --baseline` or `scan-org --baseline`; absence is an error, not
+an instruction to label the whole current inventory as new.
+
+`--events` accepts `routes.added`, `routes.removed`, `auth.regressed`, and
+`scan.incomplete`. The default selects added routes, authentication regressions,
+and incomplete scan/comparison coverage. One request is sent per non-empty event
+type. An empty selected delta succeeds without reading the endpoint or signing
+secret. `--dry-run` prints a `webhook-notification-preview` containing unsigned
+event bodies and performs no network request.
+
+Every event contains a version, deterministic `id`, type, creation time,
+subject, optional bounded CI context, exact total, retained-detail count,
+truncation flag, and at most 20 detail objects by default. `--max-items` can
+raise that bound to 100. Organization aggregates retain exact counts and may
+emit repository summaries when exact paths exist only in the separate full
+delta artifact. Source locations are data-minimized away by default;
+`--include-source` adds only safe repository-relative locations. Event bodies
+are capped at 256 KiB.
+
+`--provider webhook` is the default and only provider. The URL and current key
+come from `EXPRESS_RECON_WEBHOOK_URL` and `EXPRESS_RECON_WEBHOOK_SECRET`, or from
+the uppercase variable names selected with `--url-env` and `--secret-env`.
+Values themselves are never accepted as arguments. A present
+`EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET`, or the variable named by
+`--previous-secret-env`, adds a second signature during rotation.
+
+Delivery requires one or more exact `--allow-host` values. The URL must use
+HTTPS on the default port and may not contain credentials, a query, or fragment;
+IP literals and local hostnames are rejected. Redirects fail. Requests use
+Standard Webhooks `webhook-id`, `webhook-timestamp`, and `webhook-signature`
+headers over the exact raw body with HMAC-SHA256. Secrets must contain at least
+32 bytes. Timeout defaults to 10 seconds. Up to three attempts retry network
+failures, 408, 425, 429, and selected 5xx responses with bounded backoff.
+
+Available GitHub Actions context is added automatically. Provider-neutral
+`EXPRESS_RECON_REPOSITORY`, `EXPRESS_RECON_REVISION`, `EXPRESS_RECON_REF`,
+`EXPRESS_RECON_RUN_ID`, and `EXPRESS_RECON_RUN_URL` override the corresponding
+GitHub values; `EXPRESS_RECON_PULL_REQUEST` adds a pull-request identity. This
+metadata never changes event selection. See the
+[signed CI example](../examples/github-actions/webhook-new-routes/README.md) for
+the trusted `workflow_run` boundary and receiver verification.
+
 ### `render`
 
 Render existing machine-readable artifacts as a browsable offline HTML site:
@@ -482,9 +547,9 @@ The output contains:
   inconclusive scans with an available detailed artifact; definite unsupported,
   skipped, empty, and failed entries remain index-only;
 - local `assets/report.css` and `assets/report.js` with no CDN dependency;
-- for a standalone OpenAPI 3 or Swagger 2 input, the packaged Swagger UI CSS/bundle, its
-  license notices, and a safely serialized local configuration asset instead of
-  report assets;
+- for a standalone OpenAPI 3 or Swagger 2 input, the packaged Swagger UI CSS/bundle, a
+  local high-contrast light-canvas override, its license notices, and a safely
+  serialized local configuration asset instead of report assets;
 - for a repository or organization input, `openapi/<name>.html` plus a local
   configuration script for each retained OpenAPI 3 or Swagger 2 specification
   attached to a confirmed supported entry; those pages share one packaged
@@ -510,7 +575,9 @@ hiding the remaining organization evidence. Root input errors exit `1`.
 
 OpenAPI pages use stock Swagger UI. express-recon embeds the parsed document as a
 local JavaScript object; HTML-significant characters are escaped during
-serialization. `supportedSubmitMethods` is empty, `tryItOutEnabled` and query
+serialization. A local stylesheet pins the Swagger canvas and native controls to
+the light color scheme, avoiding an unreadable partial browser dark-mode
+conversion. `supportedSubmitMethods` is empty, `tryItOutEnabled` and query
 configuration are disabled, credentials are not persisted, and the online
 validator is disabled. The page CSP sets `connect-src 'none'`, so server URLs and
 external `$ref` targets cannot be contacted. A self-contained/bundled spec is
@@ -550,7 +617,7 @@ instead of being ignored.
 | `--jsdoc`            | `docs`, `scan-repo`                                       | Add an annotation source; repeatable.                                                                              |
 | `--review`           | `import-review`                                           | Read the exact middleware-review bundle being assessed.                                                            |
 | `--assessment`       | `import-review`                                           | Read the JSON/YAML assessment response.                                                                            |
-| `--input`            | `render`                                                  | Select a report/API-specification file or output directory; otherwise require one bounded auto-detected candidate. |
+| `--input`            | `render`, `notify`                                        | Select a render source or the required route/organization notification JSON.                                      |
 | `--repo`             | `scan-repo`                                               | Select a GitHub shorthand, HTTPS Git URL, or local Git repository.                                                 |
 | `--org`              | `scan-org`                                                | Select the GitHub organization login.                                                                              |
 | `--ref`              | `scan-repo`                                               | Select a branch, tag, or commit; defaults to remote `HEAD`.                                                        |
@@ -573,17 +640,42 @@ instead of being ignored.
 | `--no-ignore-file`   | Static/discovery/repository/organization commands         | Disable the configured/default scope file.                                                                         |
 | `--include-tests`    | Static/discovery/repository/organization commands         | Opt test paths into the scan.                                                                                      |
 | `--include-hidden`   | Static/discovery/repository/organization commands         | Opt hidden paths into the scan, excluding fixed VCS/vendor/build paths.                                            |
+| `--provider`         | `notify`                                                  | Select `webhook`, currently the only delivery provider.                                                            |
+| `--events`           | `notify`                                                  | Select a comma-separated set of supported change events.                                                           |
+| `--url-env`          | `notify`                                                  | Name the uppercase environment variable containing the endpoint URL.                                               |
+| `--secret-env`       | `notify`                                                  | Name the uppercase environment variable containing the current HMAC key.                                           |
+| `--previous-secret-env` | `notify`                                               | Name an optional prior-key variable for rotation.                                                                  |
+| `--allow-host`       | `notify`                                                  | Allow one exact non-local destination hostname; repeatable.                                                        |
+| `--max-items`        | `notify`                                                  | Retain 1–100 detail objects per event; defaults to 20.                                                              |
+| `--timeout-ms`       | `notify`                                                  | Bound each request to 1,000–30,000 ms; defaults to 10,000.                                                         |
+| `--attempts`         | `notify`                                                  | Make 1–3 delivery attempts; defaults to 3.                                                                         |
+| `--include-source`   | `notify`                                                  | Include validated repository-relative source locations.                                                           |
+| `--dry-run`          | `notify`                                                  | Print unsigned events without reading secrets or using the network.                                                |
 | `--version`, `-V`    | Global                                                    | Print the installed package version without running a command.                                                     |
 | `--help`, `-h`       | Global                                                    | Print onboarding, command, option, trust, and exit-code help.                                                      |
 
 ## Environment variables
 
-| Variable                | Behavior                                                                                                             |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `EXPRESS_RECON_CONTEXT` | `agent`, `ci`, `interactive`, or `auto`; changes safe organization progress/output defaults but never scan evidence. |
-| `GH_TOKEN`              | Preferred GitHub API and private-fetch token for repository/organization scans.                                      |
-| `GITHUB_TOKEN`          | Fallback when `GH_TOKEN` is unset.                                                                                   |
-| `EXPRESS_RECON_DRY`     | Set to `1` automatically inside the trusted runtime worker before importing the target app.                          |
+| Variable                                | Behavior                                                                                                             |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `EXPRESS_RECON_CONTEXT`                 | `agent`, `ci`, `interactive`, or `auto`; changes safe organization progress/output defaults but never scan evidence. |
+| `GH_TOKEN`                              | Preferred GitHub API and private-fetch token for repository/organization scans.                                      |
+| `GITHUB_TOKEN`                          | Fallback when `GH_TOKEN` is unset.                                                                                   |
+| `EXPRESS_RECON_DRY`                     | Set to `1` automatically inside the trusted runtime worker before importing the target app.                          |
+| `EXPRESS_RECON_WEBHOOK_URL`             | Default `notify` endpoint; kept out of arguments and output.                                                         |
+| `EXPRESS_RECON_WEBHOOK_SECRET`          | Current HMAC-SHA256 key used by `notify`.                                                                            |
+| `EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET` | Optional prior key used to emit a rotation signature.                                                               |
+| `EXPRESS_RECON_REPOSITORY`              | Optional provider-neutral event repository/subject context.                                                         |
+| `EXPRESS_RECON_REVISION`                | Optional provider-neutral revision context.                                                                         |
+| `EXPRESS_RECON_REF`                     | Optional provider-neutral ref context.                                                                              |
+| `EXPRESS_RECON_RUN_ID`                  | Optional provider-neutral CI run identity.                                                                          |
+| `EXPRESS_RECON_RUN_URL`                 | Optional HTTPS CI run link.                                                                                         |
+| `EXPRESS_RECON_PULL_REQUEST`            | Optional pull-request identity.                                                                                     |
+| `GITHUB_REPOSITORY`                     | GitHub Actions fallback repository context for `notify`.                                                            |
+| `GITHUB_SHA`                            | GitHub Actions fallback revision context for `notify`.                                                              |
+| `GITHUB_REF_NAME`                       | GitHub Actions fallback ref context for `notify`.                                                                   |
+| `GITHUB_RUN_ID`                         | GitHub Actions fallback run identity for `notify`.                                                                  |
+| `GITHUB_SERVER_URL`                     | GitHub Actions server base used to derive the run URL.                                                              |
 
 Tokens are sent through scoped process environment/configuration rather than
 rendered in command arguments or reports. Explicit CLI progress flags override
@@ -607,6 +699,7 @@ reject unsafe `repositories/` output directories before GitHub enumeration.
 | `scan-repo`               | `repo-scan.json`, `discovery.json`, `routes.json`; retained API contracts under `specifications/`; canonical OpenAPI/docs report when mergeable                                                                                       |
 | `scan-org`                | `organization-inventory.json`; optional bounded `organization-delta.json`; per-repo scan, discovery, routes, specification catalogs, and mergeable docs under `repositories/<name>/`; `organization-checkpoint.json` while incomplete |
 | `render`                  | `index.html`, local report and/or shared Swagger UI assets, `render-manifest.json`, optional copied organization delta, repository pages, and one supported-framework API page per retained OpenAPI 3/Swagger 2 contract              |
+| `notify`                  | JSON preview/result on stdout; one signed HTTPS request per emitted event unless `--dry-run`                                                                                        |
 | `suggest-auth` / `schema` | JSON on stdout                                                                                                                                                                                                                        |
 
 `pretty` is terminal-oriented and is not written as an artifact. Supported

@@ -91,6 +91,10 @@ test("CLI help exposes onboarding, trust terminology, and exit codes", () => {
   assert.match(result.stdout, /Optional when exactly one input is discoverable/);
   assert.match(result.stdout, /render defaults to a sibling <input>-html directory/);
   assert.match(result.stdout, /scan-org defaults to \.express-recon\/<lowercase-org>/);
+  assert.match(result.stdout, /notify\s+Build bounded change events/);
+  assert.match(result.stdout, /--dry-run\s+print unsigned notification events/);
+  assert.match(result.stdout, /--allow-host <host>\s+exact non-local webhook hostname allowlist/);
+  assert.match(result.stdout, /EXPRESS_RECON_WEBHOOK_SECRET/);
   assert.match(result.stdout, /EXPRESS_RECON_CONTEXT=agent/);
   assert.match(result.stdout, /scan-org uses its default output and progress mode none/);
   assert.match(result.stdout, /Existing output requires explicit --resume or --overwrite/);
@@ -100,6 +104,7 @@ test("CLI help exposes onboarding, trust terminology, and exit codes", () => {
   for (const command of [
     "discover",
     "inventory",
+    "notify",
     "audit",
     "suggest-auth",
     "docs",

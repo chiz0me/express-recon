@@ -183,6 +183,39 @@ advisory: they never mutate config or promote an audit result to `proven`.
 The complete evidence and reporting rules for agents are in the
 [AI agent guide](./docs/ai-agent-guide.md).
 
+## Webhook trust model
+
+`notify` is the only report-consumption command that deliberately makes an
+outbound request. Scanning, comparison, and event construction remain local;
+the request occurs only when selected evidence produces a non-empty event and
+`--dry-run` is absent. Empty deltas succeed without reading an endpoint or key.
+
+The URL and signing keys are read from named environment variables and are
+never accepted as command-line values, written into events, or included in
+errors. Delivery requires an exact hostname allowlist, HTTPS on the default
+port, no URL credentials/query/fragment, and redirects disabled. IP literals,
+localhost, and local DNS suffixes are rejected. The allowlist should be
+committed in the trusted workflow while the URL remains secret, so changing the
+URL secret cannot redirect evidence to another hostname. This validation is not
+a DNS or network sandbox; use runner egress policy when untrusted configuration
+can affect name resolution or routing.
+
+Requests use the Standard Webhooks header/signing shape: HMAC-SHA256 covers the
+event ID, Unix timestamp, and exact raw JSON body. Keys must contain at least 32
+bytes. A current and previous key can produce two signatures during rotation.
+Signatures authenticate bytes; they do not encrypt route metadata or establish
+receiver authorization by themselves. The receiver must verify before parsing,
+enforce timestamp freshness, compare in constant time, and atomically persist
+the deterministic `webhook-id` as an idempotency key. Timestamp checking without
+durable ID deduplication is not replay protection.
+
+Events are data-minimized and size-bounded. Source locations are omitted by
+default, details are capped, and complete evidence stays in the CI artifact.
+Route paths, repository names, refs, and other event fields are still untrusted
+and potentially sensitive. Receivers must validate the event contract and avoid
+copying its values into logs, markup, commands, queries, or URLs without the
+appropriate escaping.
+
 ## CI trust model
 
 A pull request must not choose the scanner binary, dependency lockfile,
@@ -201,6 +234,14 @@ provide that comparability proof and should be regenerated for a security gate.
 Organization reports and caches can disclose private repository names, routes,
 and source locations; never make a privileged organization cache available to
 untrusted pull-request jobs.
+
+The signed-webhook example keeps endpoint/signing secrets in a separate
+`workflow_run` job. That event can access secrets even though the originating
+pull-request job could not, so the privileged job checks out the reviewed
+default-branch lockfile, installs with lifecycle scripts disabled, validates one
+exact size-bounded artifact, and never executes pull-request code. Protect the
+workflow, destination allowlist, and lockfile with required review. An artifact
+is untrusted input even when GitHub transported it between the two jobs.
 
 ## Dependency audit
 

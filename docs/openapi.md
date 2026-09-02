@@ -51,7 +51,9 @@ CI should normally keep `--input` explicit.
 
 This rendering step does not scan or reconcile the repository. It works through
 `file://`, contacts no network service, executes no target code, and invokes no
-model. Request submission and Swagger's online validator are disabled. Because
+model. The generated API reference pins the Swagger UI canvas and native controls
+to a high-contrast light scheme so system dark mode cannot partially recolor the
+page. Request submission and Swagger's online validator are disabled. Because
 the page CSP blocks all browser connections, external `$ref` targets—relative or
 remote—remain unresolved; bundle them into the input document when a fully
 self-contained view is required. The result is a review surface, not evidence

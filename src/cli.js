@@ -21,6 +21,8 @@ const {
   scanRepository,
   scanOrganization,
   renderHtmlSite,
+  buildNotificationEvents,
+  deliverWebhook,
 } = require("./index");
 const { executeRuntime } = require("./runtime/execute");
 const { loadPackageInfo } = require("./static/resolve");
@@ -51,6 +53,10 @@ const ORGANIZATION_DELTA_FILENAME = "organization-delta.json";
 const ORGANIZATION_BASELINE_DIRECTORY = "comparison-baseline";
 const MAX_ORGANIZATION_DELTA_BYTES = 32 * 1024 * 1024;
 const MAX_ORGANIZATION_BASELINE_BYTES = 256 * 1024 * 1024;
+const MAX_NOTIFICATION_REPORT_BYTES = 32 * 1024 * 1024;
+const DEFAULT_WEBHOOK_URL_ENV = "EXPRESS_RECON_WEBHOOK_URL";
+const DEFAULT_WEBHOOK_SECRET_ENV = "EXPRESS_RECON_WEBHOOK_SECRET";
+const DEFAULT_WEBHOOK_PREVIOUS_SECRET_ENV = "EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET";
 
 const USAGE = `
 express-recon — offline HTTP route inventory and auth audit
@@ -85,6 +91,8 @@ Commands:
   render        Generate a browsable offline HTML site from an existing report,
                 OpenAPI 3 or Swagger 2 JSON/YAML file, or output directory.
                 Does not rescan.
+  notify        Build bounded change events from routes.json or an organization
+                inventory/delta and optionally deliver signed HTTPS webhooks.
   schema        Print the JSON Schema of the report contract and exit.
   help          Print this help text and exit.
 
@@ -108,9 +116,10 @@ Options:
   --assessment <path>   JSON/YAML assessment input for import-review.
   --input <path>        OpenAPI 3 JSON/YAML or Swagger 2, routes.json, repo-scan.json,
                         organization-inventory.json, or a directory containing a
-                        conventional filename for one of them (render only).
-                        Optional when exactly one input is discoverable in the
-                        current directory or an immediate .express-recon child.
+                        conventional filename for one of them (render); notify
+                        accepts a routes or organization JSON report and requires it.
+                        Optional when exactly one input is discoverable for render
+                        in the current directory or an immediate .express-recon child.
   --repo <url|owner/repo|path>
                         repository for scan-repo (HTTPS/GitHub shorthand/local).
   --org <name>          GitHub organization for scan-org. GH_TOKEN or GITHUB_TOKEN
@@ -156,6 +165,22 @@ Options:
   --include-tests       also scan test files/dirs (excluded by default)
   --include-hidden      also scan hidden directories such as .cursor (default: exclude;
                         .git and generated/vendor directories remain excluded)
+  --provider webhook    notify delivery provider (default and currently only: webhook).
+  --events <list>       notify on routes.added, routes.removed, auth.regressed,
+                        and/or scan.incomplete (default: added, regressed, incomplete).
+  --url-env <name>      environment variable containing the webhook URL
+                        (default: EXPRESS_RECON_WEBHOOK_URL; never accepts the value).
+  --secret-env <name>   environment variable containing the current signing secret
+                        (default: EXPRESS_RECON_WEBHOOK_SECRET).
+  --previous-secret-env <name>
+                        optional previous signing-secret environment variable for rotation.
+  --allow-host <host>   exact non-local webhook hostname allowlist (repeatable; required
+                        when an event is delivered, not for dry-run or an empty delta).
+  --max-items <n>       maximum event detail objects (default 20; maximum 100).
+  --timeout-ms <n>      webhook request timeout (default 10000; 1000 to 30000).
+  --attempts <n>        webhook delivery attempts (default 3; maximum 3).
+  --include-source      include safe repository-relative source locations in events.
+  --dry-run             print unsigned notification events without network or secrets.
   --version, -V         print the installed express-recon version and exit
   --help, -h            show this message
 
@@ -168,6 +193,15 @@ Environment:
                         scan-org defaults to stable plain progress and never prompts.
   EXPRESS_RECON_CONTEXT=interactive
                         scan-org retains automatic TTY/non-TTY progress selection.
+  EXPRESS_RECON_WEBHOOK_URL / EXPRESS_RECON_WEBHOOK_SECRET
+                        default notify endpoint and HMAC-SHA256 signing secret variables.
+  EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET
+                        optional previous signing secret used automatically for rotation.
+  EXPRESS_RECON_REPOSITORY / EXPRESS_RECON_REVISION / EXPRESS_RECON_REF /
+  EXPRESS_RECON_RUN_ID / EXPRESS_RECON_RUN_URL / EXPRESS_RECON_PULL_REQUEST
+                        optional provider-neutral notify context; overrides GitHub values.
+  GITHUB_REPOSITORY / GITHUB_SHA / GITHUB_REF_NAME / GITHUB_RUN_ID / GITHUB_SERVER_URL
+                        notify adds available GitHub Actions context to bounded event metadata.
 
 Terminology:
   public   no configured authentication guard matched; not a reachability claim
@@ -197,6 +231,7 @@ const COMMANDS = new Set([
   "help",
   "import-review",
   "inventory",
+  "notify",
   "review-middleware",
   "render",
   "scan-org",
@@ -206,7 +241,7 @@ const COMMANDS = new Set([
 ]);
 const MODES = new Set(["static", "runtime", "hybrid"]);
 const FORMATS = new Set(["json", "md", "pretty", "openapi"]);
-const REPEATABLE_OPTIONS = new Set(["--exclude", "--include", "--jsdoc"]);
+const REPEATABLE_OPTIONS = new Set(["--allow-host", "--exclude", "--include", "--jsdoc"]);
 const JSON_PROGRESS_ERRORS = new WeakSet();
 const EXECUTION_CONTEXTS = new Set(["agent", "auto", "ci", "interactive"]);
 
@@ -235,7 +270,13 @@ function resolveOrganizationProgressMode(args, context) {
 function parseArgs(argv) {
   if (argv[0] === "--help" || argv[0] === "-h") return { help: true };
   if (argv[0] === "--version" || argv[0] === "-V") return { version: true };
-  const out = { command: argv[0], mode: "static", format: "pretty", progress: "auto" };
+  const out = {
+    command: argv[0],
+    mode: "static",
+    format: "pretty",
+    progress: "auto",
+    provider: "webhook",
+  };
   const provided = new Set();
   const takeValue = (option, index) => {
     const value = argv[index + 1];
@@ -260,6 +301,15 @@ function parseArgs(argv) {
     else if (arg === "--review") out.review = takeValue(arg, i++);
     else if (arg === "--assessment") out.assessment = takeValue(arg, i++);
     else if (arg === "--input") out.input = takeValue(arg, i++);
+    else if (arg === "--provider") out.provider = takeValue(arg, i++);
+    else if (arg === "--events") out.events = takeValue(arg, i++);
+    else if (arg === "--url-env") out.urlEnv = takeValue(arg, i++);
+    else if (arg === "--secret-env") out.secretEnv = takeValue(arg, i++);
+    else if (arg === "--previous-secret-env") out.previousSecretEnv = takeValue(arg, i++);
+    else if (arg === "--allow-host") (out.allowHost ||= []).push(takeValue(arg, i++));
+    else if (arg === "--max-items") out.maxItems = takeValue(arg, i++);
+    else if (arg === "--timeout-ms") out.timeoutMs = takeValue(arg, i++);
+    else if (arg === "--attempts") out.attempts = takeValue(arg, i++);
     else if (arg === "--repo") out.repo = takeValue(arg, i++);
     else if (arg === "--org") out.org = takeValue(arg, i++);
     else if (arg === "--ref") out.ref = takeValue(arg, i++);
@@ -286,6 +336,14 @@ function parseArgs(argv) {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
       out.includeHidden = true;
+    } else if (arg === "--include-source") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.includeSource = true;
+    } else if (arg === "--dry-run") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.dryRun = true;
     } else if (arg === "--include-archived" || arg === "--include-forks") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
@@ -476,6 +534,51 @@ function validateArgs(args) {
     const supported = new Set(["--baseline", "--input", "--out"]);
     const unsupported = [...args.provided].filter((option) => !supported.has(option));
     if (unsupported.length) throw new Error(`render does not accept ${unsupported.join(", ")}`);
+  }
+  if (args.command === "notify") {
+    const supported = new Set([
+      "--allow-host",
+      "--attempts",
+      "--dry-run",
+      "--events",
+      "--include-source",
+      "--input",
+      "--max-items",
+      "--previous-secret-env",
+      "--provider",
+      "--secret-env",
+      "--timeout-ms",
+      "--url-env",
+    ]);
+    const unsupported = [...args.provided].filter((option) => !supported.has(option));
+    if (unsupported.length) throw new Error(`notify does not accept ${unsupported.join(", ")}`);
+    if (!args.input) throw new Error("notify requires --input <routes-or-organization.json>");
+    if (args.provider !== "webhook") throw new Error('notify --provider supports only "webhook"');
+    for (const [option, value, minimum, maximum] of [
+      ["--max-items", args.maxItems, 1, 100],
+      ["--timeout-ms", args.timeoutMs, 1_000, 30_000],
+      ["--attempts", args.attempts, 1, 3],
+    ]) {
+      if (
+        value !== undefined &&
+        (!/^\d+$/.test(value) || Number(value) < minimum || Number(value) > maximum)
+      ) {
+        throw new Error(`${option} must be an integer from ${minimum} to ${maximum}`);
+      }
+    }
+    for (const [option, value] of [
+      ["--url-env", args.urlEnv],
+      ["--secret-env", args.secretEnv],
+      ["--previous-secret-env", args.previousSecretEnv],
+    ]) {
+      if (value !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(value)) {
+        throw new Error(`${option} must name an uppercase environment variable`);
+      }
+    }
+    const hosts = args.allowHost || [];
+    if (new Set(hosts.map((host) => host.toLowerCase())).size !== hosts.length) {
+      throw new Error("--allow-host must not contain duplicates");
+    }
   }
   if (args.command === "scan-repo") {
     const supported = new Set([
@@ -756,6 +859,116 @@ function runRender(args) {
       null,
       2,
     ) + "\n",
+  );
+  return 0;
+}
+
+function readNotificationReport(input) {
+  const file = resolvePath(input);
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    throw new Error(`Could not read notification input: ${error.code || "filesystem error"}`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error("notification input must be a regular JSON file");
+  }
+  if (stat.size <= 0 || stat.size > MAX_NOTIFICATION_REPORT_BYTES) {
+    throw new Error(
+      `notification input must be between 1 and ${MAX_NOTIFICATION_REPORT_BYTES} bytes`,
+    );
+  }
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new Error(`Could not parse notification input JSON: ${error.message}`);
+  }
+}
+
+function notificationContextFromEnvironment(environment) {
+  const context = {
+    repository: environment.EXPRESS_RECON_REPOSITORY || environment.GITHUB_REPOSITORY,
+    revision: environment.EXPRESS_RECON_REVISION || environment.GITHUB_SHA,
+    ref: environment.EXPRESS_RECON_REF || environment.GITHUB_REF_NAME || environment.GITHUB_REF,
+    runId: environment.EXPRESS_RECON_RUN_ID || environment.GITHUB_RUN_ID,
+    pullRequest: environment.EXPRESS_RECON_PULL_REQUEST,
+  };
+  if (environment.EXPRESS_RECON_RUN_URL) {
+    context.runUrl = environment.EXPRESS_RECON_RUN_URL;
+    return context;
+  }
+  if (environment.GITHUB_SERVER_URL && environment.GITHUB_REPOSITORY && environment.GITHUB_RUN_ID) {
+    let server;
+    try {
+      server = new URL(environment.GITHUB_SERVER_URL);
+    } catch {
+      throw new Error("GITHUB_SERVER_URL must be a valid HTTPS URL for notify context");
+    }
+    if (server.protocol !== "https:" || server.username || server.password || server.search) {
+      throw new Error("GITHUB_SERVER_URL must be an HTTPS URL without credentials or query");
+    }
+    const repository = String(environment.GITHUB_REPOSITORY)
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/");
+    context.runUrl = `${server.href.replace(/\/$/, "")}/${repository}/actions/runs/${encodeURIComponent(environment.GITHUB_RUN_ID)}`;
+  }
+  return context;
+}
+
+function requiredEnvironment(environment, name) {
+  const value = environment[name];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Environment variable ${name} is not configured`);
+  }
+  return value;
+}
+
+async function runNotify(args, environment = process.env) {
+  const report = readNotificationReport(args.input);
+  const events = buildNotificationEvents(report, {
+    events: args.events?.split(",").map((value) => value.trim()),
+    includeSource: args.includeSource,
+    maxItems: args.maxItems === undefined ? undefined : Number(args.maxItems),
+    context: notificationContextFromEnvironment(environment),
+  });
+  const result = {
+    kind: args.dryRun ? "webhook-notification-preview" : "webhook-notification-result",
+    provider: args.provider,
+    eventsEmitted: events.length,
+  };
+  if (args.dryRun) {
+    process.stdout.write(`${JSON.stringify({ ...result, events }, null, 2)}\n`);
+    return 0;
+  }
+  if (events.length === 0) {
+    process.stdout.write(`${JSON.stringify({ ...result, eventsDelivered: 0 }, null, 2)}\n`);
+    return 0;
+  }
+  const urlEnvironment = args.urlEnv || DEFAULT_WEBHOOK_URL_ENV;
+  const secretEnvironment = args.secretEnv || DEFAULT_WEBHOOK_SECRET_ENV;
+  const secrets = [requiredEnvironment(environment, secretEnvironment)];
+  const previousEnvironment = args.previousSecretEnv || DEFAULT_WEBHOOK_PREVIOUS_SECRET_ENV;
+  if (args.previousSecretEnv) {
+    secrets.push(requiredEnvironment(environment, previousEnvironment));
+  } else if (environment[previousEnvironment]) {
+    secrets.push(environment[previousEnvironment]);
+  }
+  const deliveries = [];
+  for (const event of events) {
+    deliveries.push(
+      await deliverWebhook(event, {
+        url: requiredEnvironment(environment, urlEnvironment),
+        secrets,
+        allowHosts: args.allowHost,
+        attempts: args.attempts === undefined ? undefined : Number(args.attempts),
+        timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
+      }),
+    );
+  }
+  process.stdout.write(
+    `${JSON.stringify({ ...result, eventsDelivered: deliveries.length, deliveries }, null, 2)}\n`,
   );
   return 0;
 }
@@ -1728,6 +1941,7 @@ async function main(argv) {
   if (args.command === "review-middleware") return runMiddlewareReview(args);
   if (args.command === "import-review") return runImportReview(args);
   if (args.command === "render") return runRender(args);
+  if (args.command === "notify") return runNotify(args);
   if (args.command === "scan-org") return runScanOrganization(args);
   if (args.command === "scan-repo") return runScanRepository(args);
   if (args.command === "suggest-auth") return runSuggestAuth(args);

@@ -13,6 +13,9 @@ scanner version used by CI.
 - [`github-actions/slack-new-routes/`](./github-actions/slack-new-routes/README.md)
   builds on that audit and sends newly discovered method/path pairs to Slack
   without exposing the webhook to the pull-request job.
+- [`github-actions/webhook-new-routes/`](./github-actions/webhook-new-routes/README.md)
+  sends provider-neutral, HMAC-signed route-change events from a trusted
+  `workflow_run` job and includes raw-body receiver verification guidance.
 - [`github-actions/scheduled-org-inventory/`](./github-actions/scheduled-org-inventory/README.md)
   resumes interrupted organization scans, compares completed inventories,
   renders offline change views, bounds retained state, and reports changes or

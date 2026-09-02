@@ -232,6 +232,67 @@ non-empty unowned output directory. It returns the manifest and absolute
 requires both `inputPath` and `outputPath`; it does not inspect the caller's
 working directory or derive a destination.
 
+## Notifications
+
+### `buildNotificationEvents(report, options)`
+
+Builds bounded provider-neutral events from a baseline-aware `routes.json`,
+`organization-inventory.json`, or `organization-delta.json` object. Supported
+event selections are `routes.added`, `routes.removed`, `auth.regressed`, and
+`scan.incomplete`; the default selects added routes, auth regressions, and
+incomplete evidence. `options.maxItems` defaults to 20 and is capped at 100.
+Source locations are omitted unless `options.includeSource` is true, and unsafe
+or absolute sources are still discarded.
+
+Empty selected deltas return an empty array. Change events fail when their
+required baseline delta is absent, rather than treating every current route as
+new. IDs are deterministic across delivery reruns for the same evidence,
+revision, subject, and event type; receivers should use them as durable
+idempotency keys.
+
+### `validateNotificationEvent(event)`
+
+Validates the strict version 1 envelope, allowed event type, deterministic ID
+shape, timestamp, context fields, count/detail consistency, bounded route or
+repository-summary (including mixed organization-detail) items, and normalized
+source locations. It returns the input
+object unchanged. Shape validation does not make route/repository text safe for
+logs, HTML, shell commands, URLs, or database queries; consumers must continue
+to treat every value as untrusted data.
+
+### `signWebhook(body, options)`
+
+Returns `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers for
+the exact string/Buffer body using Standard Webhooks HMAC-SHA256 signing.
+`options` supplies the event `id`, integer Unix `timestamp`, and one current
+secret or `[current, previous]` secrets. Each secret must contain at least 32
+bytes. `whsec_`-prefixed values are decoded as base64; other values are used as
+UTF-8 bytes.
+
+### `verifyWebhookSignature(body, headers, secrets, options)`
+
+Verifies the exact raw request body with constant-time comparisons and rejects
+missing headers, invalid signatures, and timestamps outside the default
+five-minute tolerance. It returns `{ id, timestamp }`. Signature verification
+does not provide replay storage: the receiver must atomically persist and
+deduplicate `id` before processing an event.
+
+### `deliverWebhook(event, options)`
+
+Posts one JSON event to `options.url`. Delivery requires at least one exact
+`options.allowHosts` DNS hostname, HTTPS on the default port, no URL credentials,
+query, or fragment, one or two signing `secrets`, and a body no larger than 256
+KiB. Redirects are errors. Timeout defaults to 10 seconds; attempts default to
+three and are capped at three. Network errors, 408, 425, 429, and selected 5xx
+responses receive bounded backoff; other non-2xx responses fail immediately.
+
+The allowlist prevents a changed URL secret from redirecting delivery to a
+different hostname, but it is not a DNS/network sandbox. Keep the allowlist in
+trusted configuration and apply normal egress controls when the caller handles
+untrusted configuration.
+
+## Formatting
+
 ### `formatters`
 
 An object with `json`, `markdown`, `pretty`, and `openapi` formatters. Each

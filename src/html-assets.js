@@ -254,6 +254,58 @@ tr[hidden] { display: none; }
 }
 `;
 
+// Swagger UI ships a light palette. Declaring support for a browser-managed
+// dark scheme changes the page canvas and native controls without changing all
+// Swagger UI text colors, so dark-system browsers can produce dark-on-dark
+// content. Keep API references explicitly light and give the canvas stable,
+// high-contrast colors regardless of the host preference.
+const OPENAPI_STYLES = `
+:root {
+  color-scheme: only light;
+  --openapi-page: #f6f8fa;
+  --openapi-surface: #ffffff;
+  --openapi-ink: #1f2328;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+  color: var(--openapi-ink);
+  background: var(--openapi-page);
+}
+
+#swagger-ui {
+  min-height: 100vh;
+  background: var(--openapi-surface);
+}
+
+.swagger-ui,
+.swagger-ui button,
+.swagger-ui input,
+.swagger-ui select,
+.swagger-ui textarea {
+  color-scheme: light;
+}
+
+noscript {
+  display: block;
+  margin: 24px;
+  padding: 16px;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  color: var(--openapi-ink);
+  background: var(--openapi-surface);
+  font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@media print {
+  :root {
+    --openapi-page: #ffffff;
+  }
+}
+`;
+
 const SCRIPT = `
 "use strict";
 
@@ -284,4 +336,4 @@ for (const controls of document.querySelectorAll("[data-filter-controls]")) {
 }
 `;
 
-module.exports = { SCRIPT, STYLES };
+module.exports = { OPENAPI_STYLES, SCRIPT, STYLES };

@@ -1,0 +1,132 @@
+# Express Recon trusted signed-webhook notifier.
+#
+# Copy to .github/workflows/express-recon-webhook.yml. The producer workflow
+# and artifact names must match the bundled express-recon-pr.yml example.
+name: Express Recon signed route webhook
+
+on:
+  workflow_run:
+    workflows: ["API route security review"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: express-recon-webhook-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+jobs:
+  notify:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion != 'cancelled' &&
+      github.event.workflow_run.pull_requests[0] != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # workflow_run uses the default branch. Install only the reviewed package
+      # graph from that branch; never execute code from the PR artifact.
+      - name: Check out the trusted scanner lockfile
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            package.json
+            package-lock.json
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: trusted/package-lock.json
+
+      - name: Install the trusted notifier
+        run: npm ci --ignore-scripts --prefix trusted
+
+      # workflow_run artifacts are untrusted input. Resolve one exact artifact
+      # and reject an unexpectedly large archive before downloading it.
+      - name: Resolve the bounded audit artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ARTIFACT_NAME: express-recon-pr-${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const MAX_ARTIFACT_BYTES = 32 * 1024 * 1024;
+          (async () => {
+            const [owner, repository] = process.env.REPOSITORY.split("/");
+            if (!owner || !repository || !/^[1-9][0-9]*$/.test(process.env.RUN_ID || "")) {
+              throw new Error("invalid workflow artifact context");
+            }
+            const endpoint = new URL(
+              `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/runs/${process.env.RUN_ID}/artifacts`,
+            );
+            endpoint.searchParams.set("name", process.env.ARTIFACT_NAME);
+            endpoint.searchParams.set("per_page", "100");
+            const response = await fetch(endpoint, {
+              headers: {
+                accept: "application/vnd.github+json",
+                authorization: `Bearer ${process.env.GH_TOKEN}`,
+                "x-github-api-version": "2022-11-28",
+              },
+              redirect: "error",
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!response.ok) {
+              throw new Error(`artifact lookup failed with HTTP ${response.status}`);
+            }
+            const payload = await response.json();
+            const artifacts = (payload.artifacts || []).filter(
+              (artifact) => artifact.name === process.env.ARTIFACT_NAME && !artifact.expired,
+            );
+            if (artifacts.length !== 1) {
+              throw new Error(`expected one unexpired audit artifact, received ${artifacts.length}`);
+            }
+            const artifact = artifacts[0];
+            if (
+              !Number.isSafeInteger(artifact.id) ||
+              !Number.isSafeInteger(artifact.size_in_bytes) ||
+              artifact.size_in_bytes <= 0 ||
+              artifact.size_in_bytes > MAX_ARTIFACT_BYTES
+            ) {
+              throw new Error(`audit artifact exceeds the ${MAX_ARTIFACT_BYTES}-byte limit`);
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `artifact_id=${artifact.id}\n`);
+          })().catch((error) => {
+            process.stderr.write(`Express Recon artifact validation failed: ${error.message}\n`);
+            process.exitCode = 1;
+          });
+          NODE
+
+      - name: Download the PR audit report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.artifact_id }}
+          path: reports
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send signed route-change events
+        env:
+          EXPRESS_RECON_WEBHOOK_URL: ${{ secrets.EXPRESS_RECON_WEBHOOK_URL }}
+          EXPRESS_RECON_WEBHOOK_SECRET: ${{ secrets.EXPRESS_RECON_WEBHOOK_SECRET }}
+          EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET: ${{ secrets.EXPRESS_RECON_WEBHOOK_PREVIOUS_SECRET }}
+          EXPRESS_RECON_REPOSITORY: ${{ github.repository }}
+          EXPRESS_RECON_REVISION: ${{ github.event.workflow_run.head_sha }}
+          EXPRESS_RECON_RUN_ID: ${{ github.event.workflow_run.id }}
+          EXPRESS_RECON_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+          EXPRESS_RECON_PULL_REQUEST: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: >-
+          trusted/node_modules/.bin/express-recon notify
+          --input reports/current-results/routes.json
+          --events routes.added,auth.regressed,scan.incomplete
+          --allow-host events.example.com
