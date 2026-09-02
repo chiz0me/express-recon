@@ -9,6 +9,7 @@ const {
   schemaFromExpression,
 } = require("./schema-evidence");
 const { enrichHandlerSchemas } = require("./validators");
+const { enrichJSDocIo, enrichTypeScriptIo } = require("./type-evidence");
 
 const REQUEST_SOURCES = new Set(["body", "query", "params"]);
 const HEADER_ACCESSORS = new Set(["get", "header"]);
@@ -254,6 +255,8 @@ function extractIoHints(fnNode, options = {}) {
       contract(schema, evidence("response-literal", "medium", handlerSource)),
     );
   }
+  enrichTypeScriptIo(io, fnNode, options);
+  enrichJSDocIo(io, fnNode, options);
   return io;
 }
 

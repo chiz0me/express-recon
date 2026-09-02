@@ -11,12 +11,14 @@ const DEFAULT_NOTIFICATION_EVENTS = [
 const NOTIFICATION_EVENT_TYPES = new Set([
   "express_recon.routes.added",
   "express_recon.routes.removed",
+  "express_recon.routes.changed",
   "express_recon.auth.regressed",
   "express_recon.scan.incomplete",
 ]);
 const EVENT_NAMES = new Map([
   ["routes.added", "express_recon.routes.added"],
   ["routes.removed", "express_recon.routes.removed"],
+  ["routes.changed", "express_recon.routes.changed"],
   ["auth.regressed", "express_recon.auth.regressed"],
   ["scan.incomplete", "express_recon.scan.incomplete"],
 ]);
@@ -85,6 +87,15 @@ function routeItem(route, includeSource, repository) {
     ...(item.authStatus ? { authStatus: clean(item.authStatus, 40) } : {}),
     ...(item.from ? { from: clean(item.from, 40) } : {}),
     ...(item.to ? { to: clean(item.to, 40) } : {}),
+    ...(Array.isArray(item.changedFields)
+      ? {
+          changedFields: item.changedFields
+            .filter((field) => typeof field === "string")
+            .map((field) => clean(field, 100))
+            .filter(Boolean)
+            .slice(0, 20),
+        }
+      : {}),
   };
   const source = includeSource ? safeSource(item.source) : null;
   if (source) result.source = source;
@@ -100,7 +111,7 @@ function normalizeEventNames(events) {
   const invalid = normalized.findIndex((value) => !value);
   if (invalid >= 0) {
     throw new Error(
-      `unknown notification event ${JSON.stringify(String(values[invalid]))}; use routes.added, routes.removed, auth.regressed, or scan.incomplete`,
+      `unknown notification event ${JSON.stringify(String(values[invalid]))}; use routes.added, routes.removed, routes.changed, auth.regressed, or scan.incomplete`,
     );
   }
   if (new Set(normalized).size !== normalized.length) {
@@ -183,6 +194,7 @@ function routeReportChanges(report, eventName) {
   const field = {
     "express_recon.routes.added": "addedRoutes",
     "express_recon.routes.removed": "removedRoutes",
+    "express_recon.routes.changed": "changedRoutes",
     "express_recon.auth.regressed": "authRegressions",
   }[eventName];
   if (!field) return null;
@@ -200,6 +212,7 @@ function organizationChanges(report, eventName) {
   const field = {
     "express_recon.routes.added": "addedRoutes",
     "express_recon.routes.removed": "removedRoutes",
+    "express_recon.routes.changed": "changedRoutes",
     "express_recon.auth.regressed": "authRegressions",
   }[eventName];
   if (!field) return null;
@@ -296,6 +309,7 @@ function validateRouteItem(item) {
       "authStatus",
       "from",
       "to",
+      "changedFields",
       "source",
     ]),
     "notification route item",
@@ -310,6 +324,17 @@ function validateRouteItem(item) {
     ["to", 40],
   ]) {
     if (item[name] !== undefined) eventText(item[name], maximum, `notification route ${name}`);
+  }
+  if (item.changedFields !== undefined) {
+    if (
+      !Array.isArray(item.changedFields) ||
+      item.changedFields.length < 1 ||
+      item.changedFields.length > 20 ||
+      new Set(item.changedFields).size !== item.changedFields.length
+    ) {
+      throw new Error("notification changedFields must contain 1 to 20 unique fields");
+    }
+    item.changedFields.forEach((field) => eventText(field, 100, "notification changed field"));
   }
   if (item.source !== undefined) {
     if (!item.source || typeof item.source !== "object" || Array.isArray(item.source)) {

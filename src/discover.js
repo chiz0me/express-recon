@@ -7,7 +7,16 @@ const { scan, scanLimits, createScanScope, listSourceFiles } = require("./static
 const { MODULE_EXTENSIONS, loadStaticDocumentModule } = require("./static/document-module");
 const pkg = require("../package.json");
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", "out"]);
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".express-recon",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  "out",
+]);
 const TEST_DIRS = new Set([
   "test",
   "tests",
@@ -493,31 +502,6 @@ function discoverDocumentation(root, files, opts, diagnostics, packages = []) {
   return { documentation: { specifications, jsdoc: jsdoc.sort() }, complete };
 }
 
-function discoverApiDocumentation(rootDir, opts = {}) {
-  const root = path.resolve(rootDir);
-  const limits = scanLimits(opts);
-  const diagnostics = [];
-  const collection = collectRepositoryFiles(root, limits, diagnostics, opts);
-  const packageDiscovery = discoverPackages(root, collection.files, limits, diagnostics);
-  const documentation = discoverDocumentation(
-    root,
-    collection.files,
-    { ...opts, ...limits },
-    diagnostics,
-    packageDiscovery.packages,
-  );
-  return {
-    documentation: documentation.documentation,
-    diagnostics,
-    complete: collection.complete && packageDiscovery.complete && documentation.complete,
-    coverage: {
-      files: collection.files.length,
-      complete: collection.complete && packageDiscovery.complete && documentation.complete,
-      scope: collection.scope,
-    },
-  };
-}
-
 /** Discover repository packages, supported HTTP applications, entry candidates, and API docs. */
 function discover(rootDir, opts = {}) {
   const root = path.resolve(rootDir);
@@ -580,4 +564,4 @@ function discover(rootDir, opts = {}) {
   };
 }
 
-module.exports = { discover, discoverApiDocumentation };
+module.exports = { discover };

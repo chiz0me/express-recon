@@ -753,7 +753,8 @@ test("organization progress covers skips, resume, concurrent phases, failures, a
     events.find((event) => event.event === "repository-resumed").repository,
     "acme/resumed",
   );
-  assert.equal(events.filter((event) => event.event === "repository-phase").length, 2);
+  assert.equal(events.filter((event) => event.event === "repository-phase").length, 3);
+  assert.equal(events.filter((event) => event.event === "repository-retry").length, 1);
   assert.equal(
     Math.max(
       ...events
@@ -809,9 +810,155 @@ test("repository limits are fail-visible and default execution is sequential", a
   });
   assert.equal(peak, 1);
   assert.equal(result.scope.concurrency, 1);
+  assert.equal(result.scope.repositoryAttempts, 2);
   assert.equal(result.summary.repositoriesScanned, 2);
   assert.equal(result.summary.skippedByLimit, 1);
   assert.equal(result.coverage.complete, false);
+});
+
+test("organization repository filters and bounded retries are explicit in coverage", async () => {
+  const filteredCalls = [];
+  const filtered = await scanOrganization("acme", {
+    fetchImpl: fakeApi([repository("api-main"), repository("api-legacy"), repository("frontend")]),
+    repositoryInclude: ["api-*"],
+    repositoryExclude: ["*legacy"],
+    scanRepositoryImpl: async (source) => {
+      filteredCalls.push(source);
+      return scanResult(source, { express: true });
+    },
+  });
+  assert.deepEqual(filteredCalls, ["acme/api-main"]);
+  assert.equal(filtered.summary.skippedByFilter, 2);
+  assert.deepEqual(filtered.scope.repositoryInclude, ["api-*"]);
+  assert.deepEqual(filtered.scope.repositoryExclude, ["*legacy"]);
+  assert.equal(filtered.coverage.complete, true);
+
+  let attempts = 0;
+  const events = [];
+  const retried = await scanOrganization("acme", {
+    fetchImpl: fakeApi([repository("api")]),
+    repositoryAttempts: 2,
+    scanRepositoryImpl: async (source) => {
+      attempts++;
+      if (attempts === 1) throw new Error("transient fetch failure");
+      return scanResult(source, { express: true });
+    },
+    onProgress: (event) => events.push(event),
+  });
+  assert.equal(attempts, 2);
+  assert.equal(retried.summary.repositoryRetries, 1);
+  assert.equal(retried.scope.repositoryAttempts, 2);
+  assert.equal(events.filter((event) => event.event === "repository-retry").length, 1);
+});
+
+test("incremental organization reuse requires an unchanged upstream push marker", async () => {
+  const pushedAt = "2026-09-01T10:00:00Z";
+  const previous = {
+    repository: {
+      id: 3,
+      name: "api",
+      fullName: "acme/api",
+      defaultBranch: "main",
+      pushedAt,
+    },
+    status: "express",
+    coverageComplete: true,
+    routeGraphComplete: true,
+    command: "inventory",
+    commit: "a".repeat(40),
+    express: resumeEvidence(),
+    artifacts: { repositoryScan: "repositories/api/repo-scan.json" },
+  };
+  let scans = 0;
+  let reuseCallbacks = 0;
+  const unchanged = await scanOrganization("acme", {
+    fetchImpl: fakeApi([repository("api", { pushed_at: pushedAt })]),
+    resumeEntries: [previous],
+    reuseUnchanged: true,
+    retainScans: false,
+    onReuse: ({ previous: saved }) => {
+      reuseCallbacks++;
+      return saved.artifacts;
+    },
+    scanRepositoryImpl: async (source) => {
+      scans++;
+      return scanResult(source, { express: true });
+    },
+  });
+  assert.equal(scans, 0);
+  assert.equal(reuseCallbacks, 1);
+  assert.equal(unchanged.summary.repositoriesReused, 1);
+  assert.equal(unchanged.repositories[0].repository.pushedAt, pushedAt);
+
+  await scanOrganization("acme", {
+    fetchImpl: fakeApi([repository("api", { pushed_at: "2026-09-02T10:00:00Z" })]),
+    resumeEntries: [previous],
+    reuseUnchanged: true,
+    retainScans: false,
+    scanRepositoryImpl: async (source) => {
+      scans++;
+      return scanResult(source, { express: true });
+    },
+  });
+  assert.equal(scans, 1);
+});
+
+test("scan-org --update reuses durable unchanged artifacts and creates a delta", async () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-update-"));
+  const pushedAt = "2026-09-01T10:00:00Z";
+  let scans = 0;
+  let visible = [repository("api", { pushed_at: pushedAt })];
+  const run = (update = false) =>
+    runScanOrganization(
+      {
+        org: "acme",
+        out: output,
+        progress: "none",
+        update,
+        provided: new Set(["--progress", ...(update ? ["--update"] : [])]),
+      },
+      {
+        environment: {},
+        scanOrganization: (organization, options) =>
+          scanOrganization(organization, {
+            ...options,
+            fetchImpl: fakeApi(visible),
+            scanRepositoryImpl: async (source) => {
+              scans++;
+              return scanResult(source, { express: true, audit: false });
+            },
+          }),
+      },
+    );
+  try {
+    assert.equal(await run(), 0);
+    assert.equal(scans, 1);
+    assert.equal(await run(true), 0);
+    assert.equal(scans, 1);
+    const inventory = JSON.parse(
+      fs.readFileSync(path.join(output, "organization-inventory.json"), "utf8"),
+    );
+    assert.equal(inventory.update.requested, true);
+    assert.equal(inventory.update.repositoriesReused, 1);
+    assert.equal(inventory.delta.summary.repositoriesChanged, 0);
+    assert.ok(fs.existsSync(path.join(output, "organization-delta.json")));
+    assert.equal(fs.existsSync(path.join(output, "comparison-baseline")), false);
+    assert.equal(fs.existsSync(path.join(output, "organization-checkpoint.json")), false);
+
+    fs.appendFileSync(path.join(output, "repositories", "api", "repo-scan.json"), "corrupt");
+    assert.equal(await run(true), 0);
+    assert.equal(scans, 2);
+
+    visible = [];
+    assert.equal(await run(true), 0);
+    const removed = JSON.parse(
+      fs.readFileSync(path.join(output, "organization-inventory.json"), "utf8"),
+    );
+    assert.equal(removed.delta.summary.repositoriesRemoved, 1);
+    assert.equal(fs.existsSync(path.join(output, "repositories", "api")), false);
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+  }
 });
 
 test("the real concurrency worker scans and returns a cleaned repository result", async () => {
@@ -1293,6 +1440,69 @@ test("scan-org progress and quiet modes preserve incomplete CI gates", async () 
   }
 });
 
+test("scan-org security gates require configuration and use aggregate audit counts", async () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-auth-gate-"));
+  const config = `${output}.config.json`;
+  fs.writeFileSync(config, JSON.stringify({ authMiddleware: { requireAuth: "authenticated" } }));
+  let scans = 0;
+  const result = {
+    kind: "github-organization-inventory",
+    organization: { login: "acme" },
+    coverage: { complete: true },
+    scope: {},
+    summary: {
+      repositoriesResumed: 0,
+      repositoriesScanned: 1,
+      repositoriesReused: 0,
+      expressRepositories: 1,
+      failedRepositories: 0,
+      inconclusiveRepositories: 0,
+      auth: { public: 2, unknown: 0, policyViolations: 0 },
+    },
+    repositories: [],
+  };
+  try {
+    await assert.rejects(
+      runScanOrganization(
+        { org: "acme", out: output, progress: "none", failOn: "public" },
+        {
+          environment: {},
+          async scanOrganization() {
+            scans++;
+            return result;
+          },
+        },
+      ),
+      /require an audit --config/,
+    );
+    assert.equal(scans, 0);
+
+    let stderr = "";
+    const code = await runScanOrganization(
+      { org: "acme", out: output, progress: "none", config, failOn: "public" },
+      {
+        environment: {},
+        stderr: {
+          write(value) {
+            stderr += value;
+            return true;
+          },
+        },
+        async scanOrganization() {
+          scans++;
+          return result;
+        },
+      },
+    );
+    assert.equal(code, 2);
+    assert.equal(scans, 1);
+    assert.match(stderr, /2 result\(s\) matched --fail-on public/);
+  } finally {
+    fs.rmSync(output, { recursive: true, force: true });
+    fs.rmSync(config, { force: true });
+  }
+});
+
 test("scan-org resumes valid artifacts, retries damaged work, and rejects scope changes", async () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-resume-"));
   const args = {
@@ -1519,7 +1729,8 @@ test("organization and CLI limits fail before making a GitHub request", () => {
     ["scan-org", "--org", "acme", "--progress", "loud"],
     ["scan-org", "--org", "acme", "--progress", "plain", "--no-progress"],
     ["scan-org", "--org", "acme", "--ref", "main"],
-    ["scan-org", "--org", "acme", "--fail-on", "public"],
+    ["scan-org", "--org", "acme", "--fail-on", "invalid"],
+    ["scan-org", "--org", "acme", "--fail-on", "routes-changed"],
   ]) {
     const result = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8" });
     assert.equal(result.status, 1, `${args.join(" ")} unexpectedly succeeded`);

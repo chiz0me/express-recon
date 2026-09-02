@@ -74,6 +74,34 @@ Returns `{ document, report }`, where `report` contains drift, conflicts,
 coverage, and provenance. JavaScript documentation modules are statically
 reconstructed as data and never imported.
 
+Static Express analysis also uses ordinary handler JSDoc and same-file
+TypeScript request/response annotations as medium-confidence schema evidence.
+Validator and framework schemas retain precedence; types and comments describe
+developer intent and do not prove runtime validation or serialization.
+
+### `validateOpenApiDocument(document, label)`
+
+Validates a complete OpenAPI 3.0.x or 3.1.x object against the bundled official
+OpenAPI schema. Validation is local and does not resolve remote references or
+execute target code. It returns the selected exact version and version family,
+or throws a bounded validation error. `label` customizes the error prefix.
+
+### `refreshDocumentation(options)`
+
+Atomically replaces a persistent, tool-owned OpenAPI workspace from already
+computed discovery, route-report, and reconciliation inputs. Static generated
+truth remains separate from the editable document; accepted operation fields
+and component schemas are stored in a fingerprinted overlay and reapplied only
+while their operation and source dependencies still match.
+
+Required inputs are `root`, `output`, `routes`, `discovery`, and
+`documentation`. Optional fields control enrichment acceptance/review/removal,
+overwrite, rendering, and the safe invocation metadata saved for the next CLI
+refresh. The result names the output artifacts and summarizes route, semantic
+OpenAPI, and enrichment changes. Most callers should use the higher-level
+`express-recon refresh` command, which builds these inputs and restores safe
+repository-local settings automatically.
+
 ## Middleware review
 
 ### `createMiddlewareReview(report, options)`
@@ -105,9 +133,17 @@ responses. The schema is provider-neutral and strict about unknown fields.
 ### `compareReports(before, after)`
 
 Compares two compatible route reports and returns added/removed routes,
-authentication regressions/improvements, and new/resolved findings. Different
-static scan-scope fingerprints are rejected so a filter change cannot masquerade
-as a route change.
+semantically changed route contracts, authentication regressions/improvements,
+and new/resolved findings. Different static scan-scope fingerprints are
+rejected so a filter change cannot masquerade as a route change.
+
+### `compareOpenApiDocuments(before, after)`
+
+Compares two resolved OpenAPI documents without treating scanner provenance as
+API contract. It reports added, removed, and changed operations and component
+schemas, plus a conservative set of definite and potentially breaking changes.
+Passing `null` as `before` produces an initial snapshot with
+`baselineAvailable: false`; callers should not gate that first run as a change.
 
 ### `compareOrganizationReports(before, after, options)`
 
@@ -196,13 +232,15 @@ the caller's API visibility; partial pagination remains explicit.
 ### `scanOrganization(organization, options)`
 
 Returns a promise for a bounded aggregate inventory. Important options include
-`token`, `maxRepositories`, `concurrency`, `includeArchived`, `includeForks`,
-`config`, `scan`, `onProgress`, `onRepository`, `retainScans`, and validated
-`resumeEntries`.
+`token`, `maxRepositories`, `concurrency`, `repositoryAttempts`,
+`includeArchived`, `includeForks`, repository include/exclude patterns,
+`config`, `scan`, `onProgress`, `onRepository`, `onReuse`, `retainScans`,
+`reuseUnchanged`, and validated `resumeEntries`.
 
-Concurrency defaults to one and is capped at eight. Repository failures are
-isolated, snapshots are cleaned independently, and incomplete evidence never
-becomes a negative framework conclusion. Each repository includes neutral
+Concurrency defaults to one and is capped at eight. Repository attempts default
+to two and are capped at three. Repository failures are isolated, snapshots are
+cleaned independently, and incomplete evidence never becomes a negative
+framework conclusion. Each repository includes neutral
 `frameworks` evidence plus the legacy `express` compatibility projection.
 Framework evidence separates application/adapter/route-provider roles from
 runtime, peer, development, or dependency-only package signals. The CLI owns
@@ -238,11 +276,11 @@ working directory or derive a destination.
 
 Builds bounded provider-neutral events from a baseline-aware `routes.json`,
 `organization-inventory.json`, or `organization-delta.json` object. Supported
-event selections are `routes.added`, `routes.removed`, `auth.regressed`, and
-`scan.incomplete`; the default selects added routes, auth regressions, and
-incomplete evidence. `options.maxItems` defaults to 20 and is capped at 100.
-Source locations are omitted unless `options.includeSource` is true, and unsafe
-or absolute sources are still discarded.
+event selections are `routes.added`, `routes.removed`, `routes.changed`,
+`auth.regressed`, and `scan.incomplete`; the default selects added routes, auth
+regressions, and incomplete evidence. `options.maxItems` defaults to 20 and is
+capped at 100. Source locations are omitted unless `options.includeSource` is
+true, and unsafe or absolute sources are still discarded.
 
 Empty selected deltas return an empty array. Change events fail when their
 required baseline delta is absent, rather than treating every current route as

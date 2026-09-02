@@ -97,6 +97,14 @@ function normalizeRoute(route, root) {
           io: {
             ...route.io,
             handlerSource: normalizeSource(route.io.handlerSource, root),
+            ...(route.io.documentation
+              ? {
+                  documentation: {
+                    ...route.io.documentation,
+                    source: normalizeSource(route.io.documentation.source, root),
+                  },
+                }
+              : {}),
             ...(route.io.schemas ? { schemas: normalizeIoSchemas(route.io.schemas, root) } : {}),
           },
         }

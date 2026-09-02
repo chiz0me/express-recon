@@ -53,7 +53,7 @@
     "lint": "oxlint",
     "logo:build": "node scripts/build-logo-variants.mjs",
     "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check src testcases",
+    "fmt:check": "oxfmt --check .",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
     "check:version": "node scripts/check-version.js",
     "version": "node scripts/sync-version.js && git add .claude-plugin/plugin.json",
@@ -61,6 +61,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@readme/openapi-schemas": "4.0.0",
+    "ajv": "8.20.0",
+    "ajv-draft-04": "1.0.0",
+    "ajv-formats": "3.0.1",
     "oxc-parser": "0.135.0",
     "swagger-ui-dist": "5.32.14",
     "yaml": "2.9.0",
@@ -68,8 +72,6 @@
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
-    "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
     "express": "^5.1.0",
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0"

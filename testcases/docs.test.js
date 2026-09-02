@@ -7,7 +7,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync, spawnSync } = require("node:child_process");
 
-const { inventory, buildReport, reconcileDocumentation } = require("../src/index");
+const {
+  inventory,
+  buildReport,
+  reconcileDocumentation,
+  validateOpenApiDocument,
+} = require("../src/index");
 
 const FIXTURE = path.join(__dirname, "fixtures", "discovery-app");
 const CLI = path.join(__dirname, "..", "src", "cli.js");
@@ -292,6 +297,51 @@ test("reconciliation stays idempotent when authored extension metadata uses gene
     assert.equal(second.document["x-express-recon"].custom, "retained");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("generated TypeScript schemas remain valid when enriching OpenAPI 3.0", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-openapi30-types-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "openapi30-types", dependencies: { express: "^5" } }),
+    );
+    fs.writeFileSync(
+      path.join(root, "app.ts"),
+      [
+        'import express, { Request, Response } from "express";',
+        "type Params = { id: string };",
+        'type Payload = { state: "ready"; coordinates: [number, number]; note: string | null };',
+        "const app = express();",
+        'app.get("/items/:id", (req: Request<Params, Payload>, res: Response<Payload>) => {',
+        '  res.json({ state: "ready", coordinates: [1, 2], note: null });',
+        "});",
+        "export default app;",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(root, "openapi.json"),
+      JSON.stringify({
+        openapi: "3.0.3",
+        info: { title: "OpenAPI 3.0 typed API", version: "1" },
+        paths: {},
+      }),
+    );
+    const report = buildReport(inventory({ mode: "static", src: root }), {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+      target: { name: "openapi30-types", version: "1" },
+    });
+    const { document } = reconcileDocumentation(report, { root });
+    assert.deepEqual(validateOpenApiDocument(document), { version: "3.0.3", family: "3.0" });
+    const serialized = JSON.stringify(document);
+    assert.doesNotMatch(serialized, /"const":|"prefixItems":/);
+    assert.match(serialized, /"enum":\["ready"\]/);
+    assert.match(serialized, /"note":\{"type":"string","nullable":true\}/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

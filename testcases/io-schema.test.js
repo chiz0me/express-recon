@@ -326,6 +326,111 @@ test("Express schemas combine express-validator, Zod, Joi, and response literals
     },
   ));
 
+test("Express TypeScript generics and ordinary handler JSDoc enrich OpenAPI conservatively", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "typed-handler-service",
+        dependencies: { express: "^5" },
+      }),
+      "app.ts": `
+        import express, { Request, Response, RequestHandler } from "express";
+        interface Params { id: string }
+        type Body = { name: string; age?: number };
+        type Reply = { ok: boolean; id: string };
+        type Query = { limit?: number };
+        const app = express();
+        const typed: RequestHandler<Params, Reply, Body, Query> = (req, res) => {
+          res.status(201).json({ ok: true, id: req.params.id });
+        };
+        /**
+         * Read a documented thing.
+         * Includes authored handler details.
+         * @param {string} req.params.slug - Stable slug.
+         * @param {number} [req.query.limit] - Maximum rows.
+         * @param {Array.<String>} [req.query.tags] - Optional tags.
+         * @param {...String} [req.query.labels] - Variadic labels.
+         * @param {?Boolean} [req.query.enabled] - Nullable feature switch.
+         * @param {Object.<string, Number>} req.body.scores - Scores by key.
+         * @returns {Promise<{ok: boolean, value?: string}>} Documented result.
+         */
+        async function documented(req: Request, res: Response) {
+          res.json({ ok: true });
+        }
+        app.post("/things/:id", typed);
+        app.get("/docs/:slug", documented);
+        export default app;
+      `,
+    },
+    (root) => {
+      const report = reportFor(root);
+      validateReport(report);
+      const typed = report.routes.find((route) => route.path === "/things/:id");
+      assert.equal(
+        typed.io.schemas.request.params.schema.properties.id.type,
+        "string",
+        JSON.stringify(typed.io, null, 2),
+      );
+      assert.equal(typed.io.schemas.request.body.schema.properties.name.type, "string");
+      assert.deepEqual(typed.io.schemas.request.body.schema.required, ["name"]);
+      assert.equal(typed.io.schemas.request.query.schema.properties.limit.type, "number");
+      assert.equal(typed.io.schemas.responses[0].status, 201);
+      assert.deepEqual(typed.io.schemas.responses[0].contract.schema.required, ["ok", "id"]);
+      assert.ok(
+        typed.io.schemas.responses[0].contract.evidence.some((item) => item.kind === "typescript"),
+      );
+
+      const documented = report.routes.find((route) => route.path === "/docs/:slug");
+      assert.equal(documented.io.documentation.summary, "Read a documented thing.");
+      assert.match(documented.io.documentation.description, /authored handler details/);
+      assert.equal(
+        documented.io.schemas.request.params.schema.properties.slug.description,
+        "Stable slug.",
+      );
+      assert.deepEqual(documented.io.schemas.request.query.schema.required, undefined);
+      assert.equal(documented.io.schemas.request.query.schema.properties.tags.items.type, "string");
+      assert.equal(
+        documented.io.schemas.request.query.schema.properties.labels.items.type,
+        "string",
+      );
+      assert.deepEqual(documented.io.schemas.request.query.schema.properties.enabled.anyOf, [
+        { type: "boolean" },
+        { type: "null" },
+      ]);
+      assert.equal(
+        documented.io.schemas.request.body.schema.properties.scores.additionalProperties.type,
+        "number",
+      );
+      assert.equal(
+        documented.io.schemas.responses[0].contract.schema.properties.ok.type,
+        "boolean",
+      );
+      assert.equal(
+        documented.io.schemas.responses[0].contract.schema.description,
+        "Documented result.",
+      );
+
+      const openapi = formatters.openapi.build(report);
+      const typedOperation = openapi.paths["/things/{id}"].post;
+      assert.equal(
+        typedOperation.requestBody.content["application/json"].schema.required[0],
+        "name",
+      );
+      assert.equal(
+        typedOperation.responses["201"].content["application/json"].schema.properties.id.type,
+        "string",
+      );
+      const documentedOperation = openapi.paths["/docs/{slug}"].get;
+      assert.equal(documentedOperation.summary, "Read a documented thing.");
+      assert.match(documentedOperation.description, /authored handler details/);
+      assert.equal(
+        documentedOperation.parameters.find((item) => item.name === "slug").description,
+        "Stable slug.",
+      );
+      assert.equal(documentedOperation.responses["200"].description, "Documented result.");
+    },
+  ));
+
 test("handler-local schema bindings stay isolated by lexical function", () =>
   temporaryRepository(
     {

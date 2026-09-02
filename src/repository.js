@@ -28,6 +28,7 @@ const SOURCE_EXTENSIONS = new Set([
 const SPECIAL_FILES = new Set([".express-reconignore"]);
 const SKIP_DIRS = new Set([
   ".git",
+  ".express-recon",
   "node_modules",
   "vendor",
   "dist",

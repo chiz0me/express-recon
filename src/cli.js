@@ -29,7 +29,12 @@ const { loadPackageInfo } = require("./static/resolve");
 const { loadConfig } = require("./config");
 const { loadReviewFile } = require("./review");
 const { defaultRenderOutput, detectRenderInput } = require("./html");
-const { DEFAULT_MAX_REPOSITORIES, validateOrganization } = require("./organization");
+const { defaultRefreshOutput, readRefreshDefaults, refreshDocumentation } = require("./refresh");
+const {
+  DEFAULT_MAX_REPOSITORIES,
+  DEFAULT_REPOSITORY_ATTEMPTS,
+  validateOrganization,
+} = require("./organization");
 const { COMPLETE_REPOSITORY_STATUSES } = require("./frameworks");
 const { PROGRESS_MODES, createOrganizationProgressReporter } = require("./organization-progress");
 const {
@@ -78,6 +83,8 @@ Commands:
   suggest-auth  Propose auth-middleware allowlist candidates (JSON) for --config.
   docs          Reconcile an existing OpenAPI document, swagger-jsdoc blocks,
                 and the offline route inventory into OpenAPI + drift evidence.
+  refresh       Refresh durable OpenAPI state, preserve accepted AI enrichment
+                while its evidence matches, compute route changes, and render HTML.
   review-middleware
                 Export bounded source evidence + a provider-neutral assessment
                 schema for human or AI middleware classification.
@@ -127,9 +134,25 @@ Options:
   --ref <git-ref>       branch, tag, or commit to fetch (default: remote HEAD).
   --max-repos <n>       scan-org repository cap (default 100; maximum 10000).
   --concurrency <n>     scan-org snapshots processed at once (default 1; maximum 8).
+  --repo-attempts <n>   scan-org attempts per repository after isolated cleanup
+                        (default 2; maximum 3).
+  --repo-include <glob> scan only matching repository names/full names (repeatable).
+  --repo-exclude <glob> skip matching repository names/full names (repeatable).
   --resume              resume a scan-org run from the checkpoint in its output.
-  --overwrite           start a fresh scan-org run in a nonempty output directory;
-                        replace colliding organization artifacts, keep other files.
+  --update              incrementally update a completed scan: unchanged repository
+                        artifacts are reused and the previous inventory is the baseline.
+  --overwrite           start a fresh scan-org run, or reset a tool-owned refresh
+                        state; never removes unowned output files.
+  --accept-enrichment   refresh: capture supported edits from openapi.json into the
+                        fingerprinted enrichment overlay before rescanning.
+  --review-operation <METHOD /path>
+                        refresh: record a current operation as reviewed even when no
+                        fields changed (repeatable; requires --accept-enrichment).
+  --clear-operation <METHOD /path>
+                        refresh: remove saved operation enrichment (repeatable).
+  --clear-schema <name> refresh: remove saved component-schema enrichment (repeatable).
+  --render              refresh: rebuild HTML even if the saved invocation used --no-render.
+  --no-render           refresh: update JSON artifacts without rebuilding HTML.
   --progress <mode>     scan-org progress on stderr: auto, plain, json, or none
                         (default: auto; TTY status locally, plain lines in CI).
   --no-progress         alias for --progress none.
@@ -143,7 +166,8 @@ Options:
                         audit plus an explicit security mapping to add security.
   --out <dir>           override the command's artifact directory (else stdout
                         for commands without a documented default).
-                        render defaults to a sibling <input>-html directory;
+                        refresh defaults to .express-recon/api and renders into its
+                        api-reference/ child; render defaults to a sibling <input>-html directory;
                         scan-org defaults to .express-recon/<lowercase-org>.
   --baseline <path>     inventory/audit: compare with a prior routes.json report.
                         scan-org: compare with a prior organization output folder
@@ -155,8 +179,15 @@ Options:
                         evidence is unresolved;
                         rejected in pure runtime mode).
                         For CI gates and agent assertions.
-                        docs accepts docs-drift, docs-conflict, docs-incomplete.
-                        scan-org accepts incomplete.
+                        docs accepts docs-drift, docs-conflict, docs-incomplete;
+                        refresh also accepts enrichment-stale,
+                        enrichment-unreviewed, routes-added, routes-removed,
+                        routes-changed, contract-changed, contract-breaking,
+                        contract-potentially-breaking.
+                        scan-repo accepts public, unknown, policy, incomplete,
+                        route-graph-incomplete, docs-needs-input, and docs-*.
+                        scan-org accepts those plus failed, inconclusive,
+                        routes-added/removed/changed, and auth-regression.
   --include <glob>      scan only matching root-relative source paths (repeatable)
   --exclude <glob>      exclude matching root-relative source paths (repeatable)
   --ignore-file <path>  scope file; relative paths use scan root
@@ -166,8 +197,9 @@ Options:
   --include-hidden      also scan hidden directories such as .cursor (default: exclude;
                         .git and generated/vendor directories remain excluded)
   --provider webhook    notify delivery provider (default and currently only: webhook).
-  --events <list>       notify on routes.added, routes.removed, auth.regressed,
-                        and/or scan.incomplete (default: added, regressed, incomplete).
+  --events <list>       notify on routes.added, routes.removed, routes.changed,
+                        auth.regressed, and/or scan.incomplete
+                        (default: added, regressed, incomplete).
   --url-env <name>      environment variable containing the webhook URL
                         (default: EXPRESS_RECON_WEBHOOK_URL; never accepts the value).
   --secret-env <name>   environment variable containing the current signing secret
@@ -224,6 +256,35 @@ const STATUSES = new Set([
   "incomplete",
 ]);
 const DOC_STATUSES = new Set(["docs-conflict", "docs-drift", "docs-incomplete"]);
+const REFRESH_STATUSES = new Set([
+  ...DOC_STATUSES,
+  "contract-breaking",
+  "contract-changed",
+  "contract-potentially-breaking",
+  "enrichment-stale",
+  "enrichment-unreviewed",
+  "routes-added",
+  "routes-changed",
+  "routes-removed",
+]);
+const REPOSITORY_STATUSES = new Set([
+  ...DOC_STATUSES,
+  "docs-needs-input",
+  "incomplete",
+  "policy",
+  "public",
+  "route-graph-incomplete",
+  "unknown",
+]);
+const ORGANIZATION_STATUSES = new Set([
+  ...REPOSITORY_STATUSES,
+  "auth-regression",
+  "failed",
+  "inconclusive",
+  "routes-added",
+  "routes-changed",
+  "routes-removed",
+]);
 const COMMANDS = new Set([
   "audit",
   "docs",
@@ -232,6 +293,7 @@ const COMMANDS = new Set([
   "import-review",
   "inventory",
   "notify",
+  "refresh",
   "review-middleware",
   "render",
   "scan-org",
@@ -241,7 +303,17 @@ const COMMANDS = new Set([
 ]);
 const MODES = new Set(["static", "runtime", "hybrid"]);
 const FORMATS = new Set(["json", "md", "pretty", "openapi"]);
-const REPEATABLE_OPTIONS = new Set(["--allow-host", "--exclude", "--include", "--jsdoc"]);
+const REPEATABLE_OPTIONS = new Set([
+  "--allow-host",
+  "--clear-operation",
+  "--clear-schema",
+  "--exclude",
+  "--include",
+  "--jsdoc",
+  "--repo-exclude",
+  "--repo-include",
+  "--review-operation",
+]);
 const JSON_PROGRESS_ERRORS = new WeakSet();
 const EXECUTION_CONTEXTS = new Set(["agent", "auto", "ci", "interactive"]);
 
@@ -298,6 +370,9 @@ function parseArgs(argv) {
     else if (arg === "--app-id") out.appId = takeValue(arg, i++);
     else if (arg === "--spec") out.spec = takeValue(arg, i++);
     else if (arg === "--jsdoc") (out.jsdoc ||= []).push(takeValue(arg, i++));
+    else if (arg === "--review-operation") (out.reviewOperations ||= []).push(takeValue(arg, i++));
+    else if (arg === "--clear-operation") (out.clearOperations ||= []).push(takeValue(arg, i++));
+    else if (arg === "--clear-schema") (out.clearSchemas ||= []).push(takeValue(arg, i++));
     else if (arg === "--review") out.review = takeValue(arg, i++);
     else if (arg === "--assessment") out.assessment = takeValue(arg, i++);
     else if (arg === "--input") out.input = takeValue(arg, i++);
@@ -311,6 +386,9 @@ function parseArgs(argv) {
     else if (arg === "--timeout-ms") out.timeoutMs = takeValue(arg, i++);
     else if (arg === "--attempts") out.attempts = takeValue(arg, i++);
     else if (arg === "--repo") out.repo = takeValue(arg, i++);
+    else if (arg === "--repo-attempts") out.repoAttempts = takeValue(arg, i++);
+    else if (arg === "--repo-include") (out.repoInclude ||= []).push(takeValue(arg, i++));
+    else if (arg === "--repo-exclude") (out.repoExclude ||= []).push(takeValue(arg, i++));
     else if (arg === "--org") out.org = takeValue(arg, i++);
     else if (arg === "--ref") out.ref = takeValue(arg, i++);
     else if (arg === "--max-repos") out.maxRepos = takeValue(arg, i++);
@@ -353,10 +431,26 @@ function parseArgs(argv) {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
       out.resume = true;
+    } else if (arg === "--update") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.update = true;
     } else if (arg === "--overwrite") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
       out.overwrite = true;
+    } else if (arg === "--accept-enrichment") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.acceptEnrichment = true;
+    } else if (arg === "--no-render") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.render = false;
+    } else if (arg === "--render") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.render = true;
     } else if (arg === "--no-progress") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
@@ -494,6 +588,48 @@ function validateArgs(args) {
       throw new Error("docs supports only --format json or openapi");
     }
   }
+  if (args.command === "refresh") {
+    const supported = new Set([
+      "--accept-enrichment",
+      "--app-id",
+      "--clear-operation",
+      "--clear-schema",
+      "--config",
+      "--exclude",
+      "--fail-on",
+      "--ignore-file",
+      "--no-ignore-file",
+      "--include",
+      "--include-hidden",
+      "--include-tests",
+      "--jsdoc",
+      "--no-render",
+      "--out",
+      "--overwrite",
+      "--render",
+      "--review-operation",
+      "--spec",
+      "--src",
+    ]);
+    const unsupported = [...args.provided].filter((option) => !supported.has(option));
+    if (unsupported.length) throw new Error(`refresh does not accept ${unsupported.join(", ")}`);
+    if (args.acceptEnrichment && args.overwrite) {
+      throw new Error("refresh --accept-enrichment and --overwrite cannot be used together");
+    }
+    if (args.provided.has("--render") && args.provided.has("--no-render")) {
+      throw new Error("refresh --render and --no-render cannot be used together");
+    }
+    const enrichmentActions = [
+      ...(args.reviewOperations || []),
+      ...(args.clearOperations || []),
+      ...(args.clearSchemas || []),
+    ];
+    if (enrichmentActions.length && !args.acceptEnrichment) {
+      throw new Error(
+        "--review-operation, --clear-operation, and --clear-schema require --accept-enrichment",
+      );
+    }
+  }
   if (args.command === "review-middleware") {
     const supported = new Set([
       "--app",
@@ -585,6 +721,7 @@ function validateArgs(args) {
       "--app-id",
       "--config",
       "--exclude",
+      "--fail-on",
       "--format",
       "--ignore-file",
       "--no-ignore-file",
@@ -602,6 +739,15 @@ function validateArgs(args) {
     if (!args.repo) throw new Error("scan-repo requires --repo <url|owner/repo|path>");
     if (args.provided.has("--format") && args.format !== "json") {
       throw new Error("scan-repo supports only --format json");
+    }
+    if (args.failOn) {
+      const invalid = args.failOn
+        .split(",")
+        .map((status) => status.trim())
+        .find((status) => !REPOSITORY_STATUSES.has(status));
+      if (invalid !== undefined) {
+        throw new Error(`--fail-on: unknown or empty scan-repo status "${invalid}"`);
+      }
     }
   }
   if (args.command === "scan-org") {
@@ -624,19 +770,29 @@ function validateArgs(args) {
       "--out",
       "--overwrite",
       "--progress",
+      "--repo-attempts",
+      "--repo-exclude",
+      "--repo-include",
       "--no-progress",
       "--resume",
+      "--update",
     ]);
     const unsupported = [...args.provided].filter((option) => !supported.has(option));
     if (unsupported.length) throw new Error(`scan-org does not accept ${unsupported.join(", ")}`);
     if (!args.org) throw new Error("scan-org requires --org <name>");
     validateOrganization(args.org);
-    if (args.resume && args.overwrite) {
-      throw new Error("scan-org --resume and --overwrite cannot be used together");
+    if ([args.resume, args.update, args.overwrite].filter(Boolean).length > 1) {
+      throw new Error("scan-org --resume, --update, and --overwrite cannot be used together");
+    }
+    if (args.update && args.baseline) {
+      throw new Error(
+        "scan-org --update uses the existing inventory as its baseline; omit --baseline",
+      );
     }
     for (const [option, value, maximum] of [
       ["--max-repos", args.maxRepos, 10_000],
       ["--concurrency", args.concurrency, 8],
+      ["--repo-attempts", args.repoAttempts, 3],
     ]) {
       if (
         value !== undefined &&
@@ -653,15 +809,18 @@ function validateArgs(args) {
     args.failOn &&
     args.command !== "audit" &&
     args.command !== "docs" &&
+    args.command !== "refresh" &&
+    args.command !== "scan-repo" &&
     args.command !== "scan-org"
   ) {
-    throw new Error("--fail-on is supported only by audit, docs, and scan-org");
+    throw new Error("--fail-on is supported only by audit, docs, refresh, scan-repo, and scan-org");
   }
-  if (args.failOn && args.command === "docs") {
+  if (args.failOn && (args.command === "docs" || args.command === "refresh")) {
     const statuses = args.failOn.split(",").map((status) => status.trim());
-    const invalid = statuses.find((status) => !DOC_STATUSES.has(status));
+    const accepted = args.command === "refresh" ? REFRESH_STATUSES : DOC_STATUSES;
+    const invalid = statuses.find((status) => !accepted.has(status));
     if (invalid !== undefined) {
-      throw new Error(`--fail-on: unknown or empty docs status "${invalid}"`);
+      throw new Error(`--fail-on: unknown or empty ${args.command} status "${invalid}"`);
     }
   }
   if (args.failOn && args.command === "audit") {
@@ -682,8 +841,21 @@ function validateArgs(args) {
       throw new Error("--fail-on incomplete requires static or hybrid mode");
     }
   }
-  if (args.failOn && args.command === "scan-org" && args.failOn !== "incomplete") {
-    throw new Error('scan-org --fail-on supports only "incomplete"');
+  if (args.failOn && args.command === "scan-org") {
+    const statuses = args.failOn.split(",").map((status) => status.trim());
+    const invalid = statuses.find((status) => !ORGANIZATION_STATUSES.has(status));
+    if (invalid !== undefined) {
+      throw new Error(`--fail-on: unknown or empty scan-org status "${invalid}"`);
+    }
+    if (
+      statuses.some((status) =>
+        ["routes-added", "routes-removed", "routes-changed", "auth-regression"].includes(status),
+      ) &&
+      !args.baseline &&
+      !args.update
+    ) {
+      throw new Error("scan-org route/auth change gates require --baseline or --update");
+    }
   }
   if ((args.mode === "runtime" || args.mode === "hybrid") && !args.app) {
     throw new Error("runtime/hybrid mode requires --app");
@@ -822,6 +994,29 @@ function emit(text, format, outDir, file) {
     if (err.code !== "ENOENT") throw err;
   }
   fs.writeFileSync(output, text + "\n");
+}
+
+function emitAtomic(text, outDir, file) {
+  ensureOrganizationOutputDirectory(outDir);
+  const output = path.join(outDir, file);
+  if (fs.existsSync(output)) organizationOutputEntry(outDir, file, "file");
+  const temporary = path.join(
+    outDir,
+    `.${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`,
+  );
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, "wx", 0o600);
+    fs.writeFileSync(descriptor, `${text}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, output);
+  } catch (error) {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(temporary, { force: true });
+    throw new Error(`Could not persist ${file}: ${error.message}`);
+  }
 }
 
 function writeReport(report, args) {
@@ -1084,8 +1279,8 @@ async function runDiscover(args) {
   return 0;
 }
 
-async function runDocs(args) {
-  const root = resolvePath(args.src || process.cwd());
+function buildDocumentation(args) {
+  const root = fs.realpathSync(resolvePath(args.src || process.cwd()));
   const config = loadConfig(args.config);
   const scan = discoveryOptions(args, config);
   const command = Object.keys(config.openapi?.securityByTag || {}).length ? "audit" : "inventory";
@@ -1109,17 +1304,11 @@ async function runDocs(args) {
     spec: args.spec,
     jsdoc: args.jsdoc,
   });
-  const documentText = JSON.stringify(result.document, null, 2);
-  if (args.out) {
-    const outDir = resolvePath(args.out);
-    emit(documentText, "openapi", outDir, "openapi.json");
-    emit(JSON.stringify(result.report, null, 2), "json", outDir, "docs-report.json");
-  } else {
-    process.stdout.write(documentText + "\n");
-  }
-  if (!args.failOn) return 0;
-  const statuses = new Set(args.failOn.split(",").map((status) => status.trim()));
-  const summary = result.report.summary;
+  return { root, discovery, report, result };
+}
+
+function documentationGateHits(report, statuses) {
+  const summary = report.summary;
   let hits = 0;
   if (statuses.has("docs-drift")) {
     hits +=
@@ -1132,11 +1321,236 @@ async function runDocs(args) {
     if (summary.incompleteInventory) hits++;
     if (summary.incompleteDocumentationDiscovery) hits++;
   }
+  return hits;
+}
+
+function documentationFailOnExit(report, failOn) {
+  if (!failOn) return 0;
+  const statuses = new Set(failOn.split(",").map((status) => status.trim()));
+  const hits = documentationGateHits(report, statuses);
   if (hits) {
-    process.stderr.write(`express-recon: ${hits} result(s) matched --fail-on ${args.failOn}\n`);
+    process.stderr.write(`express-recon: ${hits} result(s) matched --fail-on ${failOn}\n`);
     return 2;
   }
   return 0;
+}
+
+function auditConfigured(config) {
+  return (
+    Object.keys(config.authMiddleware || {}).length > 0 ||
+    (config.authWrappers || []).length > 0 ||
+    (config.acceptedPublic || []).length > 0 ||
+    (config.policies || []).length > 0 ||
+    Object.keys(config.openapi?.securityByTag || {}).length > 0
+  );
+}
+
+function repositoryUsesSupportedFramework(scan) {
+  return (
+    (scan.discovery?.applications || []).length > 0 ||
+    (scan.inventory?.routes || []).length > 0 ||
+    (scan.discovery?.packages || []).some(
+      (item) =>
+        Boolean(item.express) ||
+        (item.frameworks || []).some((framework) => framework?.classification?.detected !== false),
+    )
+  );
+}
+
+function repositoryGateHits(scan, statuses) {
+  let hits = 0;
+  const inventoryReport = scan.inventory || {};
+  if (statuses.has("public")) {
+    hits += (inventoryReport.routes || []).filter(
+      (route) => route.authStatus === "public" && !route.accepted,
+    ).length;
+  }
+  if (statuses.has("unknown")) {
+    hits += (inventoryReport.routes || []).filter((route) => route.authStatus === "unknown").length;
+  }
+  if (statuses.has("policy")) {
+    hits += (inventoryReport.findings || []).filter(
+      (finding) => finding.id === "policy-violation",
+    ).length;
+  }
+  const sourceIncomplete =
+    scan.repository?.acquisition?.complete !== true ||
+    scan.discovery?.discoveryCoverage?.complete !== true ||
+    scan.discovery?.scanCoverage?.complete !== true ||
+    inventoryReport.scanCoverage?.complete !== true;
+  const graphIncomplete = inventoryReport.routeGraph?.complete === false;
+  if (statuses.has("incomplete") && (sourceIncomplete || graphIncomplete)) hits++;
+  if (statuses.has("route-graph-incomplete") && graphIncomplete) hits++;
+  if (
+    statuses.has("docs-needs-input") &&
+    repositoryUsesSupportedFramework(scan) &&
+    ["needs-input", "needs-application-selection"].includes(scan.documentation?.status)
+  ) {
+    hits++;
+  }
+  if (scan.documentation?.report)
+    hits += documentationGateHits(scan.documentation.report, statuses);
+  return hits;
+}
+
+function repositoryFailOnExit(scan, failOn) {
+  if (!failOn) return 0;
+  const hits = repositoryGateHits(scan, new Set(failOn.split(",").map((status) => status.trim())));
+  if (!hits) return 0;
+  process.stderr.write(`express-recon: ${hits} result(s) matched --fail-on ${failOn}\n`);
+  return 2;
+}
+
+function refreshFailOnExit(documentationReport, refreshResultValue, failOn) {
+  if (!failOn) return 0;
+  const statuses = new Set(failOn.split(",").map((status) => status.trim()));
+  let hits = documentationGateHits(documentationReport, statuses);
+  const enrichment = refreshResultValue.enrichmentSummary;
+  const changes = refreshResultValue.routeChanges;
+  const contract = refreshResultValue.openapiChanges;
+  if (statuses.has("enrichment-stale")) {
+    hits += enrichment.staleOperations + enrichment.staleSchemas;
+  }
+  if (statuses.has("enrichment-unreviewed")) hits += enrichment.unreviewedOperations;
+  if (statuses.has("routes-added")) hits += changes?.addedRoutes || 0;
+  if (statuses.has("routes-changed")) hits += changes?.changedRoutes || 0;
+  if (statuses.has("routes-removed")) hits += changes?.removedRoutes || 0;
+  if (refreshResultValue.openapiBaselineAvailable) {
+    if (statuses.has("contract-changed")) {
+      hits +=
+        (contract?.addedOperations || 0) +
+        (contract?.removedOperations || 0) +
+        (contract?.changedOperations || 0) +
+        (contract?.addedSchemas || 0) +
+        (contract?.removedSchemas || 0) +
+        (contract?.changedSchemas || 0);
+    }
+    if (statuses.has("contract-breaking")) hits += contract?.breakingChanges || 0;
+    if (statuses.has("contract-potentially-breaking")) {
+      hits += contract?.potentiallyBreakingChanges || 0;
+    }
+  }
+  if (hits) {
+    process.stderr.write(`express-recon: ${hits} result(s) matched --fail-on ${failOn}\n`);
+    return 2;
+  }
+  return 0;
+}
+
+async function runDocs(args) {
+  const { result } = buildDocumentation(args);
+  const documentText = JSON.stringify(result.document, null, 2);
+  if (args.out) {
+    const outDir = resolvePath(args.out);
+    emit(documentText, "openapi", outDir, "openapi.json");
+    emit(JSON.stringify(result.report, null, 2), "json", outDir, "docs-report.json");
+  } else {
+    process.stdout.write(documentText + "\n");
+  }
+  return documentationFailOnExit(result.report, args.failOn);
+}
+
+function portableRefreshFile(root, value, relativeToRoot) {
+  if (!value) return { path: null, external: false };
+  const candidate = path.isAbsolute(value)
+    ? value
+    : relativeToRoot
+      ? path.resolve(root, value)
+      : resolvePath(value);
+  let real;
+  try {
+    real = fs.realpathSync(candidate);
+  } catch {
+    return { path: null, external: true };
+  }
+  if (!pathContains(root, real)) return { path: null, external: true };
+  return {
+    path: path.relative(root, real).split(path.sep).join("/"),
+    external: false,
+  };
+}
+
+function refreshInvocation(root, args) {
+  const config = portableRefreshFile(root, args.config, false);
+  const ignore =
+    args.ignoreFile === false
+      ? { path: false, external: false }
+      : portableRefreshFile(root, args.ignoreFile, true);
+  return {
+    config: config.path,
+    externalConfig: config.external,
+    include: [...(args.include || [])],
+    exclude: [...(args.exclude || [])],
+    ignoreFile: ignore.path,
+    externalIgnoreFile: ignore.external,
+    includeTests: args.includeTests === true,
+    includeHidden: args.includeHidden === true,
+    render: args.render !== false,
+  };
+}
+
+async function runRefresh(args) {
+  const root = fs.realpathSync(resolvePath(args.src || process.cwd()));
+  const output = args.out ? resolvePath(args.out) : defaultRefreshOutput(root);
+  const defaults = readRefreshDefaults(root, output, {
+    acceptEnrichment: args.acceptEnrichment,
+    overwrite: args.overwrite,
+  });
+  const effective = { ...args };
+  if (!args.provided.has("--app-id") && defaults.applicationId !== undefined) {
+    effective.appId = defaults.applicationId;
+  }
+  if (!args.provided.has("--spec") && defaults.spec !== undefined) effective.spec = defaults.spec;
+  if (!args.provided.has("--jsdoc") && defaults.jsdoc !== undefined)
+    effective.jsdoc = defaults.jsdoc;
+  const invocation = defaults.invocation;
+  if (invocation) {
+    if (!args.provided.has("--config")) {
+      if (invocation.externalConfig) {
+        throw new Error("Prior refresh used an external --config; repeat that option explicitly");
+      }
+      if (invocation.config) effective.config = path.join(root, ...invocation.config.split("/"));
+    }
+    if (!args.provided.has("--include")) effective.include = invocation.include;
+    if (!args.provided.has("--exclude")) effective.exclude = invocation.exclude;
+    if (!args.provided.has("--ignore-file") && !args.provided.has("--no-ignore-file")) {
+      if (invocation.externalIgnoreFile) {
+        throw new Error(
+          "Prior refresh used an external --ignore-file; repeat that option explicitly",
+        );
+      }
+      effective.ignoreFile =
+        typeof invocation.ignoreFile === "string"
+          ? path.join(root, ...invocation.ignoreFile.split("/"))
+          : invocation.ignoreFile === false
+            ? false
+            : undefined;
+    }
+    if (!args.provided.has("--include-tests")) effective.includeTests = invocation.includeTests;
+    if (!args.provided.has("--include-hidden")) effective.includeHidden = invocation.includeHidden;
+    if (!args.provided.has("--render") && !args.provided.has("--no-render")) {
+      effective.render = invocation.render;
+    }
+  }
+  const documentation = buildDocumentation(effective);
+  const result = refreshDocumentation({
+    root: documentation.root,
+    output,
+    routes: documentation.report,
+    discovery: documentation.discovery,
+    documentation: documentation.result,
+    explicitJSDoc: args.provided.has("--jsdoc") || defaults.jsdoc !== undefined,
+    configurationExplicit: args.provided.has("--config") || Boolean(defaults.invocation?.config),
+    acceptEnrichment: args.acceptEnrichment,
+    reviewOperations: args.reviewOperations,
+    clearOperations: args.clearOperations,
+    clearSchemas: args.clearSchemas,
+    overwrite: args.overwrite,
+    render: effective.render,
+    invocation: refreshInvocation(root, effective),
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return refreshFailOnExit(documentation.result.report, result, args.failOn);
 }
 
 async function runMiddlewareReview(args) {
@@ -1283,6 +1697,13 @@ function writeRepositoryScanArtifacts(outDir, scan, options = {}) {
 
 async function runScanRepository(args) {
   const config = loadConfig(args.config);
+  const gateStatuses = new Set((args.failOn || "").split(",").filter(Boolean));
+  if (
+    ["public", "unknown", "policy"].some((status) => gateStatuses.has(status)) &&
+    !auditConfigured(config)
+  ) {
+    throw new Error("scan-repo public/unknown/policy gates require an audit --config");
+  }
   const githubToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || undefined;
   const outDir = args.out ? resolvePath(args.out) : null;
   const result = scanRepository(args.repo, {
@@ -1298,7 +1719,7 @@ async function runScanRepository(args) {
   if (outDir) {
     writeRepositoryScanArtifacts(outDir, result);
   } else emit(JSON.stringify(result, null, 2), "json", null, "repo-scan.json");
-  return 0;
+  return repositoryFailOnExit(result, args.failOn);
 }
 
 function organizationArtifactName(repository) {
@@ -1449,6 +1870,86 @@ function removeOrganizationBaseline(outDir) {
   fs.rmSync(directory, { recursive: true });
 }
 
+function organizationArtifactReferences(report) {
+  const references = new Set();
+  const add = (value) => {
+    if (typeof value !== "string" || value.includes("\\") || path.posix.isAbsolute(value)) return;
+    const parts = value.split("/");
+    if (
+      parts.length < 3 ||
+      parts[0] !== "repositories" ||
+      parts.some((part) => !part || part === "." || part === "..")
+    ) {
+      return;
+    }
+    references.add(value);
+  };
+  for (const entry of report?.repositories || []) {
+    const artifacts = entry.artifacts || {};
+    for (const name of [
+      "repositoryScan",
+      "discovery",
+      "routes",
+      "openapi",
+      "documentationReport",
+    ]) {
+      add(artifacts[name]);
+    }
+    for (const specification of artifacts.specifications || []) {
+      add(specification?.artifact);
+      add(specification?.reconciliation?.artifact);
+      add(specification?.reconciliation?.reportArtifact);
+    }
+  }
+  return references;
+}
+
+function pruneStaleOrganizationArtifacts(outDir, previous, current) {
+  const oldReferences = organizationArtifactReferences(previous);
+  const currentReferences = organizationArtifactReferences(current);
+  const repositoriesRoot = path.join(outDir, "repositories");
+  for (const reference of oldReferences) {
+    if (currentReferences.has(reference)) continue;
+    const file = path.resolve(outDir, ...reference.split("/"));
+    if (!pathContains(repositoriesRoot, file) || !fs.existsSync(file)) continue;
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) continue;
+    fs.rmSync(file);
+    let directory = path.dirname(file);
+    while (directory !== repositoriesRoot && pathContains(repositoriesRoot, directory)) {
+      const directoryStat = fs.lstatSync(directory);
+      if (
+        directoryStat.isSymbolicLink() ||
+        !directoryStat.isDirectory() ||
+        fs.readdirSync(directory).length > 0
+      ) {
+        break;
+      }
+      fs.rmdirSync(directory);
+      directory = path.dirname(directory);
+    }
+  }
+}
+
+function resetOrganizationManagedOutput(outDir) {
+  for (const name of [
+    CHECKPOINT_FILENAME,
+    "organization-inventory.json",
+    ORGANIZATION_DELTA_FILENAME,
+  ]) {
+    const file = path.join(outDir, name);
+    if (!fs.existsSync(file)) continue;
+    organizationOutputEntry(outDir, name, "file");
+    fs.rmSync(file);
+  }
+  for (const name of ["repositories", ORGANIZATION_BASELINE_DIRECTORY]) {
+    const directory = path.join(outDir, name);
+    if (!fs.existsSync(directory)) continue;
+    organizationOutputEntry(outDir, name, "directory");
+    fs.rmSync(directory, { recursive: true });
+  }
+}
+
 /**
  * Copy only report artifacts needed for a future comparison into resumable
  * scan state. Source snapshots are deliberately excluded and remain subject to
@@ -1463,7 +1964,16 @@ function persistOrganizationBaseline(snapshot, outDir) {
       delete entry.scan;
       delete entry.artifacts;
       if (entry.coverageComplete === true && COMPLETE_REPOSITORY_STATUSES.has(entry.status)) {
-        const scan = referencedRepositoryScan(snapshot, value);
+        let scan;
+        try {
+          scan = referencedRepositoryScan(snapshot, value);
+        } catch {
+          // Keep aggregate baseline state even if one damaged detail artifact
+          // cannot be copied. The update will rescan that repository, and an
+          // exact comparison is either safely skipped for the same commit or
+          // reported as incomplete by the comparison loader.
+          return entry;
+        }
         const artifactName = organizationArtifactName(entry.repository);
         const relative = path.posix.join("repositories", artifactName, "repo-scan.json");
         const serialized = JSON.stringify(scan, null, 2) + "\n";
@@ -1499,6 +2009,40 @@ function persistOrganizationBaseline(snapshot, outDir) {
     fs.rmSync(temporary, { recursive: true, force: true });
     throw error;
   }
+}
+
+function reusableOrganizationEntries(snapshot) {
+  if (snapshot.report.coverage?.complete !== true) {
+    throw new Error(
+      "scan-org --update requires a complete existing inventory; use --resume for an incomplete run",
+    );
+  }
+  if (snapshot.report.toolVersion !== pkg.version) {
+    return {
+      entries: [],
+      diagnostics: [
+        `scanner version changed from ${snapshot.report.toolVersion || "unknown"} to ${pkg.version}; all selected repositories will be rescanned`,
+      ],
+    };
+  }
+  const entries = [];
+  const diagnostics = [];
+  for (const entry of snapshot.report.repositories) {
+    if (entry.coverageComplete !== true || !COMPLETE_REPOSITORY_STATUSES.has(entry.status))
+      continue;
+    try {
+      const scan = referencedRepositoryScan(snapshot, entry);
+      if (!entry.commit || scan.repository?.commit !== entry.commit) {
+        throw new Error("saved commit metadata does not match its repository artifact");
+      }
+      entries.push(structuredClone(entry));
+    } catch (error) {
+      diagnostics.push(
+        `${entry.repository?.fullName || "repository"}: ${error.message}; repository will be rescanned`,
+      );
+    }
+  }
+  return { entries, diagnostics };
 }
 
 function compactOrganizationDelta(delta) {
@@ -1551,7 +2095,9 @@ function serializedOrganizationDelta(delta) {
 function organizationOutputConflictError(state) {
   const choices = state.hasCheckpoint
     ? "rerun with --resume to continue it or --overwrite to start fresh"
-    : "rerun with --overwrite to start fresh";
+    : state.hasInventory
+      ? "rerun with --update to scan changed repositories or --overwrite to start fresh"
+      : "rerun with --overwrite to start fresh";
   return new Error(
     `Organization scan output is not empty: ${JSON.stringify(state.output)}; ${choices}. ` +
       "No files were changed.",
@@ -1563,6 +2109,7 @@ function normalizeOrganizationOutputChoice(value) {
     .trim()
     .toLowerCase();
   if (choice === "r" || choice === "resume") return "resume";
+  if (choice === "u" || choice === "update") return "update";
   if (choice === "o" || choice === "overwrite") return "overwrite";
   if (["", "c", "cancel", "n", "no"].includes(choice)) return "cancel";
   return null;
@@ -1573,13 +2120,17 @@ async function promptForOrganizationOutput(state, dependencies) {
   const output = dependencies.stderr || process.stderr;
   const prompt = state.hasCheckpoint
     ? "Choose [r]esume, [o]verwrite, or [c]ancel (default): "
-    : "Choose [o]verwrite or [c]ancel (default): ";
+    : state.hasInventory
+      ? "Choose [u]pdate, [o]verwrite, or [c]ancel (default): "
+      : "Choose [o]verwrite or [c]ancel (default): ";
   output.write(
     `express-recon: ${state.entries} existing item${state.entries === 1 ? "" : "s"} found in ` +
       `${JSON.stringify(state.output)}.\n` +
       (state.hasCheckpoint
         ? "A checkpoint is available. Resume preserves completed repository evidence.\n"
-        : "No checkpoint is available, so this run cannot be resumed.\n") +
+        : state.hasInventory
+          ? "A completed inventory is available. Update reuses repositories whose upstream push marker is unchanged.\n"
+          : "No checkpoint is available, and no completed inventory can be updated.\n") +
       "Overwrite starts a fresh scan, replaces colliding organization artifacts, and keeps other files.\n",
   );
   const terminal = readline.createInterface({ input, output, terminal: true });
@@ -1588,13 +2139,17 @@ async function promptForOrganizationOutput(state, dependencies) {
       const choice = normalizeOrganizationOutputChoice(await terminal.question(prompt));
       if (choice === "resume" && !state.hasCheckpoint) {
         output.write("Resume is unavailable because no organization checkpoint was found.\n");
+      } else if (choice === "update" && !state.hasInventory) {
+        output.write("Update is unavailable because no organization inventory was found.\n");
       } else if (choice) {
         return choice;
       } else {
         output.write(
           state.hasCheckpoint
             ? "Enter resume, overwrite, or cancel.\n"
-            : "Enter overwrite or cancel.\n",
+            : state.hasInventory
+              ? "Enter update, overwrite, or cancel.\n"
+              : "Enter overwrite or cancel.\n",
         );
       }
     }
@@ -1610,14 +2165,27 @@ async function promptForOrganizationOutput(state, dependencies) {
 
 async function resolveOrganizationOutputArgs(args, dependencies, executionContext) {
   if (!args.out) return args;
-  if (args.resume && args.overwrite) {
-    throw new Error("scan-org --resume and --overwrite cannot be used together");
+  if ([args.resume, args.update, args.overwrite].filter(Boolean).length > 1) {
+    throw new Error("scan-org --resume, --update, and --overwrite cannot be used together");
   }
   const state = inspectOrganizationOutput(args.out);
   if (args.resume) {
     if (!state.hasCheckpoint) {
       throw new Error(
         `scan-org --resume could not find ${CHECKPOINT_FILENAME} in ${JSON.stringify(state.output)}`,
+      );
+    }
+    return args;
+  }
+  if (args.update) {
+    if (state.hasCheckpoint) {
+      throw new Error(
+        `scan-org --update found an incomplete checkpoint in ${JSON.stringify(state.output)}; use --resume or --overwrite`,
+      );
+    }
+    if (!state.hasInventory) {
+      throw new Error(
+        `scan-org --update could not find organization-inventory.json in ${JSON.stringify(state.output)}`,
       );
     }
     return args;
@@ -1653,11 +2221,15 @@ async function resolveOrganizationOutputArgs(args, dependencies, executionContex
   if (choice === "resume" && !state.hasCheckpoint) {
     throw new Error(`Cannot resume: ${CHECKPOINT_FILENAME} was not found in ${state.output}`);
   }
+  if (choice === "update" && !state.hasInventory) {
+    throw new Error(`Cannot update: organization-inventory.json was not found in ${state.output}`);
+  }
   const provided = new Set(args.provided || []);
-  provided.add(choice === "resume" ? "--resume" : "--overwrite");
+  provided.add(choice === "resume" ? "--resume" : choice === "update" ? "--update" : "--overwrite");
   return {
     ...args,
     resume: choice === "resume",
+    update: choice === "update",
     overwrite: choice === "overwrite",
     provided,
   };
@@ -1669,15 +2241,101 @@ function writeRepositoryArtifacts(outDir, repository, scan) {
   const repositoriesDir = path.join(outDir, "repositories");
   ensureOrganizationOutputDirectory(repositoriesDir);
   const repoDir = path.join(repositoriesDir, artifactName);
-  ensureOrganizationOutputDirectory(repoDir);
-  return writeRepositoryScanArtifacts(repoDir, scan, {
-    organization: true,
-    relativeDir,
-  });
+  const staging = fs.mkdtempSync(path.join(repositoriesDir, `.${artifactName}-staging-`));
+  let moved = false;
+  try {
+    const artifacts = writeRepositoryScanArtifacts(staging, scan, {
+      organization: true,
+      relativeDir,
+    });
+    if (!fs.existsSync(repoDir)) {
+      fs.renameSync(staging, repoDir);
+      moved = true;
+      return artifacts;
+    }
+    organizationOutputEntry(repositoriesDir, artifactName, "directory");
+    const backup = fs.mkdtempSync(path.join(repositoriesDir, `.${artifactName}-backup-`));
+    fs.rmdirSync(backup);
+    fs.renameSync(repoDir, backup);
+    try {
+      fs.renameSync(staging, repoDir);
+      moved = true;
+    } catch (error) {
+      fs.renameSync(backup, repoDir);
+      throw error;
+    }
+    fs.rmSync(backup, { recursive: true, force: true });
+    return artifacts;
+  } finally {
+    if (!moved) fs.rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+function organizationGateHits(result, statuses, outDir) {
+  let hits = 0;
+  const comparisonIncomplete = result.delta?.coverage?.complete === false;
+  if (statuses.has("incomplete") && (!result.coverage?.complete || comparisonIncomplete)) hits++;
+  if (statuses.has("failed")) hits += result.summary?.failedRepositories || 0;
+  if (statuses.has("inconclusive")) hits += result.summary?.inconclusiveRepositories || 0;
+  if (statuses.has("route-graph-incomplete")) {
+    hits += result.summary?.incompleteRouteGraphs || 0;
+  }
+  if (statuses.has("public")) hits += result.summary?.auth?.public || 0;
+  if (statuses.has("unknown")) hits += result.summary?.auth?.unknown || 0;
+  if (statuses.has("policy")) hits += result.summary?.auth?.policyViolations || 0;
+  if (statuses.has("docs-needs-input")) {
+    hits += result.repositories.filter(
+      (entry) =>
+        (entry.frameworks?.detected === true || entry.express?.detected === true) &&
+        ["needs-input", "needs-application-selection"].includes(
+          (entry.frameworks || entry.express).documentation?.reconciliationStatus,
+        ),
+    ).length;
+  }
+  const changes = result.delta?.summary;
+  if (statuses.has("routes-added")) hits += changes?.addedRoutes || 0;
+  if (statuses.has("routes-removed")) hits += changes?.removedRoutes || 0;
+  if (statuses.has("routes-changed")) hits += changes?.changedRoutes || 0;
+  if (statuses.has("auth-regression")) hits += changes?.authRegressions || 0;
+
+  const documentationStatuses = new Set([...statuses].filter((status) => DOC_STATUSES.has(status)));
+  if (documentationStatuses.size) {
+    const snapshot = snapshotFromReport(result, outDir);
+    for (const entry of result.repositories) {
+      if (entry.coverageComplete !== true || !COMPLETE_REPOSITORY_STATUSES.has(entry.status)) {
+        continue;
+      }
+      try {
+        const scan = referencedRepositoryScan(snapshot, entry);
+        if (scan.documentation?.report) {
+          hits += documentationGateHits(scan.documentation.report, documentationStatuses);
+        }
+        for (const specification of scan.documentation?.specifications || []) {
+          if (specification.reconciliation?.report) {
+            hits += documentationGateHits(
+              specification.reconciliation.report,
+              documentationStatuses,
+            );
+          }
+        }
+      } catch {
+        // Artifact integrity is already reflected in complete/incomplete state;
+        // a documentation-specific gate must not invent missing drift evidence.
+      }
+    }
+  }
+  return hits;
 }
 
 async function executeScanOrganization(args, dependencies, reporter) {
   const config = loadConfig(args.config);
+  const gateStatuses = new Set((args.failOn || "").split(",").filter(Boolean));
+  if (
+    ["public", "unknown", "policy"].some((status) => gateStatuses.has(status)) &&
+    !auditConfigured(config)
+  ) {
+    throw new Error("scan-org public/unknown/policy gates require an audit --config");
+  }
   if (!args.out) throw new Error("scan-org output directory was not resolved");
   const outDir = resolvePath(args.out);
   const environment = dependencies.environment || process.env;
@@ -1692,34 +2350,46 @@ async function executeScanOrganization(args, dependencies, reporter) {
     maxRepositories,
     includeArchived: args.includeArchived,
     includeForks: args.includeForks,
+    repositoryInclude: args.repoInclude,
+    repositoryExclude: args.repoExclude,
   });
+  ensureOrganizationOutputDirectory(outDir);
   const internalBaseline = path.join(outDir, ORGANIZATION_BASELINE_DIRECTORY);
-  const baselineInput = args.baseline
-    ? resolvePath(args.baseline)
-    : args.resume && fs.existsSync(internalBaseline)
-      ? internalBaseline
-      : null;
+  const baselineInput = args.update
+    ? outDir
+    : args.baseline
+      ? resolvePath(args.baseline)
+      : args.resume && fs.existsSync(internalBaseline)
+        ? internalBaseline
+        : null;
   let baselineSnapshot = baselineInput ? loadOrganizationSnapshot(baselineInput) : null;
-  const baselineIsInternal =
+  const updateBaselineReport = args.update ? baselineSnapshot?.report : null;
+  const updateReusable = args.update ? reusableOrganizationEntries(baselineSnapshot) : null;
+  let baselineIsInternal =
     baselineSnapshot && path.resolve(baselineSnapshot.input) === path.resolve(internalBaseline);
   if (baselineSnapshot) {
-    if (!baselineIsInternal) validateOrganizationBaselineLocation(baselineSnapshot, outDir);
+    if (!baselineIsInternal && !args.update) {
+      validateOrganizationBaselineLocation(baselineSnapshot, outDir);
+    }
     assertComparableOrganizations(baselineSnapshot.report, {
       kind: "github-organization-inventory",
       organization: { login: args.org },
       scope: {
-        fingerprint: identity.fingerprint,
+        fingerprint: identity.scopeFingerprint,
         includeArchived: args.includeArchived === true,
         includeForks: args.includeForks === true,
         maxRepositories,
         configHash: identity.scope.configHash,
         scanHash: identity.scope.scanHash,
+        repositoryInclude: identity.scope.repositoryInclude,
+        repositoryExclude: identity.scope.repositoryExclude,
       },
       coverage: { complete: false },
       summary: {},
       repositories: [],
     });
   }
+  if (args.overwrite) resetOrganizationManagedOutput(outDir);
   const checkpointFile = checkpointPath(outDir);
   let checkpoint = initialCheckpoint(args.org, identity);
   let resumeEntries = [];
@@ -1735,12 +2405,11 @@ async function executeScanOrganization(args, dependencies, reporter) {
     if (event.event === "scan-finished") finishedProgress = true;
     reporter.emit(event);
   };
-  ensureOrganizationOutputDirectory(outDir);
   removeOrganizationDelta(outDir);
   if (baselineSnapshot && !baselineIsInternal) {
     persistOrganizationBaseline(baselineSnapshot, outDir);
     baselineSnapshot = loadOrganizationSnapshot(internalBaseline);
-  } else if (!baselineSnapshot && !args.resume) {
+  } else if (!baselineSnapshot && !args.resume && !args.update) {
     removeOrganizationBaseline(outDir);
   }
   if (args.resume) {
@@ -1749,33 +2418,80 @@ async function executeScanOrganization(args, dependencies, reporter) {
     resumeEntries = loaded.entries;
     resumeDiagnostics.push(...loaded.diagnostics);
     if (loaded.migratedFromToolVersion) atomicWriteJson(checkpointFile, checkpoint);
+  } else if (args.update) {
+    resumeEntries = updateReusable.entries;
+    resumeDiagnostics.push(...updateReusable.diagnostics);
+    atomicWriteJson(checkpointFile, checkpoint);
   } else {
     atomicWriteJson(checkpointFile, checkpoint);
   }
   for (const diagnostic of resumeDiagnostics) {
+    const phase = args.update ? "update" : "resume";
     if (reporter.mode === "none") {
       (dependencies.stderr || process.stderr).write(
-        `express-recon [warn]: resume: ${diagnostic}\n`,
+        `express-recon [warn]: ${phase}: ${diagnostic}\n`,
       );
     } else {
       reportProgress({
         event: "resume-warning",
         organization: args.org,
-        message: diagnostic,
+        message: `${phase}: ${diagnostic}`,
       });
     }
   }
+  const baselineEntries = new Map(
+    (baselineSnapshot?.report.repositories || []).map((entry) => [
+      entry.repository.fullName.toLowerCase(),
+      entry,
+    ]),
+  );
   const result = await scan(args.org, {
     token,
     config,
     scan: scanOptions,
     maxRepositories,
     concurrency: args.concurrency === undefined ? undefined : Number(args.concurrency),
+    repositoryAttempts:
+      args.repoAttempts === undefined ? DEFAULT_REPOSITORY_ATTEMPTS : Number(args.repoAttempts),
+    repositoryInclude: args.repoInclude,
+    repositoryExclude: args.repoExclude,
     includeArchived: args.includeArchived,
     includeForks: args.includeForks,
     resumeEntries,
+    reuseUnchanged: args.update === true,
     retainScans: false,
     onProgress: reportProgress,
+    onReuse: args.update
+      ? ({ repository, previous }) => {
+          const baselineEntry = baselineEntries.get(repository.fullName.toLowerCase());
+          if (!baselineEntry) throw new Error("repository is absent from the update baseline");
+          const savedScan = referencedRepositoryScan(baselineSnapshot, baselineEntry);
+          const completed = checkpointEntry(
+            {
+              repository,
+              status: previous.status,
+              express: previous.express,
+              frameworks: previous.frameworks,
+              coverageComplete: previous.coverageComplete,
+              routeGraphComplete: previous.routeGraphComplete,
+              scan: savedScan,
+            },
+            previous.artifacts,
+            outDir,
+          );
+          if (!completed) throw new Error("saved repository is not checkpoint-compatible");
+          checkpoint = withCompleted(checkpoint, completed);
+          atomicWriteJson(checkpointFile, checkpoint);
+          reportProgress({
+            event: "checkpoint-written",
+            organization: args.org,
+            repository: repository.fullName,
+            completedRepositories: checkpoint.completed.length,
+            total: lastProgress.total,
+          });
+          return previous.artifacts;
+        }
+      : undefined,
     onRepository: (payload) => {
       const artifacts = writeRepositoryArtifacts(outDir, payload.repository, payload.scan);
       const completed = checkpointEntry(payload, artifacts, outDir);
@@ -1798,6 +2514,13 @@ async function executeScanOrganization(args, dependencies, reporter) {
     requested: args.resume === true,
     repositoriesReused: result.summary?.repositoriesResumed || 0,
     checkpoint: result.coverage.complete ? null : CHECKPOINT_FILENAME,
+  };
+  result.update = {
+    requested: args.update === true,
+    repositoriesReused: result.summary?.repositoriesReused || 0,
+    repositoriesRescanned:
+      (result.summary?.repositoriesScanned || 0) - (result.summary?.repositoriesReused || 0),
+    repositoryRetries: result.summary?.repositoryRetries || 0,
   };
   for (const entry of result.repositories) {
     if (
@@ -1838,6 +2561,8 @@ async function executeScanOrganization(args, dependencies, reporter) {
       inconclusiveRepositories: result.summary?.inconclusiveRepositories || 0,
       incompleteRouteGraphs: result.summary?.incompleteRouteGraphs || 0,
       repositoriesResumed: result.summary?.repositoriesResumed || 0,
+      repositoriesReused: result.summary?.repositoriesReused || 0,
+      repositoryRetries: result.summary?.repositoryRetries || 0,
     });
   }
   if (baselineSnapshot) {
@@ -1851,27 +2576,33 @@ async function executeScanOrganization(args, dependencies, reporter) {
     });
     const serializedDelta = serializedOrganizationDelta(delta);
     result.delta = compactOrganizationDelta(delta);
-    emit(serializedDelta, "json", outDir, ORGANIZATION_DELTA_FILENAME);
+    emitAtomic(serializedDelta, outDir, ORGANIZATION_DELTA_FILENAME);
   }
-  emit(JSON.stringify(result, null, 2), "json", outDir, "organization-inventory.json");
+  emitAtomic(JSON.stringify(result, null, 2), outDir, "organization-inventory.json");
+  if (args.update && result.coverage.complete && updateBaselineReport) {
+    pruneStaleOrganizationArtifacts(outDir, updateBaselineReport, result);
+  }
   if (result.coverage.complete) {
     // The internal baseline is resume state, not historical storage. Remove it
     // only after the completed aggregate (and optional delta) is durable.
     fs.rmSync(checkpointFile, { force: true });
     removeOrganizationBaseline(outDir);
   }
-  const comparisonIncomplete = result.delta?.coverage?.complete === false;
-  if (args.failOn === "incomplete" && (!result.coverage.complete || comparisonIncomplete)) {
-    const message = result.coverage.complete
-      ? "organization baseline comparison is incomplete"
-      : "organization inventory is incomplete";
+  const gateHits = organizationGateHits(result, gateStatuses, outDir);
+  if (gateHits > 0) {
+    const message =
+      args.failOn === "incomplete"
+        ? result.coverage.complete
+          ? "organization baseline comparison is incomplete"
+          : "organization inventory is incomplete"
+        : `${gateHits} result(s) matched --fail-on ${args.failOn}`;
     if (reporter.mode === "none") {
       (dependencies.stderr || process.stderr).write(`express-recon: ${message}\n`);
     } else {
       reportProgress({
         event: "gate-triggered",
         organization: args.org,
-        gate: "incomplete",
+        gate: args.failOn,
         message,
       });
     }
@@ -1938,6 +2669,7 @@ async function main(argv) {
   }
   if (args.command === "discover") return runDiscover(args);
   if (args.command === "docs") return runDocs(args);
+  if (args.command === "refresh") return runRefresh(args);
   if (args.command === "review-middleware") return runMiddlewareReview(args);
   if (args.command === "import-review") return runImportReview(args);
   if (args.command === "render") return runRender(args);

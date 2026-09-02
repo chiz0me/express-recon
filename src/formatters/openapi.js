@@ -104,6 +104,9 @@ function objectRequired(value) {
 }
 
 function parameterDescription(value) {
+  if (typeof value?.schema?.description === "string" && value.schema.description.trim()) {
+    return value.schema.description;
+  }
   return value && contractConfidence(value) === "high"
     ? "Derived from static validator or framework schema evidence; verify runtime transforms."
     : PLACEHOLDER;
@@ -112,15 +115,18 @@ function parameterDescription(value) {
 function buildParameters(pathParams, io) {
   const pathSchema = requestContract(io, "params");
   const pathProperties = objectProperties(pathSchema);
-  const params = pathParams.map((name) => ({
-    name,
-    in: "path",
-    required: true,
-    schema: Object.hasOwn(pathProperties, name)
-      ? contractSchema({ ...pathSchema, schema: pathProperties[name] })
-      : { type: "string" },
-    description: parameterDescription(pathSchema),
-  }));
+  const params = pathParams.map((name) => {
+    const value = Object.hasOwn(pathProperties, name)
+      ? { ...pathSchema, schema: pathProperties[name] }
+      : null;
+    return {
+      name,
+      in: "path",
+      required: true,
+      schema: value ? contractSchema(value) : { type: "string" },
+      description: parameterDescription(value),
+    };
+  });
   if (io?.request) {
     for (const [bucket, location, fallback] of [
       ["query", "query", {}],
@@ -133,14 +139,15 @@ function buildParameters(pathParams, io) {
         ...new Set([...(io.request[bucket] || []), ...Object.keys(properties)]),
       ].sort();
       for (const name of names) {
+        const property = Object.hasOwn(properties, name)
+          ? { ...value, schema: properties[name] }
+          : null;
         params.push({
           name,
           in: location,
           required: required.has(name),
-          schema: Object.hasOwn(properties, name)
-            ? contractSchema({ ...value, schema: properties[name] })
-            : fallback,
-          description: parameterDescription(value),
+          schema: property ? contractSchema(property) : fallback,
+          description: parameterDescription(property),
         });
       }
     }
@@ -232,6 +239,10 @@ function buildSecurity(route, config, usedSchemes) {
 
 function buildOperation(route, verb, opId, tag, isAudit, pathParams, openapi, usedSchemes) {
   const op = { operationId: opId, tags: [tag], responses: buildResponses(route.io) };
+  if (route.io?.documentation?.summary) op.summary = route.io.documentation.summary;
+  if (route.io?.documentation?.description) {
+    op.description = route.io.documentation.description;
+  }
   const params = buildParameters(pathParams, route.io);
   if (params.length) op.parameters = params;
   const body = buildRequestBody(verb, route.io);

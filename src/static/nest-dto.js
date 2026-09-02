@@ -86,7 +86,23 @@ function unionSchema(types, resolve, depth, seen) {
     )
     .map((type) => schemaFromType(type, resolve, depth + 1, seen));
   const unique = [...new Map(schemas.map((schema) => [JSON.stringify(schema), schema])).values()];
+  if (unique.length === 0) return {};
   return unique.length === 1 ? unique[0] : { anyOf: unique };
+}
+
+function mergeObjectTypeSchemas(values) {
+  if (values.some((value) => value?.type !== "object")) {
+    return { allOf: values };
+  }
+  const properties = Object.fromEntries(
+    values.flatMap((value) => Object.entries(value.properties || {})),
+  );
+  const required = [...new Set(values.flatMap((value) => value.required || []))].sort();
+  return {
+    type: "object",
+    ...(Object.keys(properties).length ? { properties } : {}),
+    ...(required.length ? { required } : {}),
+  };
 }
 
 /** Convert an oxc TypeScript type node into a conservative JSON Schema fragment. */
@@ -119,6 +135,11 @@ function schemaFromType(annotation, resolve, depth = 0, seen = new Set()) {
     };
   }
   if (type.type === "TSUnionType") return unionSchema(type.types || [], resolve, depth, seen);
+  if (type.type === "TSIntersectionType") {
+    return mergeObjectTypeSchemas(
+      (type.types || []).map((item) => schemaFromType(item, resolve, depth + 1, seen)),
+    );
+  }
   if (type.type === "TSParenthesizedType") {
     return schemaFromType(type.typeAnnotation, resolve, depth + 1, seen);
   }
@@ -129,13 +150,25 @@ function schemaFromType(annotation, resolve, depth = 0, seen = new Set()) {
       return { type: "array", items: schemaFromType(parameters[0], resolve, depth + 1, seen) };
     }
     if (name === "Date") return { type: "string", format: "date-time" };
+    if (["Promise", "Readonly"].includes(name)) {
+      return schemaFromType(parameters[0], resolve, depth + 1, seen);
+    }
+    if (name === "Partial" || name === "Required") {
+      const value = schemaFromType(parameters[0], resolve, depth + 1, seen);
+      if (value.type !== "object") return value;
+      if (name === "Partial") {
+        const { required: _required, ...optional } = value;
+        return optional;
+      }
+      return { ...value, required: Object.keys(value.properties || {}).sort() };
+    }
     if (name === "Record")
       return {
         type: "object",
         additionalProperties: schemaFromType(parameters[1], resolve, depth + 1, seen),
       };
     if (name && !seen.has(name)) {
-      const resolved = resolve(name, depth + 1, new Set(seen).add(name));
+      const resolved = resolve(name, depth + 1, seen);
       if (resolved) return resolved;
     }
     return {};

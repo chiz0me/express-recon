@@ -19,7 +19,8 @@ const expected = (process.argv[2] || "").replace(/^v/, "") || null;
 const problems = [];
 if (pkg !== manifest)
   problems.push(`package.json (${pkg}) != .claude-plugin/plugin.json (${manifest})`);
-if (expected && expected !== pkg) problems.push(`release tag (${expected}) != package.json (${pkg})`);
+if (expected && expected !== pkg)
+  problems.push(`release tag (${expected}) != package.json (${pkg})`);
 
 if (problems.length) {
   process.stderr.write("version check failed:\n  " + problems.join("\n  ") + "\n");

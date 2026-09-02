@@ -62,8 +62,9 @@ installed `express-recon-mcp` binary instead.
 
 The MCP server is intentionally static and local. It cannot clone a repository,
 run runtime/hybrid mode, import target code, edit configuration, or contact an
-AI provider. Its discovery, inventory, audit, documentation, and review tools
-support static Express, Fastify, and NestJS evidence.
+AI provider. It can atomically create/query a local tool-owned refresh workspace
+when that specific tool is called. Its discovery, inventory, audit,
+documentation, and review tools support static Express, Fastify, and NestJS evidence.
 
 Organization acquisition is also deliberately outside MCP. A human or CI job
 must invoke `express-recon scan-org`, review its network/token scope, and then
@@ -82,6 +83,8 @@ provide the generated reports to the agent.
 | Build/validate policy configuration             | `validate_policies`        |
 | Generate a code-derived skeleton                | `openapi_spec`             |
 | Merge existing OpenAPI, JSDoc, and code         | `reconcile_openapi`        |
+| Maintain persistent reviewed OpenAPI state      | `refresh_openapi`          |
+| Page only new/stale OpenAPI review work         | `query_refresh`            |
 | Export evidence for middleware classification   | `review_middleware`        |
 | Validate the exact assessment response          | `import_middleware_review` |
 | Inspect the versioned machine contract          | `report_schema`            |
@@ -171,16 +174,20 @@ unsupported entry to a model. Run `review-middleware` and model-assisted
 classification only for targeted unresolved candidates, because that model
 review—not static scanning—is the token-consuming step.
 
-For a recurring inventory, keep the prior completed output in a separate
-directory and pass it as `--baseline` during the fresh scan. Read only
-`delta.summary` and the bounded `delta.repositories` projection embedded in
-`organization-inventory.json` first. Open `organization-delta.json` only when
-the user needs exact changed paths, and then project the relevant repository
-rather than returning the full organization delta to the model. Never place the
-baseline inside the new selected/default output directory; the CLI rejects
-overlapping directories to protect prior evidence. If a comparison run is incomplete, its
-generated `comparison-baseline/` stays with the checkpoint and is reused
-automatically by `--resume`; do not delete it as apparent duplicate output.
+For a recurring inventory, prefer `--update` against its completed output. It
+reuses integrity-checked artifacts only when the GitHub repository revision is
+unchanged, scans changed/new repositories, removes repositories no longer in
+scope, and uses the prior aggregate as the comparison baseline. Use a separate
+`--baseline` and fresh output only when retaining two independently named
+historical inventories is required. Read only `delta.summary` and the bounded
+`delta.repositories` projection embedded in `organization-inventory.json`
+first. Open `organization-delta.json` only when the user needs exact changed
+paths, and then project the relevant repository rather than returning the full
+organization delta to the model. Never place an external baseline inside the
+new output directory; the CLI rejects overlapping directories to protect prior
+evidence. If a comparison run is incomplete, its generated
+`comparison-baseline/` stays with the checkpoint and is reused automatically by
+`--resume`; do not delete it as apparent duplicate output.
 
 A `checkpoint-written` event means that repository can survive interruption; a
 `repository-completed` event without it does not promise CLI artifact
@@ -190,12 +197,13 @@ directory for a compatible `--resume`.
 
 Agent context never answers an output-directory prompt. If the selected/default
 output is nonempty, the CLI fails before GitHub access or file changes unless
-the invocation says `--resume` or `--overwrite`. Inspect whether
+the invocation says `--resume`, `--update`, or `--overwrite`. Inspect whether
 `organization-checkpoint.json` exists: use `--resume` only for a compatible
-interrupted run, and use `--overwrite` only when the requested goal is a fresh
-scan. Overwrite resets resumable state and replaces colliding organization
-artifacts, but preserves unrelated files rather than recursively deleting the
-directory. Do not guess between these actions when the user's intent is unclear.
+interrupted run, use `--update` for a completed recurring inventory, and use
+`--overwrite` only when the requested goal is a fresh scan. Overwrite resets
+resumable state and replaces colliding organization artifacts, but preserves
+unrelated files rather than recursively deleting the directory. Do not guess
+between these actions when the user's intent is unclear.
 
 If `resume.checkpoint` names `organization-checkpoint.json`, coverage is still
 incomplete. An agent may propose rerunning the same command with `--resume`, but
@@ -382,8 +390,9 @@ fields, and generated inventory fills remaining gaps. Report:
 Prefer high-confidence `fastify-schema`, `express-validator`, `zod`, `joi`,
 `class-validator`, or NestJS Swagger evidence over low-confidence field-access
 hints. Partially supported validator chains and partially decorated DTOs remain
-medium confidence, as do TypeScript and returned-literal shapes; do not assume
-runtime validation or serialization from types alone.
+medium confidence, as do ordinary handler JSDoc, same-file Express TypeScript
+request/response annotations, and returned-literal shapes; do not assume runtime
+validation or serialization from types or comments alone.
 If `schemaConflicts` is non-empty, report and resolve it before removing any
 unrefined marker; never silently union a field that an explicit closed schema
 rejects.
@@ -397,7 +406,8 @@ merge, present the candidate IDs and do not guess.
 By default, hidden directories are outside scan scope. Use `includeHidden: true`
 or `--include-hidden` only when the user or repository goal explicitly places a
 contract under a hidden path such as `.cursor/`; mention the scope expansion in
-the result. Never enable it routinely across an organization.
+the result. Never enable it routinely across an organization. The generated
+`.express-recon/` tree remains excluded even with that opt-in.
 
 Separate verified docs-only drift from unverified docs-only operations.
 Unverified means orphan routes or an opaque mount prevent a static stale-doc
@@ -408,6 +418,77 @@ Do not invent an authentication protocol from a middleware name. Use
 `openapi_spec` security inputs only when the user provides explicit security
 schemes and auth-tag mappings. The [OpenAPI guide](./openapi.md) defines the
 enrichment boundary.
+
+#### Retain enrichment across refreshes
+
+When the requested outcome is a reusable OpenAPI workspace rather than a
+one-off reconciliation, use the MCP `refresh_openapi` tool when available. It
+returns a token-compact summary and never executes target code. Use
+`query_refresh` with `kind: summary` first, then page only
+`unreviewed_operations`, `stale_operations`, `removed_operations`, or
+`contract_changes` with a modest limit. Contract queries return added, removed,
+and changed operations/schemas with breaking, review, or informational
+severity; the initial no-baseline refresh returns none. Do not request the whole
+generated contract through the model. `responseTruncated` or an item's
+`queryTruncated` flag means the response was deliberately projected; inspect
+only that selected operation in the local `openapi.generated.json` when its full
+schema is needed.
+
+The equivalent local CLI command is:
+
+```bash
+EXPRESS_RECON_CONTEXT=agent express-recon refresh \
+  --src <repoDir> --app-id <selected-id> --out <outDir>
+```
+
+It performs the deterministic reconciliation, compares the new route report to
+the preceding state, reapplies evidence-compatible enrichment, and renders
+`<outDir>/api-reference/index.html`. HTML generation is model-free; do not read
+the generated site or Swagger UI assets into context. Use `--no-render` only
+when the user or CI job wants JSON artifacts without a human view.
+
+Read `<outDir>/refresh-report.json` first. Review only
+`enrichment.unreviewedOperations` and `enrichment.staleOperations`; removed
+entries are history, not current routes. Select the corresponding operations
+from `openapi.generated.json`, then read only their route/handler evidence and
+the delegated files necessary to ground request parameters, payloads,
+responses, errors, summaries, and descriptions. This avoids repeatedly sending
+an already-reviewed API through a model.
+
+Write those refinements into `<outDir>/openapi.json`. The accepted surface is
+limited to operation `summary`, `description`, `parameters`, `requestBody`,
+`responses`, and `components.schemas`. Preserve paths, methods, tags,
+`operationId`, `security`, and scanner-owned trace fields. If review followed a
+controller/service file not already identified by operation `source` or
+`handlerSource`, set that operation's
+`x-express-recon.enrichmentSources` to the unique repository-relative files so
+changes to them invalidate the review too. Then run the same scan/config/scope
+invocation with:
+
+```bash
+EXPRESS_RECON_CONTEXT=agent express-recon refresh \
+  --src <repoDir> --out <outDir> --accept-enrichment
+```
+
+The second command validates and extracts the allowed difference into
+`openapi.enrichment.json`; it does not trust arbitrary edits to scanner-owned
+fields. Do not use `--accept-enrichment` on a pre-existing modified
+`openapi.json` unless the current task authorizes retaining those edits and you
+have reviewed their bounded diff. An ordinary refresh deliberately fails
+instead of overwriting an unaccepted edit.
+
+On future CLI runs, repository-local config, include/exclude patterns,
+ignore-file choice, test/hidden scope, app/base-spec/explicit-JSDoc selection,
+and render preference are restored from the manifest when omitted. External
+config or ignore-file paths are deliberately not stored and must be repeated.
+Passing an option explicitly permits an intentional policy/scope change and
+stales affected enrichment. Never use `--overwrite` to bypass a failure unless
+the user explicitly wants to discard the saved baseline and all enrichment.
+
+AI prose or schema review does not change route authentication classification.
+For an unresolved guard, use middleware review, validate the assessment, and
+have approved suggestions copied into reviewed configuration; only that config
+can affect later audit/security output.
 
 ### Query large audits
 

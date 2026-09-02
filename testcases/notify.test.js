@@ -144,6 +144,26 @@ test("unsafe source paths are omitted even when source metadata is requested", (
   assert.equal(event.data.items[0].source, undefined);
 });
 
+test("semantic route changes can be selected as a bounded webhook event", () => {
+  const input = report();
+  input.delta.changedRoutes = [
+    {
+      method: "POST",
+      path: "/orders",
+      changedFields: ["io", "middlewares"],
+      source: { file: "src/routes.js", line: 12 },
+    },
+  ];
+  const [event] = buildNotificationEvents(input, {
+    events: ["routes.changed"],
+    includeSource: true,
+    now: NOW,
+  });
+  assert.equal(event.type, "express_recon.routes.changed");
+  assert.deepEqual(event.data.items[0].changedFields, ["io", "middlewares"]);
+  assert.deepEqual(event.data.items[0].source, { file: "src/routes.js", line: 12 });
+});
+
 test("incomplete route and organization evidence emits an explicit event", () => {
   const [routeEvent] = buildNotificationEvents(
     report({

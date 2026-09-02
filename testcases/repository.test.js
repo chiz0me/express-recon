@@ -384,6 +384,29 @@ test("scan-repo runs a deterministic audit when auth configuration is supplied",
   });
 });
 
+test("scan-repo security gates require explicit audit configuration", () => {
+  withRepository((root) => {
+    const denied = spawnSync(
+      process.execPath,
+      [CLI, "scan-repo", "--repo", root, "--fail-on", "public"],
+      { encoding: "utf8" },
+    );
+    assert.equal(denied.status, 1);
+    assert.match(denied.stderr, /require an audit --config/);
+
+    const config = path.join(root, "recon.config.json");
+    fs.writeFileSync(config, JSON.stringify({ authMiddleware: { requireAuth: "authenticated" } }));
+    const gated = spawnSync(
+      process.execPath,
+      [CLI, "scan-repo", "--repo", root, "--config", config, "--fail-on", "public"],
+      { encoding: "utf8" },
+    );
+    assert.equal(gated.status, 2, gated.stderr);
+    assert.match(gated.stderr, /matched --fail-on public/);
+    assert.equal(JSON.parse(gated.stdout).kind, "repository-scan");
+  });
+});
+
 test("repository input rejects credentials, unsafe protocols, and option-like refs", () => {
   assert.throws(
     () => normalizeRepository("https://token@github.com/owner/repo.git"),

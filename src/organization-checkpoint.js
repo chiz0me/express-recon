@@ -11,7 +11,7 @@ const CHECKPOINT_KIND = "github-organization-scan-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = "1.0";
 // Bump this whenever previously completed repository evidence is no longer safe
 // to reuse. Add only audited pre-generation releases to the legacy allowlist.
-const CHECKPOINT_COMPATIBILITY_VERSION = "2";
+const CHECKPOINT_COMPATIBILITY_VERSION = "3";
 const LEGACY_COMPATIBLE_TOOL_VERSIONS = new Set(["0.6.0", "0.7.0", "0.7.1", "0.7.2"]);
 const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
@@ -105,12 +105,15 @@ function organizationCheckpointIdentity(organization, options) {
     maxRepositories: options.maxRepositories,
     includeArchived: options.includeArchived === true,
     includeForks: options.includeForks === true,
+    repositoryInclude: canonical(options.repositoryInclude || []),
+    repositoryExclude: canonical(options.repositoryExclude || []),
     configHash,
     scanHash,
   };
   return {
     compatibilityVersion: CHECKPOINT_COMPATIBILITY_VERSION,
     fingerprint: checkpointFingerprint(scope),
+    scopeFingerprint: sha256(JSON.stringify(canonical(scope))),
     scope,
   };
 }

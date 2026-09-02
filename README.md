@@ -32,7 +32,7 @@ npx --no-install express-recon --help
 The package installs two binaries: `express-recon` for CLI workflows and
 `express-recon-mcp` for the static local MCP server.
 
-Local `discover`, static `inventory`/`audit`, `docs`, and middleware review do
+Local `discover`, static `inventory`/`audit`, `docs`/`refresh`, and middleware review do
 not use the network, install target dependencies, or import target code. Package
 installation is the only network step in this local workflow.
 
@@ -70,7 +70,7 @@ still apply.
 Hidden directories stay excluded unless `--include-hidden` (or
 `scan.includeHidden: true`) is set. Use that opt-in when contracts intentionally
 live under a path such as `.cursor/`; `.git`, dependencies, and generated/build
-directories remain excluded. Because hidden trees can contain private tooling
+directories (including `.express-recon/`) remain excluded. Because hidden trees can contain private tooling
 or configuration, do not enable it indiscriminately in organization scans.
 
 `.express-reconignore` controls scan inputs; it is separate from `.gitignore`.
@@ -124,12 +124,13 @@ operational failure.
 | List routes without security judgment | `inventory`                           | No in static mode |                        No | route registry                        |
 | Classify auth and enforce policies    | `audit`                               | No in static mode |                        No | findings and summary                  |
 | Merge OpenAPI, JSDoc, and code        | `docs`                                |                No |                        No | spec plus drift report                |
+| Refresh and retain reviewed API docs  | `refresh`                             |                No |                        No | current spec plus enrichment overlay  |
 | Prepare human/AI middleware review    | `review-middleware`                   | No in static mode |                        No | bounded evidence bundle               |
 | Validate a review response            | `import-review`                       |                No |                        No | advisory config suggestions           |
 | Scan one Git ref                      | `scan-repo`                           |                No |        Yes, for Git fetch | provenance plus static results        |
 | Inventory a GitHub organization       | `scan-org`                            |                No | Yes, API plus Git fetches | per-repo reports plus aggregate index |
 | Browse saved reports                  | `render`                              |                No |                        No | offline HTML site                     |
-| Notify a trusted webhook              | `notify`                              |                No |       Yes, explicit POST | bounded signed change events          |
+| Notify a trusted webhook              | `notify`                              |                No |        Yes, explicit POST | bounded signed change events          |
 | Recover dynamic wiring                | runtime/hybrid `inventory` or `audit` |           **Yes** |    Target code may use it | runtime observations                  |
 
 The repository is the acquisition and discovery boundary. Each detected root is
@@ -228,6 +229,57 @@ or computation fail closed. Swagger 2 is detected but must be converted before
 merging. See the
 [OpenAPI guide](./docs/openapi.md).
 
+### Refresh and retain AI-enriched OpenAPI
+
+Use `refresh` for a recurring documentation workspace rather than feeding the
+last generated document back into `docs`:
+
+```bash
+npx --no-install express-recon refresh --src . \
+  --app-id 'app:src/app.js#app'
+```
+
+The default state is `.express-recon/api`. Every run performs a fresh static
+inventory and OpenAPI/JSDoc reconciliation, compares `routes.json` with the
+previous run, reapplies still-valid enrichment, and rebuilds
+`api-reference/index.html`. Pass `--no-render` for JSON-only automation.
+Removed generated routes disappear from the current `openapi.json`; their old
+enrichment stays dormant instead of making them look active.
+
+An AI or human edits only `summary`, `description`, `parameters`,
+`requestBody`, `responses`, and `components.schemas` in the workspace's
+`openapi.json`, then explicitly accepts those edits:
+
+```bash
+npx --no-install express-recon refresh --src . --accept-enrichment
+```
+
+Acceptance extracts those fields into `openapi.enrichment.json`; paths,
+methods, tags, `operationId`, security, and scanner trace metadata remain owned
+by static analysis. If a description depends on delegated code beyond the
+reported route/handler files, add repository-relative paths to that operation's
+`x-express-recon.enrichmentSources` before acceptance. Their hashes then join
+the operation evidence check.
+
+An ordinary refresh refuses to overwrite an edited `openapi.json`. Accepted
+content is reapplied only while the deterministic operation plus route,
+handler, and declared enrichment-source evidence still match. New or changed
+operations appear in `refresh-report.json` as unreviewed or stale, so an agent
+can inspect only that bounded set instead of spending tokens on the entire API.
+The prior app, base spec, explicit JSDoc selection, repo-local config, scan
+scope, and render choice are reused from the ownership manifest. Absolute
+config or ignore-file paths are never persisted and must be supplied again.
+Use explicit flags to make an intentional policy/scope/render change.
+`--overwrite` deliberately resets a valid tool-owned state, but neither refresh
+mode deletes a nonempty unowned directory.
+
+CI can gate `enrichment-stale`, `enrichment-unreviewed`, semantic
+`routes-added`/`routes-removed`/`routes-changed`, and OpenAPI
+`contract-changed`/`contract-breaking`/`contract-potentially-breaking` in
+addition to the `docs-*` statuses. The state is written
+before exit code `2`; its `routes.json` already contains the automatic delta and
+can be passed directly to `notify` for Slack or a signed webhook workflow.
+
 ### Advisory AI middleware classification
 
 ```bash
@@ -261,6 +313,9 @@ acquisition completeness, discovery, inventory/audit, and documentation status.
 Remote scans cannot enable runtime, hybrid, or auto-entry execution.
 Set `GH_TOKEN` (preferred) or `GITHUB_TOKEN` when the GitHub repository is
 private; authentication is scoped to `github.com` and is never persisted.
+CI can gate source/route completeness, unresolved documentation selection,
+documentation drift/conflicts, and—when an explicit audit config is supplied—
+public, unknown, or policy-violating routes with `scan-repo --fail-on ...`.
 
 Git fetch is time-bounded, but a hostile server can ignore partial-clone filters;
 the network packfile is not a hard byte-bounded security boundary. See
@@ -278,6 +333,10 @@ npx --no-install express-recon scan-org --org acme \
 npx --no-install express-recon scan-org --org acme \
   --concurrency 4 --max-repos 500 \
   --fail-on incomplete --resume
+
+# Refresh a completed inventory; unchanged upstream repositories are reused:
+npx --no-install express-recon scan-org --org acme \
+  --max-repos 500 --concurrency 2 --update
 
 # Optional machine-readable progress (JSON Lines on stderr):
 npx --no-install express-recon scan-org --org acme \
@@ -313,6 +372,10 @@ reports are written immediately under `repositories/<name>/`, while
 `organization-inventory.json` retains a compact aggregate index. This avoids
 holding every detailed route report in memory, streaming it through stdout, or
 leaving source snapshots on disk. Pass `--out` to override the location.
+Each repository is attempted twice by default after isolated cleanup; use
+`--repo-attempts 1` through `3` to tune that bound. Repeatable
+`--repo-include`/`--repo-exclude` globs filter by repository name or full name
+before any Git fetch and are recorded as inventory scope.
 
 Valid OpenAPI 3 and Swagger 2 documents are retained as bounded parsed-data
 artifacts under each repository's `specifications/` directory before that source
@@ -361,7 +424,8 @@ after a completed repository's artifacts and atomically replaced checkpoint are
 durable.
 
 If the selected or default output is nonempty and neither action is specified, a local interactive
-terminal asks whether to resume, overwrite, or cancel; cancel is the default.
+terminal asks whether to update, resume, overwrite, or cancel when those choices
+are available; cancel is the default.
 CI, agent, non-TTY, and JSON-progress runs never prompt and fail before GitHub
 access or file changes with an actionable `--resume`/`--overwrite` message.
 `--overwrite` starts a fresh checkpoint and replaces only colliding organization
@@ -384,9 +448,15 @@ The aggregate records config/scan/scope fingerprints, while each detailed route
 report records the resolved ignore-file evidence.
 
 Resume continues the recorded commits; it is not an incremental “scan latest”
-operation. Run with `--overwrite` to rebuild an existing output directory
-against current default branches. Raising a repository cap likewise requires a
-fresh run because it changes the inventory scope.
+operation. `--update` compares current GitHub push markers with a completed
+inventory, reuses integrity-checked artifacts only when repository identity,
+default branch, push marker, and scanner version match, and rescans everything
+else. It also uses the prior inventory as the automatic delta baseline. After a
+complete replacement inventory is durable, files named by the prior inventory
+but no longer referenced are pruned; unrelated files are preserved. Run with
+`--overwrite` to rebuild every selected repository. Raising a repository cap or
+changing filters changes scope and therefore requires a fresh output or
+overwrite.
 
 `--baseline <prior-output>` compares a new output directory with a separate
 organization output directory. Compatible repositories are compared from their
@@ -400,9 +470,13 @@ use. Added or removed repositories are reported as lifecycle changes rather than
 pretending every path in them was created or deleted. Both inventories must
 describe the same organization and scan scope, and incomplete or unavailable
 evidence makes comparison coverage explicitly incomplete.
-`--fail-on incomplete` also treats partial paths and opaque route providers as
-incomplete route-graph evidence. When a baseline is requested, it gates source,
-route-graph, and comparison coverage.
+Organization CI can gate `incomplete`, `failed`, `inconclusive`,
+`route-graph-incomplete`, `docs-needs-input`, the three `docs-*` statuses, and—
+with `--baseline` or `--update`—`routes-added`, `routes-removed`,
+`routes-changed`, or `auth-regression`. `public`, `unknown`, and `policy` gates
+require an explicit audit configuration. `incomplete` also treats partial paths
+and opaque route providers as incomplete route-graph evidence and gates
+comparison coverage when a baseline exists.
 If the current scan is interrupted or incomplete, a bounded
 `comparison-baseline/` containing only the prior aggregate and required
 `repo-scan.json` files is kept beside the checkpoint. A later `--resume`
@@ -523,7 +597,7 @@ preview the payload without sending it, and when a committed baseline is useful.
 
 For a receiver you control, use the
 [signed webhook example](./examples/github-actions/webhook-new-routes/README.md).
-The `notify` command emits bounded events for added/removed routes,
+The `notify` command emits bounded events for added/removed/semantically changed routes,
 authentication regressions, and incomplete scans from either a repository or
 organization comparison. Delivery uses HMAC-SHA256 Standard Webhooks headers,
 an exact committed hostname allowlist, HTTPS-only/no-redirect requests, current
@@ -534,7 +608,7 @@ variables; `--dry-run` needs neither a URL nor a secret.
 ```bash
 npx --no-install express-recon notify \
   --input current-results/routes.json \
-  --events routes.added,auth.regressed,scan.incomplete \
+  --events routes.added,routes.changed,auth.regressed,scan.incomplete \
   --dry-run
 ```
 
@@ -580,8 +654,9 @@ repositories or execute target code.
 
 Core tools include `discover_repository`, `inventory_routes`, `audit_routes`,
 `query_audit`, `finding_by_fingerprint`, `suggest_auth`, `openapi_spec`,
-`reconcile_openapi`, `review_middleware`, `import_middleware_review`,
-`validate_policies`, and `report_schema`.
+`reconcile_openapi`, token-bounded `refresh_openapi`/`query_refresh`,
+`review_middleware`, `import_middleware_review`, `validate_policies`, and
+`report_schema`.
 
 Useful requests are precise about the evidence boundary:
 

@@ -11,6 +11,7 @@ const KIND_PRIORITY = new Map([
   ["field-access", 10],
   ["response-literal", 20],
   ["typescript", 30],
+  ["jsdoc", 35],
   ["nestjs-dto", 40],
   ["class-validator", 50],
   ["nestjs-swagger", 52],

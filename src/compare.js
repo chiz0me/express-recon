@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const { fingerprintFinding } = require("./findings");
 
 const AUTH_RISK = { proven: 0, unknown: 1, public: 2 };
@@ -48,6 +49,106 @@ function routeSummary(route) {
     ...(route.authStatus ? { authStatus: route.authStatus } : {}),
     ...(route.accepted ? { accepted: true } : {}),
     source: route.source || null,
+  };
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonical(value[key])]),
+  );
+}
+
+function semanticHash(value) {
+  return `sha256:${crypto
+    .createHash("sha256")
+    .update(JSON.stringify(canonical(value)))
+    .digest("hex")}`;
+}
+
+function semanticIo(value) {
+  if (!value || typeof value !== "object") return value;
+  const output = structuredClone(value);
+  delete output.handlerSource;
+  if (output.documentation && typeof output.documentation === "object") {
+    delete output.documentation.source;
+  }
+  for (const schema of Object.values(output.schemas?.request || {})) {
+    if (schema && typeof schema === "object") delete schema.evidence;
+  }
+  for (const response of output.schemas?.responses || []) {
+    if (response?.contract && typeof response.contract === "object") {
+      delete response.contract.evidence;
+    }
+  }
+  for (const conflict of output.schemas?.conflicts || []) {
+    if (conflict && typeof conflict === "object") delete conflict.evidence;
+  }
+  return output;
+}
+
+function sortedStrings(values) {
+  return [...new Set((values || []).filter((value) => typeof value === "string"))].sort();
+}
+
+function routeContract(route) {
+  return canonical({
+    framework: route.framework || null,
+    middlewares: (route.middlewares || []).map((middleware) => ({
+      name: middleware.name || null,
+      kind: middleware.kind || null,
+      stage: middleware.stage || null,
+      inner: sortedStrings(middleware.inner),
+    })),
+    tags: sortedStrings(route.tags),
+    roles: sortedStrings(route.roles),
+    scopes: sortedStrings(route.scopes),
+    pathConfidence: route.pathConfidence || null,
+    io: semanticIo(route.io || null),
+  });
+}
+
+function contractDigest(contract) {
+  const io = contract.io || {};
+  return {
+    framework: contract.framework,
+    middleware: contract.middlewares.map((entry) => ({
+      name: entry.name,
+      kind: entry.kind,
+      stage: entry.stage,
+      inner: entry.inner,
+    })),
+    tags: contract.tags,
+    roles: contract.roles,
+    scopes: contract.scopes,
+    pathConfidence: contract.pathConfidence,
+    requestFingerprint: semanticHash({ request: io.request, schema: io.schemas?.request }),
+    responseFingerprint: semanticHash({
+      responses: io.responses,
+      statusCodes: io.statusCodes,
+      schemas: io.schemas?.responses,
+    }),
+    handlerResolved: io.handlerResolved ?? null,
+  };
+}
+
+function changedRoute(previous, current) {
+  const before = routeContract(previous);
+  const after = routeContract(current);
+  const changedFields = Object.keys(after)
+    .filter((field) => JSON.stringify(before[field]) !== JSON.stringify(after[field]))
+    .sort();
+  if (!changedFields.length) return null;
+  return {
+    ...routeSummary(current),
+    changedFields,
+    beforeFingerprint: semanticHash(before),
+    afterFingerprint: semanticHash(after),
+    before: contractDigest(before),
+    after: contractDigest(after),
   };
 }
 
@@ -131,6 +232,7 @@ function compareRoutes(baseline, current, applicationScoped) {
   const removedRoutes = [];
   const authRegressions = [];
   const authImprovements = [];
+  const changedRoutes = [];
 
   for (const [key, route] of after) {
     const previous = before.get(key);
@@ -138,6 +240,8 @@ function compareRoutes(baseline, current, applicationScoped) {
       addedRoutes.push(routeSummary(route));
       continue;
     }
+    const contractChange = changedRoute(previous, route);
+    if (contractChange) changedRoutes.push(contractChange);
     const fromRisk = AUTH_RISK[previous.authStatus];
     const toRisk = AUTH_RISK[route.authStatus];
     if (fromRisk === undefined || toRisk === undefined || fromRisk === toRisk) continue;
@@ -162,10 +266,16 @@ function compareRoutes(baseline, current, applicationScoped) {
     if (byApplication) return byApplication;
     return a.path === b.path ? a.method.localeCompare(b.method) : a.path.localeCompare(b.path);
   };
-  for (const list of [addedRoutes, removedRoutes, authRegressions, authImprovements]) {
+  for (const list of [
+    addedRoutes,
+    removedRoutes,
+    changedRoutes,
+    authRegressions,
+    authImprovements,
+  ]) {
     list.sort(byRoute);
   }
-  return { addedRoutes, removedRoutes, authRegressions, authImprovements };
+  return { addedRoutes, removedRoutes, changedRoutes, authRegressions, authImprovements };
 }
 
 function findingFingerprint(finding, applicationScoped) {
@@ -222,6 +332,7 @@ function compareReports(baseline, current) {
     summary: {
       addedRoutes: routes.addedRoutes.length,
       removedRoutes: routes.removedRoutes.length,
+      changedRoutes: routes.changedRoutes.length,
       authRegressions: routes.authRegressions.length,
       authImprovements: routes.authImprovements.length,
       newFindings: findings.newFindings.length,

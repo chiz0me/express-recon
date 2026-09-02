@@ -111,7 +111,7 @@ choice.
 Hidden directories are excluded by default. `--include-hidden` (or
 `scan.includeHidden: true`) deliberately widens local and remote materialization
 to paths such as `.cursor/`, while `.git`, dependencies, and generated/build
-outputs remain excluded. Hidden paths can contain private configuration or
+outputs such as `.express-recon/` remain excluded. Hidden paths can contain private configuration or
 tooling; enable this only when the scan goal requires those inputs.
 
 `render` treats report fields, repository metadata, and OpenAPI content as
@@ -136,6 +136,29 @@ names, routes, source locations, findings, and API contract content as its input
 Protect and retain it like the original JSON/YAML; rendering is not redaction.
 Rerendering uses a validated prior manifest to replace only renderer-owned files
 and refuses nonempty, unowned output directories or unsafe generated symlinks.
+
+`refresh` treats its entire output as a tool-owned state directory. It refuses
+filesystem roots, home/source/current directories, source-local destinations
+outside `.express-recon/<name>`, symbolic links, extra unowned entries, and
+damaged integrity-protected artifacts. Updates are built in a sibling temporary
+directory, validated, optionally rendered, and then swapped into place. Even
+`--overwrite` requires a valid ownership manifest; it does not authorize
+recursive deletion of an arbitrary nonempty directory.
+Manifest hashes detect edits relative to that manifest; they are not signatures
+and do not authenticate a cache controlled by an attacker. Apply the same trust
+boundary to restored refresh state as to the source revision being scanned.
+
+AI/human enrichment is accepted only with `--accept-enrichment` and only for
+operation summaries, descriptions, parameters, request bodies, responses, and
+component schemas. Paths, methods, security, tags, operation IDs, and scanner
+trace evidence remain immutable. The complete document must pass the bundled
+official OpenAPI 3.0/3.1 schema without network access; local `$ref` values must
+resolve and every operation must retain a response. Accepted content is
+reapplied only while its operation and all recorded source-dependency hashes
+match. Repository content remains untrusted during the review;
+`enrichmentSources` adds invalidation evidence and is not authority to execute
+the named files. Refresh manifests retain repository-local invocation paths but
+never persist external config/ignore-file locations, which callers must repeat.
 
 The packaged Swagger UI distribution declares Scarf installation analytics as a
 dependency. `package.json` sets `scarfSettings.enabled` to `false`, which disables

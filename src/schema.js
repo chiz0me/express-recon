@@ -86,6 +86,17 @@ const io = {
       },
     },
     statusCodes: { type: "array", items: { type: "integer" } },
+    documentation: {
+      type: "object",
+      additionalProperties: false,
+      description: "bounded prose taken from a leading handler JSDoc block",
+      properties: {
+        summary: { type: "string" },
+        description: { type: "string" },
+        source,
+      },
+      required: ["source"],
+    },
     schemas: {
       type: "object",
       additionalProperties: false,
@@ -400,6 +411,10 @@ const REPORT_SCHEMA = {
           properties: {
             addedRoutes: { type: "integer" },
             removedRoutes: { type: "integer" },
+            changedRoutes: {
+              type: "integer",
+              description: "Existing method/path entries whose semantic inventory contract changed",
+            },
             authRegressions: { type: "integer" },
             authImprovements: { type: "integer" },
             newFindings: { type: "integer" },
@@ -416,6 +431,11 @@ const REPORT_SCHEMA = {
         },
         addedRoutes: { type: "array", items: { type: "object" } },
         removedRoutes: { type: "array", items: { type: "object" } },
+        changedRoutes: {
+          type: "array",
+          description: "Source-line-stable middleware, grants, framework, path, or I/O changes",
+          items: { type: "object" },
+        },
         authRegressions: {
           type: "array",
           description: "Auth changes with route-level middleware/grant causes",

@@ -240,6 +240,118 @@ function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function nullSchema(value) {
+  return (
+    isObject(value) &&
+    (value.type === "null" ||
+      value.const === null ||
+      (value.enum?.length === 1 && value.enum[0] === null))
+  );
+}
+
+function openApi30Schema(value) {
+  if (!isObject(value)) return clone(value);
+  const output = clone(value);
+  const schemaMaps = ["properties"];
+  const schemaValues = ["additionalProperties", "items", "not"];
+  const schemaArrays = ["allOf", "oneOf"];
+  for (const field of schemaMaps) {
+    if (isObject(output[field])) {
+      output[field] = Object.fromEntries(
+        Object.entries(output[field]).map(([name, schema]) => [name, openApi30Schema(schema)]),
+      );
+    }
+  }
+  for (const field of schemaValues) {
+    if (isObject(output[field])) output[field] = openApi30Schema(output[field]);
+  }
+  for (const field of schemaArrays) {
+    if (Array.isArray(output[field])) output[field] = output[field].map(openApi30Schema);
+  }
+
+  if (Object.hasOwn(output, "const")) {
+    output.enum ||= [clone(output.const)];
+    delete output.const;
+  }
+  if (Array.isArray(output.type)) {
+    const types = [...new Set(output.type)];
+    const nonNull = types.filter((type) => type !== "null");
+    if (types.length !== nonNull.length) output.nullable = true;
+    if (nonNull.length === 1) output.type = nonNull[0];
+    else {
+      delete output.type;
+      if (nonNull.length > 1) {
+        output.oneOf = [...(output.oneOf || []), ...nonNull.map((type) => ({ type }))];
+      }
+    }
+  } else if (output.type === "null") {
+    delete output.type;
+    output.nullable = true;
+    output.enum ||= [null];
+  }
+
+  if (Array.isArray(value.anyOf)) {
+    const permitsNull = value.anyOf.some(nullSchema);
+    const alternatives = value.anyOf.filter((schema) => !nullSchema(schema)).map(openApi30Schema);
+    if (permitsNull && alternatives.length === 1) {
+      delete output.anyOf;
+      for (const [key, child] of Object.entries(alternatives[0])) {
+        if (!Object.hasOwn(output, key)) output[key] = child;
+      }
+      output.nullable = true;
+    } else if (alternatives.length === 0) {
+      delete output.anyOf;
+      if (permitsNull) {
+        output.nullable = true;
+        output.enum ||= [null];
+      }
+    } else {
+      output.anyOf = permitsNull
+        ? alternatives.map((schema) => ({ ...schema, nullable: true }))
+        : alternatives;
+    }
+  }
+
+  if (Array.isArray(value.prefixItems)) {
+    const items = value.prefixItems.map(openApi30Schema);
+    delete output.prefixItems;
+    output.items = items.length === 0 ? {} : items.length === 1 ? items[0] : { oneOf: items };
+    output.minItems ??= items.length;
+    output.maxItems ??= items.length;
+  }
+  return output;
+}
+
+function adaptGeneratedOpenApi30(document) {
+  const output = clone(document);
+  const schemas = output.components?.schemas;
+  if (isObject(schemas)) {
+    output.components.schemas = Object.fromEntries(
+      Object.entries(schemas).map(([name, schema]) => [name, openApi30Schema(schema)]),
+    );
+  }
+  for (const operation of operations(output).values()) {
+    for (const parameter of operation.parameters || []) {
+      if (isObject(parameter.schema)) parameter.schema = openApi30Schema(parameter.schema);
+      for (const media of Object.values(parameter.content || {})) {
+        if (isObject(media?.schema)) media.schema = openApi30Schema(media.schema);
+      }
+    }
+    for (const media of Object.values(operation.requestBody?.content || {})) {
+      if (isObject(media?.schema)) media.schema = openApi30Schema(media.schema);
+    }
+    for (const response of Object.values(operation.responses || {})) {
+      for (const media of Object.values(response?.content || {})) {
+        if (isObject(media?.schema)) media.schema = openApi30Schema(media.schema);
+      }
+      for (const header of Object.values(response?.headers || {})) {
+        if (isObject(header?.schema)) header.schema = openApi30Schema(header.schema);
+      }
+    }
+  }
+  return output;
+}
+
 function namedTagArray(value) {
   return (
     Array.isArray(value) &&
@@ -566,8 +678,11 @@ function reconcileDocumentation(report, opts = {}) {
     keptSource: specFile ? { file: relative(root, specFile) } : null,
     incomingSource: { files: jsdocFiles.map((file) => relative(root, file)) },
   });
+  const generatedForMerge = merged.openapi?.startsWith("3.0.")
+    ? adaptGeneratedOpenApi30(generated)
+    : generated;
   const generatedFields = [];
-  fillMissing(merged, generated, {
+  fillMissing(merged, generatedForMerge, {
     conflicts,
     recordConflicts: false,
     keptLayer: specFile ? "base" : "jsdoc",
@@ -579,7 +694,7 @@ function reconcileDocumentation(report, opts = {}) {
   if (!merged.info) merged.info = generated.info;
   if (!merged.paths) merged.paths = {};
 
-  const codeOps = operations(generated);
+  const codeOps = operations(generatedForMerge);
   const baseOps = operations(base);
   const jsdocOps = operations(jsdoc);
   const authoredKeys = new Set([...baseOps.keys(), ...jsdocOps.keys()]);

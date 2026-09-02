@@ -137,6 +137,9 @@ test("CLI rejects missing option values, unknown formats, and duplicate scalar o
     ["audit", "--src", FIXTURE, "--fail-on", "policy:"],
     ["audit", "--src", FIXTURE, "--fail-on", "new"],
     ["inventory", "--src", FIXTURE, "--ignore-file", "scope.ignore", "--no-ignore-file"],
+    ["refresh", "--accept-enrichment", "--overwrite"],
+    ["docs", "--src", FIXTURE, "--fail-on", "routes-added"],
+    ["refresh", "--src", FIXTURE, "--format", "json"],
   ]) {
     const result = spawnSync("node", [CLI, ...args], { encoding: "utf8" });
     assert.equal(result.status, 1);

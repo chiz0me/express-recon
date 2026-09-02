@@ -23,3 +23,29 @@ scanner version used by CI.
 
 The examples use static mode. Repository source is parsed as data; application
 code is not imported or executed.
+
+## Persistent OpenAPI state in CI
+
+For a recurring API-documentation job, persist the complete tool-owned
+`.express-recon/api` directory in a protected cache or artifact and run:
+
+```bash
+npx --no-install express-recon refresh --src . \
+  --config recon.config.yaml \
+  --fail-on enrichment-stale,routes-added,routes-changed,contract-breaking
+```
+
+The first run has no route or OpenAPI baseline. Later runs place route changes
+in `.express-recon/api/routes.json` and semantic contract changes in
+`.express-recon/api/openapi-delta.json`. The route report can be passed directly
+to the existing Slack or signed-webhook notification examples, including the
+`routes.changed` event. Upload
+`refresh-report.json`, `openapi.json`, and `api-reference/` for review. Keep the
+whole state together: its manifest intentionally rejects partial, extra, or
+unexpectedly modified files. Never restore a protected default-branch state from an
+untrusted pull-request cache, and never put webhook secrets in the refresh job.
+
+AI enrichment should be accepted in a separately authorized documentation job
+or developer workflow, not silently by CI. A normal refresh fails if
+`openapi.json` was edited without `--accept-enrichment`; this prevents a cache
+or workspace modification from being promoted automatically.

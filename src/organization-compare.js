@@ -51,6 +51,8 @@ function comparableScope(report) {
     maxRepositories: scope.maxRepositories,
     configHash: scope.configHash,
     scanHash: scope.scanHash,
+    repositoryInclude: Array.isArray(scope.repositoryInclude) ? scope.repositoryInclude : [],
+    repositoryExclude: Array.isArray(scope.repositoryExclude) ? scope.repositoryExclude : [],
   };
 }
 
@@ -64,7 +66,12 @@ function assertComparableOrganizations(baseline, current) {
   }
   const before = comparableScope(baseline);
   const after = comparableScope(current);
-  if (before.fingerprint && after.fingerprint && before.fingerprint !== after.fingerprint) {
+  if (
+    before.fingerprint &&
+    after.fingerprint &&
+    before.fingerprint !== after.fingerprint &&
+    baseline.toolVersion === current.toolVersion
+  ) {
     throw new Error(
       "baseline and current organization scopes differ; use the same repository cap, filters, configuration, and scan scope",
     );
@@ -75,8 +82,14 @@ function assertComparableOrganizations(baseline, current) {
     "maxRepositories",
     "configHash",
     "scanHash",
+    "repositoryInclude",
+    "repositoryExclude",
   ]) {
-    if (before[key] !== undefined && after[key] !== undefined && before[key] !== after[key]) {
+    if (
+      before[key] !== undefined &&
+      after[key] !== undefined &&
+      JSON.stringify(before[key]) !== JSON.stringify(after[key])
+    ) {
       throw new Error(
         "baseline and current organization scopes differ; use the same repository cap, filters, configuration, and scan scope",
       );
@@ -154,6 +167,9 @@ function compactRoute(route) {
     ...(route.authStatus ? { authStatus: boundedText(route.authStatus, 40) } : {}),
     ...(route.from ? { from: boundedText(route.from, 40) } : {}),
     ...(route.to ? { to: boundedText(route.to, 40) } : {}),
+    ...(Array.isArray(route.changedFields)
+      ? { changedFields: route.changedFields.map((field) => boundedText(field, 100)).slice(0, 20) }
+      : {}),
     source: source.file
       ? { file: boundedText(source.file, 1_000), ...(source.line ? { line: source.line } : {}) }
       : null,
@@ -164,6 +180,7 @@ function hasRouteChanges(summary) {
   return (
     summary.addedRoutes > 0 ||
     summary.removedRoutes > 0 ||
+    count(summary.changedRoutes) > 0 ||
     summary.authRegressions > 0 ||
     summary.authImprovements > 0 ||
     summary.newFindings > 0 ||
@@ -176,7 +193,13 @@ function comparisonDetails(delta, budget) {
   let retained = 0;
   // Preserve the most actionable evidence first when a large organization
   // exhausts its shared detail budget.
-  const ordered = ["authRegressions", "addedRoutes", "removedRoutes", "authImprovements"];
+  const ordered = [
+    "authRegressions",
+    "addedRoutes",
+    "removedRoutes",
+    "changedRoutes",
+    "authImprovements",
+  ];
   for (const name of ordered) {
     const available = Math.max(0, Math.min(MAX_REPOSITORY_DETAILS - retained, budget.remaining));
     const selected = delta[name].slice(0, available).map(compactRoute);
@@ -301,6 +324,7 @@ function incrementSummary(summary, entry) {
   for (const key of [
     "addedRoutes",
     "removedRoutes",
+    "changedRoutes",
     "authRegressions",
     "authImprovements",
     "newFindings",
@@ -341,6 +365,7 @@ function compareOrganizationReports(baseline, current, options = {}) {
     routeCountDelta: count(current.summary?.routes) - count(baseline.summary?.routes),
     addedRoutes: 0,
     removedRoutes: 0,
+    changedRoutes: 0,
     authRegressions: 0,
     authImprovements: 0,
     newFindings: 0,

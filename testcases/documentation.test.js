@@ -83,6 +83,8 @@ test("CLI help exposes onboarding, trust terminology, and exit codes", () => {
   assert.match(result.stdout, /Exit codes:/);
   assert.match(result.stdout, /--resume\s+resume a scan-org run/);
   assert.match(result.stdout, /--overwrite\s+start a fresh scan-org run/);
+  assert.match(result.stdout, /--accept-enrichment\s+refresh: capture supported edits/);
+  assert.match(result.stdout, /--no-render\s+refresh: update JSON artifacts/);
   assert.match(result.stdout, /--progress <mode>\s+scan-org progress on stderr/);
   assert.match(result.stdout, /--no-progress\s+alias for --progress none/);
   assert.match(result.stdout, /scan-org: compare with a prior organization output folder/);
@@ -105,6 +107,7 @@ test("CLI help exposes onboarding, trust terminology, and exit codes", () => {
     "discover",
     "inventory",
     "notify",
+    "refresh",
     "audit",
     "suggest-auth",
     "docs",
@@ -152,6 +155,23 @@ test("the bundled OpenAPI agent skill uses the offline renderer", () => {
   assert.match(skill, /api-reference\/index\.html/);
   assert.doesNotMatch(skill, /Rendering HTML is optional and outside express-recon/);
   assert.doesNotMatch(skill, /@redocly\/cli build-docs/);
+  assert.match(skill, /express-recon refresh --src/);
+  assert.match(skill, /--accept-enrichment/);
+  assert.match(skill, /unreviewedOperations/);
+});
+
+test("persistent OpenAPI refresh and token-efficient review are documented", () => {
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  const reference = fs.readFileSync(path.join(ROOT, "docs", "reference.md"), "utf8");
+  const openapi = fs.readFileSync(path.join(ROOT, "docs", "openapi.md"), "utf8");
+  const agentGuide = fs.readFileSync(path.join(ROOT, "docs", "ai-agent-guide.md"), "utf8");
+  for (const document of [readme, reference, openapi, agentGuide]) {
+    assert.match(document, /openapi\.enrichment\.json/);
+    assert.match(document, /enrichmentSources/);
+    assert.match(document, /stale/i);
+  }
+  assert.match(reference, /^### `refresh`$/m);
+  assert.match(agentGuide, /Review only\s+`enrichment\.unreviewedOperations`/);
 });
 
 test("render path defaults and organization API pages are documented", () => {

@@ -17,6 +17,7 @@ const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const DEFAULT_MAX_REPOSITORIES = 100;
 const DEFAULT_CONCURRENCY = 1;
+const DEFAULT_REPOSITORY_ATTEMPTS = 2;
 const MAX_REPOSITORIES = 10_000;
 const MAX_CONCURRENCY = 8;
 const MAX_API_PAGES = 1_000;
@@ -130,12 +131,19 @@ function canonicalRepository(value, organization) {
     !hasControlCharacters(value.default_branch)
       ? value.default_branch
       : null;
+  const pushedAt =
+    typeof value.pushed_at === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value.pushed_at) &&
+    !Number.isNaN(Date.parse(value.pushed_at))
+      ? value.pushed_at
+      : null;
   return {
     id: Number.isSafeInteger(value.id) ? value.id : null,
     name: value.name,
     fullName: value.full_name,
     url: `https://github.com/${value.full_name}`,
     defaultBranch,
+    pushedAt,
     private: value.private === true,
     visibility: ["public", "private", "internal"].includes(value.visibility)
       ? value.visibility
@@ -147,6 +155,40 @@ function canonicalRepository(value, organization) {
     fork: value.fork === true,
     empty: value.size === 0,
   };
+}
+
+function repositoryPatterns(value, label) {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > 100 ||
+    value.some(
+      (item) =>
+        typeof item !== "string" || !item.trim() || item.length > 300 || hasControlCharacters(item),
+    )
+  ) {
+    throw new Error(`${label} must contain up to 100 non-empty repository globs`);
+  }
+  return value.map((item) => item.trim().toLowerCase());
+}
+
+function repositoryGlob(pattern) {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index++) {
+    const character = pattern[index];
+    if (character === "*") source += ".*";
+    else if (character === "?") source += ".";
+    else source += /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character;
+  }
+  return new RegExp(`${source}$`, "i");
+}
+
+function repositorySelected(repository, include, exclude) {
+  const values = [repository.name, repository.fullName];
+  const included =
+    include.length === 0 || include.some((pattern) => values.some((value) => pattern.test(value)));
+  const excluded = exclude.some((pattern) => values.some((value) => pattern.test(value)));
+  return included && !excluded;
 }
 
 async function readApiPage(fetchImpl, organization, page, token, timeoutMs) {
@@ -588,12 +630,22 @@ async function runPool(entries, concurrency, task) {
   await Promise.all(runners);
 }
 
-function initialStatus(repository, opts) {
+function initialStatus(repository, opts, include, exclude) {
   if (repository.disabled) return "skipped-disabled";
   if (repository.empty) return "empty";
   if (repository.archived && !opts.includeArchived) return "skipped-archived";
   if (repository.fork && !opts.includeForks) return "skipped-fork";
+  if (!repositorySelected(repository, include, exclude)) return "skipped-filter";
   return "eligible";
+}
+
+function repositoryUnchanged(repository, previous) {
+  return (
+    repository.pushedAt !== null &&
+    previous.pushedAt === repository.pushedAt &&
+    previous.defaultBranch === repository.defaultBranch &&
+    (repository.id === null || previous.id === null || repository.id === previous.id)
+  );
 }
 
 function aggregateSummary(entries, auditMode) {
@@ -626,6 +678,7 @@ function aggregateSummary(entries, auditMode) {
     skippedArchived: count("skipped-archived"),
     skippedForks: count("skipped-fork"),
     skippedDisabled: count("skipped-disabled"),
+    skippedByFilter: count("skipped-filter"),
     emptyRepositories: count("empty"),
     skippedByLimit: count("skipped-limit"),
     applications: supported.reduce(
@@ -676,6 +729,12 @@ async function scanOrganization(organization, opts = {}) {
   if (opts.onProgress !== undefined && typeof opts.onProgress !== "function") {
     throw new Error("onProgress must be a function");
   }
+  if (opts.onReuse !== undefined && typeof opts.onReuse !== "function") {
+    throw new Error("onReuse must be a function");
+  }
+  if (opts.reuseUnchanged !== undefined && typeof opts.reuseUnchanged !== "boolean") {
+    throw new Error("reuseUnchanged must be a boolean");
+  }
   const maxRepositories = positiveInteger(
     opts.maxRepositories,
     DEFAULT_MAX_REPOSITORIES,
@@ -688,6 +747,16 @@ async function scanOrganization(organization, opts = {}) {
     "concurrency",
     MAX_CONCURRENCY,
   );
+  const repositoryAttempts = positiveInteger(
+    opts.repositoryAttempts,
+    DEFAULT_REPOSITORY_ATTEMPTS,
+    "repositoryAttempts",
+    3,
+  );
+  const repositoryInclude = repositoryPatterns(opts.repositoryInclude, "repositoryInclude");
+  const repositoryExclude = repositoryPatterns(opts.repositoryExclude, "repositoryExclude");
+  const includeMatchers = repositoryInclude.map(repositoryGlob);
+  const excludeMatchers = repositoryExclude.map(repositoryGlob);
   const resumeEntries = normalizeResumeEntries(opts.resumeEntries);
   if (resumeEntries.size && opts.retainScans !== false) {
     throw new Error("resumeEntries requires retainScans: false because checkpoints are compact");
@@ -711,6 +780,8 @@ async function scanOrganization(organization, opts = {}) {
     maxRepositories,
     includeArchived: opts.includeArchived,
     includeForks: opts.includeForks,
+    repositoryInclude,
+    repositoryExclude,
   });
   const progress = createProgressEmitter(login, opts.onProgress, token);
   progress.emit({ event: "enumeration-started" });
@@ -730,7 +801,7 @@ async function scanOrganization(organization, opts = {}) {
   }
   const entries = listing.repositories.map((repository) => ({
     repository,
-    status: initialStatus(repository, opts),
+    status: initialStatus(repository, opts, includeMatchers, excludeMatchers),
   }));
   const eligible = entries.filter((entry) => entry.status === "eligible");
   for (const entry of eligible.slice(maxRepositories)) entry.status = "skipped-limit";
@@ -742,14 +813,32 @@ async function scanOrganization(organization, opts = {}) {
       !resumed ||
       (resumed.repository.id !== null &&
         entry.repository.id !== null &&
-        resumed.repository.id !== entry.repository.id)
+        resumed.repository.id !== entry.repository.id) ||
+      (opts.reuseUnchanged === true && !repositoryUnchanged(entry.repository, resumed.repository))
     ) {
       pending.push(entry);
       continue;
     }
+    let reusedArtifacts = resumed.artifacts;
+    if (typeof opts.onReuse === "function") {
+      try {
+        reusedArtifacts =
+          (await opts.onReuse({ repository: entry.repository, previous: resumed })) ||
+          reusedArtifacts;
+      } catch (error) {
+        pending.push(entry);
+        progress.emit({
+          event: "repository-reuse-invalidated",
+          repository: entry.repository.fullName,
+          error: safeFailure(error, token),
+        });
+        continue;
+      }
+    }
     entry.status = resumed.status;
     entry.scanned = true;
-    entry.resumed = true;
+    if (opts.reuseUnchanged === true) entry.reused = true;
+    else entry.resumed = true;
     entry.express = resumed.express;
     if (resumed.frameworks) entry.frameworks = resumed.frameworks;
     entry.coverageComplete = true;
@@ -757,22 +846,24 @@ async function scanOrganization(organization, opts = {}) {
     entry.command = resumed.command;
     entry.auditSummary = resumed.auditSummary || null;
     entry.commit = resumed.commit || null;
-    if (resumed.artifacts) entry.artifacts = resumed.artifacts;
+    if (reusedArtifacts) entry.artifacts = reusedArtifacts;
   }
   const selectedIndexes = new Map(
     selected.map((entry, index) => [entry.repository.fullName.toLowerCase(), index + 1]),
   );
-  const resumed = selected.filter((entry) => entry.resumed === true);
+  const resumed = selected.filter((entry) => entry.resumed === true || entry.reused === true);
   progress.emit({
     event: "enumeration-completed",
     discovered: entries.length,
     eligible: eligible.length,
     selected: selected.length,
     pending: pending.length,
-    resumed: resumed.length,
+    resumed: resumed.filter((entry) => entry.resumed === true).length,
+    reused: resumed.filter((entry) => entry.reused === true).length,
     skipped: entries.length - selected.length,
     total: selected.length,
     concurrency,
+    repositoryAttempts,
     pagesFetched: listing.coverage.pagesFetched,
     enumerationComplete: listing.coverage.complete,
   });
@@ -791,7 +882,7 @@ async function scanOrganization(organization, opts = {}) {
   for (const entry of resumed) {
     processed++;
     progress.emit({
-      event: "repository-resumed",
+      event: entry.reused ? "repository-reused" : "repository-resumed",
       repository: entry.repository.fullName,
       index: selectedIndexes.get(entry.repository.fullName.toLowerCase()),
       status: entry.status,
@@ -812,6 +903,7 @@ async function scanOrganization(organization, opts = {}) {
     if (concurrency > 1) return scanInWorker(source, options, onProgress);
     return scanRepository(source, { ...options, onProgress });
   };
+  let retries = 0;
   await runPool(pending, concurrency, async (entry) => {
     const startedAt = Date.now();
     const repositoryName = entry.repository.fullName;
@@ -828,29 +920,52 @@ async function scanOrganization(organization, opts = {}) {
       concurrency,
     });
     try {
-      const scan = await scanner(
-        entry.repository.fullName,
-        {
-          ref: "HEAD",
-          config: opts.config || {},
-          scan: opts.scan || {},
-          githubToken: token || undefined,
-          retainSpecificationDocuments: typeof opts.onRepository === "function",
-        },
-        (event) => {
+      let scan;
+      for (let attempt = 1; attempt <= repositoryAttempts; attempt++) {
+        try {
+          scan = await scanner(
+            entry.repository.fullName,
+            {
+              ref: "HEAD",
+              config: opts.config || {},
+              scan: opts.scan || {},
+              githubToken: token || undefined,
+              retainSpecificationDocuments: typeof opts.onRepository === "function",
+            },
+            (event) => {
+              progress.emit({
+                event: "repository-phase",
+                repository: repositoryName,
+                index,
+                attempt,
+                phase: event?.phase || "scanning",
+                processed,
+                total: selected.length,
+                active,
+                failed,
+                concurrency,
+              });
+            },
+          );
+          break;
+        } catch (error) {
+          if (attempt === repositoryAttempts) throw error;
+          retries++;
           progress.emit({
-            event: "repository-phase",
+            event: "repository-retry",
             repository: repositoryName,
             index,
-            phase: event?.phase || "scanning",
+            attempt,
+            nextAttempt: attempt + 1,
+            error: safeFailure(error, token),
             processed,
             total: selected.length,
             active,
             failed,
             concurrency,
           });
-        },
-      );
+        }
+      }
       const frameworks = frameworkEvidence(scan);
       const evidence = expressEvidence(scan, frameworks);
       const coverageComplete = scanIsComplete(scan);
@@ -923,6 +1038,8 @@ async function scanOrganization(organization, opts = {}) {
   const auditMode = entries.some((entry) => entry.command === "audit");
   const summary = aggregateSummary(entries, auditMode);
   summary.repositoriesResumed = entries.filter((entry) => entry.resumed === true).length;
+  summary.repositoriesReused = entries.filter((entry) => entry.reused === true).length;
+  summary.repositoryRetries = retries;
   const incompleteRepositories = entries
     .filter(
       (entry) =>
@@ -950,10 +1067,13 @@ async function scanOrganization(organization, opts = {}) {
       includeForks: opts.includeForks === true,
       maxRepositories,
       concurrency,
+      repositoryAttempts,
+      repositoryInclude,
+      repositoryExclude,
       resumeEntriesProvided: resumeEntries.size,
       executionMode: "static",
       executedTargetCode: false,
-      fingerprint: identity.fingerprint,
+      fingerprint: identity.scopeFingerprint,
       configHash: identity.scope.configHash,
       scanHash: identity.scope.scanHash,
     },
@@ -983,6 +1103,8 @@ async function scanOrganization(organization, opts = {}) {
     inconclusiveRepositories: summary.inconclusiveRepositories,
     incompleteRouteGraphs: summary.incompleteRouteGraphs,
     repositoriesResumed: summary.repositoriesResumed,
+    repositoriesReused: summary.repositoriesReused,
+    repositoryRetries: summary.repositoryRetries,
     durationMs: Date.now() - progress.startedAt,
   });
   result.diagnostics = [...listing.diagnostics, ...progress.diagnostics];
@@ -992,6 +1114,7 @@ async function scanOrganization(organization, opts = {}) {
 module.exports = {
   DEFAULT_CONCURRENCY,
   DEFAULT_MAX_REPOSITORIES,
+  DEFAULT_REPOSITORY_ATTEMPTS,
   GITHUB_API_VERSION,
   listOrganizationRepositories,
   scanRepositoryInWorker: scanInWorker,

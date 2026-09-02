@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 const { audit } = require("../src/index");
-const { authStatusFor } = require("../src/classify");
+const { authStatusFor, validateAuthMiddleware } = require("../src/classify");
 const { reconcile } = require("../src/reconcile");
 
 const FIXTURE = path.join(__dirname, "fixtures", "accuracy-app");
@@ -71,6 +71,16 @@ test("a middleware named like an Object.prototype member is not proven", () => {
     {},
   );
   assert.equal(authStatus, "public");
+});
+
+test("structured role-only grants imply authentication and invalid maps fail closed", () => {
+  assert.throws(() => validateAuthMiddleware(null), /must be an object/);
+  const result = authStatusFor([{ name: "roleGuard", kind: "identifier", raw: "roleGuard" }], {
+    roleGuard: { roles: ["admin"] },
+  });
+  assert.equal(result.authStatus, "proven");
+  assert.deepEqual(result.tags, ["authenticated"]);
+  assert.deepEqual(result.roles, ["admin"]);
 });
 
 test("const/concat/template paths resolve to full-confidence routes", () => {

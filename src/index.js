@@ -10,6 +10,9 @@ const { reconcile } = require("./reconcile");
 const { evaluatePolicies, normalizePolicies } = require("./policies");
 const { compareReports } = require("./compare");
 const { compareOrganizationReports } = require("./organization-compare");
+const { compareOpenApiDocuments } = require("./openapi-compare");
+const { validateOpenApiDocument } = require("./openapi-validation");
+const { refreshDocumentation } = require("./refresh");
 const { loadConfig, validateConfig } = require("./config");
 const { discover } = require("./discover");
 const { reconcileDocumentation } = require("./docs");
@@ -42,11 +45,14 @@ const {
  *   - `buildReport(registry, meta)`  versioned machine-readable contract
  *   - `compareReports(before, after)` baseline delta + net-new findings
  *   - `compareOrganizationReports()`  bounded organization/repository route delta
+ *   - `compareOpenApiDocuments()`      semantic OpenAPI contract delta
  *   - `evaluatePolicies(registry, policies)` enforce configurable route controls
  *   - `instrument(express)`        capture mount paths before app boot (runtime)
  *   - `executeRuntime(appPath, boot)` boot + walk an app in a bounded worker
  *   - `loadConfig(path)`            load JS, JSON, or YAML configuration
  *   - `reconcileDocumentation()`    merge authored OpenAPI, JSDoc, and inventory
+ *   - `refreshDocumentation()`      atomically replace a persistent OpenAPI workspace
+ *   - `validateOpenApiDocument()`   validate OpenAPI 3.0/3.1 locally
  *   - `createMiddlewareReview()`    bounded provider-neutral review evidence
  *   - `scanRepository()`            acquire one Git ref and statically scan it
  *   - `scanOrganization()`          enumerate API-visible repos and scan a bounded pool
@@ -66,6 +72,8 @@ const {
  * @property {typeof inventory} inventory Build a route inventory without security judgment.
  * @property {typeof discover} discover Find packages, supported apps, entries, and API-document sources.
  * @property {typeof reconcileDocumentation} reconcileDocumentation Merge authored API docs with route evidence.
+ * @property {typeof refreshDocumentation} refreshDocumentation Replace a persistent OpenAPI workspace atomically.
+ * @property {typeof validateOpenApiDocument} validateOpenApiDocument Validate OpenAPI 3.0/3.1 locally.
  * @property {typeof createMiddlewareReview} createMiddlewareReview Create bounded advisory middleware evidence.
  * @property {typeof applyMiddlewareAssessments} applyMiddlewareAssessments Validate and bind advisory assessments.
  * @property {typeof validateAssessment} validateAssessment Validate the provider-neutral assessment schema.
@@ -88,6 +96,7 @@ const {
  * @property {typeof normalizePolicies} normalizePolicies Validate and normalize policy data.
  * @property {typeof compareReports} compareReports Compare two route reports.
  * @property {typeof compareOrganizationReports} compareOrganizationReports Compare two organization inventories.
+ * @property {typeof compareOpenApiDocuments} compareOpenApiDocuments Compare two OpenAPI contracts semantically.
  * @property {typeof instrument} instrument Observe Express runtime registrations.
  * @property {typeof executeRuntime} executeRuntime Boot trusted target code in a bounded child process.
  * @property {typeof loadConfig} loadConfig Load and validate configuration from disk.
@@ -101,6 +110,8 @@ module.exports = {
   inventory,
   discover,
   reconcileDocumentation,
+  refreshDocumentation,
+  validateOpenApiDocument,
   createMiddlewareReview,
   applyMiddlewareAssessments,
   validateAssessment,
@@ -123,6 +134,7 @@ module.exports = {
   normalizePolicies,
   compareReports,
   compareOrganizationReports,
+  compareOpenApiDocuments,
   instrument,
   executeRuntime,
   loadConfig,

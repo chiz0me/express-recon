@@ -56,7 +56,9 @@ function formatPlainProgress(event) {
       return (
         `${prefix} READY ${event.discovered ?? 0} discovered · ${event.selected ?? 0} selected` +
         ` · ${event.skipped ?? 0} skipped` +
-        ` · ${event.resumed ?? 0} resumed · ${event.pending ?? 0} pending` +
+        ` · ${event.resumed ?? 0} resumed` +
+        `${event.reused ? ` · ${event.reused} unchanged` : ""}` +
+        ` · ${event.pending ?? 0} pending` +
         ` · concurrency ${event.concurrency ?? 1}`
       );
     case "enumeration-page":
@@ -76,6 +78,18 @@ function formatPlainProgress(event) {
         `${prefix} RESUME ${repository} · ${cleanLine(event.status)}` +
         `${event.routeGraphComplete === false ? " · route graph incomplete" : ""}`
       );
+    case "repository-reused":
+      return (
+        `${prefix} REUSE ${repository} · unchanged upstream` +
+        `${event.routeGraphComplete === false ? " · route graph incomplete" : ""}`
+      );
+    case "repository-retry":
+      return (
+        `${prefix} RETRY ${repository} · attempt ${event.nextAttempt ?? "?"}` +
+        ` · ${cleanLine(event.error)}`
+      );
+    case "repository-reuse-invalidated":
+      return `${prefix} RESCAN ${repository} · saved artifact unavailable · ${cleanLine(event.error)}`;
     case "repository-started":
       return `${prefix} START ${repository} · active ${event.active ?? 1}/${event.concurrency ?? 1}`;
     case "repository-phase":
@@ -182,7 +196,8 @@ function createOrganizationProgressReporter(options = {}) {
     } else if (
       event.event === "repository-completed" ||
       event.event === "repository-failed" ||
-      event.event === "repository-resumed"
+      event.event === "repository-resumed" ||
+      event.event === "repository-reused"
     ) {
       state.active.delete(repositoryLabel(event));
     } else if (event.event === "scan-finished") {

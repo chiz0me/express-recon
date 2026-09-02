@@ -37,11 +37,69 @@ test("compareReports detects route changes and auth regressions", () => {
   assert.equal(delta.summary.addedRoutes, 1);
   assert.equal(delta.summary.removedRoutes, 1);
   assert.equal(delta.summary.authRegressions, 1);
+  assert.equal(delta.summary.changedRoutes, 0);
   assert.equal(delta.authRegressions[0].method, "GET");
   assert.equal(delta.authRegressions[0].path, "/secure");
   assert.equal(delta.authRegressions[0].from, "proven");
   assert.equal(delta.authRegressions[0].to, "public");
   assert.match(delta.authRegressions[0].explanation, /configuration|middleware/i);
+});
+
+test("compareReports reports semantic contract changes without source-line noise", () => {
+  const before = route("POST", "/things", "public", 1);
+  before.io = {
+    request: { body: ["name"], query: [], params: [], headers: [] },
+    schemas: { request: { body: { contract: { schema: { type: "object" } } } } },
+    handlerSource: { file: "routes.js", line: 1 },
+  };
+  const after = structuredClone(before);
+  after.source.line = 200;
+  after.io.handlerSource.line = 200;
+  assert.equal(compareReports(report([before]), report([after])).summary.changedRoutes, 0);
+
+  after.io.request.body.push("email");
+  const delta = compareReports(report([before]), report([after]));
+  assert.equal(delta.summary.changedRoutes, 1);
+  assert.deepEqual(delta.changedRoutes[0].changedFields, ["io"]);
+  assert.notEqual(
+    delta.changedRoutes[0].before.requestFingerprint,
+    delta.changedRoutes[0].after.requestFingerprint,
+  );
+
+  const schemaBefore = route("POST", "/sources", "public");
+  schemaBefore.io = {
+    request: { body: ["source"], query: [], params: [], headers: [] },
+    documentation: { summary: "Source contract", source: { file: "routes.js", line: 1 } },
+    schemas: {
+      request: {
+        body: {
+          schema: { type: "object", properties: { source: { type: "string" } } },
+          evidence: [{ kind: "typescript", confidence: "medium", source: { line: 1 } }],
+        },
+      },
+      responses: [],
+      conflicts: [
+        {
+          location: "request.body.source",
+          evidence: [{ kind: "typescript", source: { file: "routes.js", line: 1 } }],
+        },
+      ],
+    },
+    handlerSource: { file: "routes.js", line: 1 },
+  };
+  const schemaAfter = structuredClone(schemaBefore);
+  schemaAfter.io.documentation.source.line = 200;
+  schemaAfter.io.schemas.conflicts[0].evidence[0].source.line = 200;
+  assert.equal(
+    compareReports(report([schemaBefore]), report([schemaAfter])).summary.changedRoutes,
+    0,
+  );
+  schemaAfter.io.schemas.request.body.schema.properties.source.type = "number";
+  schemaAfter.io.schemas.request.body.evidence[0].source.line = 200;
+  assert.equal(
+    compareReports(report([schemaBefore]), report([schemaAfter])).summary.changedRoutes,
+    1,
+  );
 });
 
 test("schema 2 comparisons keep identical routes in separate applications independent", () => {

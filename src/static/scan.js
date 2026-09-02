@@ -10,7 +10,16 @@ const { createScopedResolver, EXTENSIONS } = require("./resolve");
 const { joinPath, scopedTo } = require("../walk");
 
 const SOURCE_EXT = new Set(EXTENSIONS);
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", "out"]);
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".express-recon",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  "out",
+]);
 const TEST_DIRS = new Set([
   "test",
   "tests",
@@ -389,6 +398,9 @@ function resolveImportedHandlers(files, resolve) {
             bindings: tf.valueBindings,
             consts: tf.consts,
             requires: tf.requires,
+            typeResolver: tf.typeResolver,
+            functionType: tf.handlerTypes.get(fn.start),
+            jsdoc: tf.handlerJSDoc.get(fn.start),
           });
           route.io.request = hints.request;
           route.io.responses = hints.responses;

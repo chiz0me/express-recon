@@ -42,7 +42,12 @@ function parse(code, filename, onError) {
         continue;
       }
       const program = result && result.program;
-      if (program && Array.isArray(program.body)) return program;
+      if (program && Array.isArray(program.body)) {
+        Object.defineProperty(program, "__comments", {
+          value: Array.isArray(result.comments) ? result.comments : [],
+        });
+        return program;
+      }
       firstFailure ||= "parser returned no usable program";
     } catch (err) {
       firstFailure ||= err && err.message ? err.message : String(err);

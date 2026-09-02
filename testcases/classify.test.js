@@ -56,3 +56,16 @@ test("per-verb gaps never combine identical paths from separate applications", (
   assert.equal(gaps.length, 1);
   assert.equal(gaps[0].applicationId, "app:admin#app");
 });
+
+test("inconsistent paths are sorted by application and path", () => {
+  const routes = [
+    { applicationId: "app:z", method: "GET", path: "/z", authStatus: "public" },
+    { applicationId: "app:z", method: "POST", path: "/z", authStatus: "proven" },
+    { applicationId: "app:a", method: "GET", path: "/a", authStatus: "proven" },
+    { applicationId: "app:a", method: "POST", path: "/a", authStatus: "public" },
+  ];
+  assert.deepEqual(
+    inconsistentPaths(routes).map((entry) => `${entry.applicationId} ${entry.path}`),
+    ["app:a /a", "app:z /z"],
+  );
+});

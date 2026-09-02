@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const { inventory } = require("../src");
+const { discover, inventory } = require("../src");
 const { listSourceFiles } = require("../src/static/scan");
 
 const DIR = path.join(__dirname, "fixtures", "scope-app");
@@ -36,6 +36,32 @@ test("the default .express-reconignore excludes paths and supports re-inclusion"
   assert.match(scope.ignoreFile.sha256, /^[a-f0-9]{64}$/);
   assert.match(scope.fingerprint, /^[a-f0-9]{64}$/);
   assert.ok(scope.builtIn.excludedDirectories.includes("node_modules"));
+  assert.ok(scope.builtIn.excludedDirectories.includes(".express-recon"));
+});
+
+test("generated .express-recon state stays excluded when other hidden inputs are enabled", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-generated-scope-"));
+  try {
+    for (const directory of [".cursor", ".express-recon/api"]) {
+      fs.mkdirSync(path.join(root, directory), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, directory, "openapi.json"),
+        JSON.stringify({ openapi: "3.1.0", info: { title: directory, version: "1" }, paths: {} }),
+      );
+      fs.writeFileSync(path.join(root, directory, "route.js"), "router.get('/hidden', handler);");
+    }
+    const files = listSourceFiles(root, { includeHidden: true }).map((file) =>
+      path.relative(root, file).split(path.sep).join("/"),
+    );
+    assert.deepEqual(files, [".cursor/route.js"]);
+    const result = discover(root, { includeHidden: true });
+    assert.deepEqual(
+      result.documentation.specifications.map((item) => item.path),
+      [".cursor/openapi.json"],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("scan.ignoreFile:false disables the default scope file", () => {

@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const { createServer } = require("../src/mcp/server");
@@ -37,13 +39,152 @@ test("exposes the harness tools", async () => {
     "inventory_routes",
     "openapi_spec",
     "query_audit",
+    "query_refresh",
     "reconcile_openapi",
+    "refresh_openapi",
     "report_schema",
     "review_middleware",
     "suggest_auth",
     "validate_policies",
   ]);
   await client.close();
+});
+
+test("refresh_openapi and query_refresh keep AI responses bounded", async () => {
+  const client = await connect();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-mcp-refresh-"));
+  const output = path.join(parent, "state");
+  try {
+    const refreshed = parse(
+      await client.callTool({
+        name: "refresh_openapi",
+        arguments: {
+          dir: DISCOVERY_FIXTURE,
+          output,
+          applicationId: "app:src/public-app.js#app",
+          render: false,
+        },
+      }),
+    );
+    assert.equal(refreshed.kind, "openapi-refresh-result");
+    assert.equal(refreshed.html, undefined);
+
+    const summary = parse(
+      await client.callTool({
+        name: "query_refresh",
+        arguments: { dir: DISCOVERY_FIXTURE, output, kind: "summary" },
+      }),
+    );
+    assert.equal(summary.kind, "refresh-summary");
+    assert.equal(summary.enrichment.unreviewedOperations, 3);
+
+    const operations = parse(
+      await client.callTool({
+        name: "query_refresh",
+        arguments: {
+          dir: DISCOVERY_FIXTURE,
+          output,
+          kind: "unreviewed_operations",
+          limit: 1,
+        },
+      }),
+    );
+    assert.equal(operations.items.length, 1);
+    assert.ok(operations.items[0].currentOperation["x-express-recon"]);
+    assert.ok(operations.nextCursor);
+  } finally {
+    await client.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("query_refresh bounds a single unusually large authored operation", async () => {
+  const client = await connect();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-mcp-bounded-refresh-"));
+  const repository = path.join(parent, "repo");
+  const output = path.join(parent, "state");
+  const largeExtensions = Object.fromEntries(
+    Array.from({ length: 40 }, (_, index) => [`x-large-${index}`, "x".repeat(1_000)]),
+  );
+  fs.mkdirSync(repository);
+  fs.writeFileSync(
+    path.join(repository, "package.json"),
+    JSON.stringify({ name: "bounded-refresh", dependencies: { express: "^5" } }),
+  );
+  fs.writeFileSync(
+    path.join(repository, "app.js"),
+    [
+      'const express = require("express");',
+      "const app = express();",
+      'app.get("/large", (_req, res) => res.json({ ok: true }));',
+      "module.exports = app;",
+    ].join("\n"),
+  );
+  fs.writeFileSync(
+    path.join(repository, "openapi.json"),
+    JSON.stringify({
+      openapi: "3.1.0",
+      info: { title: "Large operation", version: "1" },
+      paths: {
+        "/large": {
+          get: {
+            operationId: "getLarge",
+            summary: "Large operation",
+            description: "x".repeat(100_000),
+            responses: { 200: { description: "ok" } },
+            ...largeExtensions,
+          },
+        },
+      },
+    }),
+  );
+  try {
+    const refreshed = await client.callTool({
+      name: "refresh_openapi",
+      arguments: { dir: repository, output, render: false },
+    });
+    assert.equal(refreshed.isError, undefined, refreshed.content[0].text);
+    const response = await client.callTool({
+      name: "query_refresh",
+      arguments: { dir: repository, output, kind: "unreviewed_operations" },
+    });
+    assert.equal(response.isError, undefined, response.content[0].text);
+    assert.ok(response.content[0].text.length < 32_000);
+    const result = parse(response);
+    assert.equal(result.responseTruncated, true);
+    assert.equal(result.items[0].queryTruncated, true);
+    assert.equal(result.items[0].currentOperation.summary, "Large operation");
+    assert.equal(result.items[0].currentOperation.description, undefined);
+    assert.ok(result.items[0].currentOperationBytes > 100_000);
+
+    fs.appendFileSync(
+      path.join(repository, "app.js"),
+      '\napp.post("/added", (_req, res) => res.status(201).json({ created: true }));\n',
+    );
+    const updated = await client.callTool({
+      name: "refresh_openapi",
+      arguments: { dir: repository, output, render: false },
+    });
+    assert.equal(updated.isError, undefined, updated.content[0].text);
+    const changes = parse(
+      await client.callTool({
+        name: "query_refresh",
+        arguments: { dir: repository, output, kind: "contract_changes" },
+      }),
+    );
+    assert.ok(
+      changes.items.some(
+        (item) =>
+          item.kind === "operation" &&
+          item.change === "added" &&
+          item.operation === "POST /added" &&
+          item.severity === "informational",
+      ),
+    );
+  } finally {
+    await client.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("openapi_spec returns an OpenAPI 3.1 document", async () => {

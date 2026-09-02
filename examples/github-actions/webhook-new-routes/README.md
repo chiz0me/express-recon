@@ -30,13 +30,13 @@ reviewed default branch. See GitHub's
 
 ## Files to commit in the consuming repository
 
-| Destination                                   | Source or purpose                                                                 |
-| --------------------------------------------- | --------------------------------------------------------------------------------- |
-| `.github/workflows/express-recon.yml`         | Copy [`../express-recon-pr.yml`](../express-recon-pr.yml).                        |
+| Destination                                   | Source or purpose                                                                  |
+| --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `.github/workflows/express-recon.yml`         | Copy [`../express-recon-pr.yml`](../express-recon-pr.yml).                         |
 | `.github/workflows/express-recon-webhook.yml` | Copy [`express-recon-webhook.yml`](./express-recon-webhook.yml) and edit the host. |
-| `package.json` and `package-lock.json`        | Pin the `express-recon` development dependency used by both workflows.            |
-| `recon.config.json`                           | Reviewed, data-only authentication and policy configuration.                      |
-| `.express-reconignore`                        | Stable repository-specific scan scope.                                            |
+| `package.json` and `package-lock.json`        | Pin the `express-recon` development dependency used by both workflows.             |
+| `recon.config.json`                           | Reviewed, data-only authentication and policy configuration.                       |
+| `.express-reconignore`                        | Stable repository-specific scan scope.                                             |
 | `CODEOWNERS`                                  | Protect workflows, lockfile, config, and ignore policy.                            |
 
 The receiver can adapt [`verify-webhook.mjs`](./verify-webhook.mjs). Keep the

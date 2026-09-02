@@ -13,6 +13,7 @@ const {
 const { extractIoHints } = require("./io-hints");
 const { enrichExpressValidatorSchemas } = require("./validators");
 const { STATIC_FRAMEWORK_ADAPTERS } = require("./adapters");
+const { collectHandlerJSDoc, collectHandlerTypes, createTypeResolver } = require("./type-evidence");
 
 /** Map a character offset to a 1-based line number via precomputed line starts. */
 function lineCounter(code) {
@@ -377,12 +378,21 @@ function emptyIo() {
 }
 
 /** Mine a resolved handler function into an `io` object stamped with its source. */
-function mineFn(fn, lineAt, file, bindings, consts, requires) {
-  const hints = extractIoHints(fn, { file, lineAt, bindings, consts, requires });
+function mineFn(fn, ctx) {
+  const hints = extractIoHints(fn, {
+    file: ctx.filePath,
+    lineAt: ctx.lineAt,
+    bindings: ctx.valueBindings,
+    consts: ctx.consts,
+    requires: ctx.requires,
+    typeResolver: ctx.typeResolver,
+    functionType: ctx.handlerTypes.get(fn.start),
+    jsdoc: ctx.handlerJSDoc.get(fn.start),
+  });
   return {
     ...hints,
     handlerResolved: true,
-    handlerSource: { file, line: lineAt(fn.start) },
+    handlerSource: { file: ctx.filePath, line: ctx.lineAt(fn.start) },
   };
 }
 
@@ -402,15 +412,13 @@ function resolveHandler(handlerNode, ctx) {
   if (!node) return { io: emptyIo(), handlerRef: null, handlerName: null };
   if (FN_NODE.has(node.type))
     return {
-      io: mineFn(node, ctx.lineAt, ctx.filePath, ctx.valueBindings, ctx.consts, ctx.requires),
+      io: mineFn(node, ctx),
       handlerRef: null,
       handlerName: null,
     };
   if (node.type === "Identifier") {
     const fn = ctx.handlerIndex.get(node.name);
-    const io = fn
-      ? mineFn(fn, ctx.lineAt, ctx.filePath, ctx.valueBindings, ctx.consts, ctx.requires)
-      : emptyIo();
+    const io = fn ? mineFn(fn, ctx) : emptyIo();
     const ref = fn ? null : refFromExpr(node, ctx);
     return { io, handlerRef: ref && ref.t === "module" ? ref : null, handlerName: node.name };
   }
@@ -954,6 +962,9 @@ function analyzeFile(code, filePath, onParseError) {
   const valueBindings = collectValueBindings(program);
   const lineAt = lineCounter(code);
   const handlerIndex = collectHandlerIndex(program);
+  const handlerJSDoc = collectHandlerJSDoc(program, code);
+  const handlerTypes = collectHandlerTypes(program);
+  const typeResolver = createTypeResolver(program);
   const ctx = {
     requires,
     routers,
@@ -962,6 +973,9 @@ function analyzeFile(code, filePath, onParseError) {
     valueBindings,
     lineAt,
     handlerIndex,
+    handlerJSDoc,
+    handlerTypes,
+    typeResolver,
     filePath,
     attachIo,
   };
@@ -980,6 +994,9 @@ function analyzeFile(code, filePath, onParseError) {
     opaqueUses: [],
     globalMwByHost: new Map(),
     handlerIndex,
+    handlerJSDoc,
+    handlerTypes,
+    typeResolver,
     valueBindings,
     consts,
     lineAt,

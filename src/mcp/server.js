@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
+const fs = require("node:fs");
 const path = require("node:path");
 const { z } = require("zod");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
@@ -18,11 +19,16 @@ const {
   reconcileDocumentation,
   createMiddlewareReview,
   applyMiddlewareAssessments,
+  refreshDocumentation,
 } = require("../index");
+const { defaultRefreshOutput, readRefreshDefaults } = require("../refresh");
 const { pathPattern, todayUtc } = require("../policies");
 const { loadPackageInfo } = require("../static/resolve");
 const pkg = require("../../package.json");
 
+const MAX_REFRESH_QUERY_ITEM_BYTES = 16 * 1024;
+const MAX_REFRESH_QUERY_PAGE_BYTES = 128 * 1024;
+const MAX_REFRESH_QUERY_NODES = 250;
 const stringList = z.array(z.string());
 const matchInput = z.object({
   applicationIds: stringList.optional(),
@@ -224,6 +230,360 @@ function errorResult(err) {
 
 function resolveDir(dir) {
   return path.isAbsolute(dir) ? dir : path.resolve(process.cwd(), dir);
+}
+
+function resolveWithinDir(root, value) {
+  return path.isAbsolute(value) ? value : path.resolve(root, value);
+}
+
+function containedBy(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === "" ||
+    (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+  );
+}
+
+function refreshInvocation(root, args) {
+  let ignoreFile = args.ignoreFile ?? null;
+  let externalIgnoreFile = false;
+  if (typeof ignoreFile === "string") {
+    const resolved = resolveWithinDir(root, ignoreFile);
+    if (containedBy(root, resolved)) {
+      ignoreFile = path.relative(root, resolved).split(path.sep).join("/");
+    } else {
+      ignoreFile = null;
+      externalIgnoreFile = true;
+    }
+  }
+  return {
+    config: null,
+    externalConfig: false,
+    include: [...(args.include || [])],
+    exclude: [...(args.exclude || [])],
+    ignoreFile,
+    externalIgnoreFile,
+    includeTests: args.includeTests === true,
+    includeHidden: args.includeHidden === true,
+    render: args.render !== false,
+  };
+}
+
+function inheritedRefreshArgs(root, output, args) {
+  const defaults = readRefreshDefaults(root, output, {
+    acceptEnrichment: args.acceptEnrichment,
+  });
+  const invocation = defaults.invocation;
+  const effective = { ...args };
+  if (effective.applicationId === undefined) effective.applicationId = defaults.applicationId;
+  if (effective.spec === undefined) effective.spec = defaults.spec;
+  if (effective.jsdoc === undefined) effective.jsdoc = defaults.jsdoc;
+  if (invocation) {
+    if (effective.include === undefined) effective.include = invocation.include;
+    if (effective.exclude === undefined) effective.exclude = invocation.exclude;
+    if (effective.ignoreFile === undefined) {
+      if (invocation.externalIgnoreFile) {
+        throw new Error("Prior refresh used an external ignore file; provide ignoreFile again");
+      }
+      effective.ignoreFile = invocation.ignoreFile ?? undefined;
+    }
+    if (effective.includeTests === undefined) effective.includeTests = invocation.includeTests;
+    if (effective.includeHidden === undefined) effective.includeHidden = invocation.includeHidden;
+    if (effective.render === undefined) effective.render = invocation.render;
+  }
+  return { defaults, effective };
+}
+
+function refreshOpenApi(args) {
+  const root = fs.realpathSync(resolveDir(args.dir));
+  const output = args.output ? resolveWithinDir(root, args.output) : defaultRefreshOutput(root);
+  const { defaults, effective } = inheritedRefreshArgs(root, output, args);
+  const options = scanOptions(effective);
+  const report = buildReport(inventory({ mode: "static", src: root, ...options }), {
+    command: "inventory",
+    mode: "static",
+    target: loadPackageInfo(root),
+    sourceRoot: root,
+  });
+  const discovery = discover(root, options);
+  const documentation = reconcileDocumentation(report, {
+    root,
+    scan: options,
+    discovery,
+    applicationId: effective.applicationId,
+    spec: effective.spec,
+    jsdoc: effective.jsdoc,
+  });
+  return refreshDocumentation({
+    root,
+    output,
+    routes: report,
+    discovery,
+    documentation,
+    explicitJSDoc: args.jsdoc !== undefined || defaults.jsdoc !== undefined,
+    configurationExplicit: false,
+    acceptEnrichment: args.acceptEnrichment,
+    reviewOperations: args.reviewOperations,
+    clearOperations: args.clearOperations,
+    clearSchemas: args.clearSchemas,
+    render: effective.render,
+    invocation: refreshInvocation(root, effective),
+  });
+}
+
+function readRefreshJson(file) {
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size <= 0 || stat.size > 32 * 1024 * 1024) {
+    throw new Error(`Refresh artifact must be a regular JSON file up to 32 MiB: ${file}`);
+  }
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function generatedOperation(document, key) {
+  const separator = key.indexOf(" ");
+  if (separator < 1) return null;
+  const method = key.slice(0, separator).toLowerCase();
+  const pathName = key.slice(separator + 1);
+  return document.paths?.[pathName]?.[method] || null;
+}
+
+function boundedRefreshText(value, maximum) {
+  const text = String(value ?? "");
+  return text.length > maximum ? `${text.slice(0, maximum - 1)}…` : text;
+}
+
+function boundedRefreshValue(value, state, depth = 0) {
+  if (typeof value === "string") {
+    if (value.length > 500) state.truncated = true;
+    return boundedRefreshText(value, 500);
+  }
+  if (value === null || ["boolean", "number"].includes(typeof value)) return value;
+  if (depth >= 10 || state.nodes >= MAX_REFRESH_QUERY_NODES) {
+    state.truncated = true;
+    return "[truncated]";
+  }
+  state.nodes++;
+  if (Array.isArray(value)) {
+    if (value.length > 25) state.truncated = true;
+    return value.slice(0, 25).map((item) => boundedRefreshValue(item, state, depth + 1));
+  }
+  if (!value || typeof value !== "object") return null;
+  const output = {};
+  const entries = Object.entries(value);
+  if (entries.length > 40) state.truncated = true;
+  for (const [key, child] of entries.slice(0, 40)) {
+    Object.defineProperty(output, key, {
+      value: boundedRefreshValue(child, state, depth + 1),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return output;
+}
+
+function refreshQueryOutline(item) {
+  const operation = item.currentOperation;
+  const metadata = operation?.["x-express-recon"] || {};
+  return {
+    ...(item.severity ? { severity: boundedRefreshText(item.severity, 40) } : {}),
+    ...(item.kind ? { kind: boundedRefreshText(item.kind, 100) } : {}),
+    ...(item.change ? { change: boundedRefreshText(item.change, 40) } : {}),
+    ...(item.operation ? { operation: boundedRefreshText(item.operation, 2_000) } : {}),
+    ...(item.method ? { method: boundedRefreshText(item.method, 40) } : {}),
+    ...(item.path ? { path: boundedRefreshText(item.path, 2_000) } : {}),
+    ...(item.schema ? { schema: boundedRefreshText(item.schema, 300) } : {}),
+    ...(item.status ? { status: boundedRefreshText(item.status, 40) } : {}),
+    ...(item.reason ? { reason: boundedRefreshText(item.reason, 500) } : {}),
+    ...(Array.isArray(item.fields)
+      ? { fields: item.fields.slice(0, 20).map((field) => boundedRefreshText(field, 100)) }
+      : {}),
+    ...(Array.isArray(item.changedFields)
+      ? {
+          changedFields: item.changedFields
+            .slice(0, 20)
+            .map((field) => boundedRefreshText(field, 100)),
+        }
+      : {}),
+    currentOperation: operation
+      ? {
+          ...(operation.operationId
+            ? { operationId: boundedRefreshText(operation.operationId, 300) }
+            : {}),
+          ...(operation.summary ? { summary: boundedRefreshText(operation.summary, 500) } : {}),
+          parameterCount: Array.isArray(operation.parameters) ? operation.parameters.length : 0,
+          responseStatuses: Object.keys(operation.responses || {})
+            .slice(0, 50)
+            .map((status) => boundedRefreshText(status, 100)),
+          "x-express-recon": {
+            applicationId:
+              metadata.applicationId == null
+                ? null
+                : boundedRefreshText(metadata.applicationId, 500),
+            framework:
+              metadata.framework == null ? null : boundedRefreshText(metadata.framework, 100),
+            source: boundedRefreshValue(metadata.source ?? null, { nodes: 0, truncated: false }),
+            handlerResolved: metadata.handlerResolved ?? null,
+            handlerName:
+              metadata.handlerName == null ? null : boundedRefreshText(metadata.handlerName, 500),
+            handlerSource: boundedRefreshValue(metadata.handlerSource ?? null, {
+              nodes: 0,
+              truncated: false,
+            }),
+          },
+        }
+      : null,
+    currentOperationBytes: operation ? Buffer.byteLength(JSON.stringify(operation)) : 0,
+    queryTruncated: true,
+  };
+}
+
+function compactRefreshQueryItem(item, forceOutline = false) {
+  if (forceOutline) return refreshQueryOutline(item);
+  const state = { nodes: 0, truncated: false };
+  const compact = boundedRefreshValue(item, state);
+  const bytes = Buffer.byteLength(JSON.stringify(compact));
+  if (bytes > MAX_REFRESH_QUERY_ITEM_BYTES) return refreshQueryOutline(item);
+  return state.truncated ? { ...compact, queryTruncated: true } : compact;
+}
+
+function compactRefreshQueryPage(items) {
+  const output = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const item of items) {
+    let compact = compactRefreshQueryItem(item);
+    let size = Buffer.byteLength(JSON.stringify(compact));
+    if (bytes + size > MAX_REFRESH_QUERY_PAGE_BYTES) {
+      compact = compactRefreshQueryItem(item, true);
+      size = Buffer.byteLength(JSON.stringify(compact));
+      truncated = true;
+    }
+    if (bytes + size > MAX_REFRESH_QUERY_PAGE_BYTES) {
+      compact = {
+        ...(item.operation
+          ? { operation: boundedRefreshText(item.operation, 500) }
+          : item.schema
+            ? { schema: boundedRefreshText(item.schema, 300) }
+            : {}),
+        currentOperation: null,
+        queryTruncated: true,
+      };
+      size = Buffer.byteLength(JSON.stringify(compact));
+    }
+    if (compact.queryTruncated) truncated = true;
+    bytes += size;
+    output.push(compact);
+  }
+  return { items: output, truncated };
+}
+
+function openApiContractChangeItems(delta) {
+  if (delta.baselineAvailable !== true) return [];
+  const severityRank = { breaking: 0, review: 1, informational: 2 };
+  const detailsFor = (collection, key, value) => collection.filter((item) => item[key] === value);
+  const operations = [
+    ...delta.removedOperations.map((operation) => ({ change: "removed", ...operation })),
+    ...delta.changedOperations.map((operation) => ({ change: "changed", ...operation })),
+    ...delta.addedOperations.map((operation) => ({ change: "added", ...operation })),
+  ].map((item) => {
+    const operation = `${item.method} ${item.path}`;
+    const breakingChanges = detailsFor(delta.breakingChanges, "operation", operation);
+    const reviewChanges = detailsFor(delta.potentiallyBreakingChanges, "operation", operation);
+    return {
+      kind: "operation",
+      change: item.change,
+      severity: breakingChanges.length
+        ? "breaking"
+        : reviewChanges.length
+          ? "review"
+          : "informational",
+      operation,
+      method: item.method,
+      path: item.path,
+      ...(item.changedFields ? { changedFields: item.changedFields } : {}),
+      ...(item.beforeFingerprint ? { beforeFingerprint: item.beforeFingerprint } : {}),
+      ...(item.afterFingerprint ? { afterFingerprint: item.afterFingerprint } : {}),
+      ...(breakingChanges.length ? { breakingChanges } : {}),
+      ...(reviewChanges.length ? { reviewChanges } : {}),
+    };
+  });
+  const schemas = [
+    ...delta.removedSchemas.map((name) => ({ change: "removed", name })),
+    ...delta.changedSchemas.map((schema) => ({ change: "changed", ...schema })),
+    ...delta.addedSchemas.map((name) => ({ change: "added", name })),
+  ].map((item) => {
+    const breakingChanges = detailsFor(delta.breakingChanges, "schema", item.name);
+    const reviewChanges = detailsFor(delta.potentiallyBreakingChanges, "schema", item.name);
+    return {
+      kind: "schema",
+      change: item.change,
+      severity: breakingChanges.length
+        ? "breaking"
+        : reviewChanges.length
+          ? "review"
+          : "informational",
+      schema: item.name,
+      ...(item.beforeFingerprint ? { beforeFingerprint: item.beforeFingerprint } : {}),
+      ...(item.afterFingerprint ? { afterFingerprint: item.afterFingerprint } : {}),
+      ...(breakingChanges.length ? { breakingChanges } : {}),
+      ...(reviewChanges.length ? { reviewChanges } : {}),
+    };
+  });
+  return [...operations, ...schemas].sort((left, right) => {
+    const risk = severityRank[left.severity] - severityRank[right.severity];
+    if (risk) return risk;
+    const kind = left.kind.localeCompare(right.kind);
+    if (kind) return kind;
+    return (left.operation || left.schema).localeCompare(right.operation || right.schema);
+  });
+}
+
+function queryRefresh(args) {
+  const root = fs.realpathSync(resolveDir(args.dir));
+  const output = args.output ? resolveWithinDir(root, args.output) : defaultRefreshOutput(root);
+  readRefreshDefaults(root, output);
+  const report = readRefreshJson(path.join(output, "refresh-report.json"));
+  if (args.kind === "summary") {
+    return {
+      kind: "refresh-summary",
+      applicationId: report.applicationId,
+      routeChanges: report.routeChanges,
+      openapiChanges: report.openapiChanges,
+      openapiBaselineAvailable: report.openapiBaselineAvailable,
+      enrichment: report.enrichment.summary,
+      artifacts: report.artifacts,
+    };
+  }
+  let items;
+  if (args.kind === "contract_changes") {
+    const delta = readRefreshJson(path.join(output, "openapi-delta.json"));
+    items = openApiContractChangeItems(delta);
+  } else {
+    const generated = readRefreshJson(path.join(output, "openapi.generated.json"));
+    const values =
+      args.kind === "unreviewed_operations"
+        ? report.enrichment.unreviewedOperations.map((operation) => ({ operation }))
+        : args.kind === "stale_operations"
+          ? report.enrichment.staleOperationDetails
+          : report.enrichment.removedOperations.map((operation) => ({ operation }));
+    items = values.map((item) => ({
+      ...item,
+      currentOperation: generatedOperation(generated, item.operation),
+    }));
+  }
+  const offset = decodeCursor(args.cursor, args.kind);
+  const limit = args.limit || 10;
+  const selected = items.slice(offset, offset + limit);
+  const page = compactRefreshQueryPage(selected);
+  const nextOffset = offset + selected.length;
+  return {
+    kind: args.kind,
+    total: items.length,
+    items: page.items,
+    responseTruncated: page.truncated,
+    nextCursor: nextOffset < items.length ? encodeCursor(args.kind, nextOffset) : null,
+  };
 }
 
 function staticAudit(args) {
@@ -567,6 +927,93 @@ function registerTools(server) {
             jsdoc: args.jsdoc,
           }),
         );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "refresh_openapi",
+    {
+      title: "Refresh a persistent OpenAPI workspace",
+      description:
+        "Statically rebuild a tool-owned OpenAPI workspace, retain only evidence-compatible reviewed enrichment, compute route/contract changes, and optionally render local HTML. Returns compact artifact paths and counts instead of the full contract.",
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repository directory"),
+        output: z
+          .string()
+          .optional()
+          .describe("Absolute or repo-relative state directory; defaults to .express-recon/api"),
+        applicationId: z.string().optional().describe("Stable discovered application id"),
+        spec: z.string().optional().describe("OpenAPI JSON/YAML path relative to dir"),
+        jsdoc: z.array(z.string()).optional().describe("JSDoc source paths relative to dir"),
+        acceptEnrichment: z
+          .boolean()
+          .optional()
+          .describe("Explicitly capture allowed edits already made to openapi.json"),
+        reviewOperations: z
+          .array(z.string())
+          .max(500)
+          .optional()
+          .describe("Current METHOD /path entries to record as reviewed during acceptance"),
+        clearOperations: z
+          .array(z.string())
+          .max(500)
+          .optional()
+          .describe("Saved METHOD /path enrichment entries to remove during acceptance"),
+        clearSchemas: z
+          .array(z.string())
+          .max(500)
+          .optional()
+          .describe("Saved component schema enrichment entries to remove during acceptance"),
+        render: z.boolean().optional().describe("Build local HTML; saved choice defaults to true"),
+        ...scanInput,
+      },
+    },
+    async (args) => {
+      try {
+        if (
+          (args.reviewOperations?.length ||
+            args.clearOperations?.length ||
+            args.clearSchemas?.length) &&
+          !args.acceptEnrichment
+        ) {
+          throw new Error("Review and clear actions require acceptEnrichment: true");
+        }
+        return jsonResult(refreshOpenApi(args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "query_refresh",
+    {
+      title: "Query persistent OpenAPI review work",
+      description:
+        "Read a validated refresh workspace without rescanning. Returns a compact summary or cursor-paginated unreviewed, stale, removed, or semantic contract-change items with bounded operation projections.",
+      inputSchema: {
+        dir: z.string().describe("Absolute or cwd-relative repository directory"),
+        output: z
+          .string()
+          .optional()
+          .describe("Absolute or repo-relative state directory; defaults to .express-recon/api"),
+        kind: z.enum([
+          "summary",
+          "unreviewed_operations",
+          "stale_operations",
+          "removed_operations",
+          "contract_changes",
+        ]),
+        limit: z.number().int().min(1).max(50).optional(),
+        cursor: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        return jsonResult(queryRefresh(args));
       } catch (err) {
         return errorResult(err);
       }
