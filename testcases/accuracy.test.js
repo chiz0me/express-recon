@@ -376,3 +376,21 @@ test("test files are excluded from scans by default", () => {
   const withTests = audit({ mode: "static", src: REGISTRAR, includeTests: true }, CONFIG);
   assert.ok(withTests.routes.some((r) => r.path === "/phantom"));
 });
+
+test("hybrid keeps multiple unsourced runtime routes separate when exact match is ambiguous", () => {
+  const item = staticRoute("/health", { pathConfidence: "full" });
+  const runtime1 = runtimeRoute("/health");
+  const runtime2 = runtimeRoute("/health");
+  runtime1.applicationId = "runtime:default";
+  runtime2.applicationId = "runtime:default";
+
+  const { routes } = reconcile(
+    { routes: [item], globalMiddleware: [] },
+    { routes: [runtime1, runtime2], globalMiddleware: [] },
+  );
+  assert.deepEqual(routes.map((route) => route.presence).sort(), [
+    "runtime-only",
+    "runtime-only",
+    "static-only",
+  ]);
+});

@@ -78,3 +78,106 @@ test("never leaks the transient handlerRef into the report", () => {
   const routes = inventory({ mode: "static", src: FIXTURE }).routes;
   for (const r of routes) assert.equal(r.__handlerRef, undefined);
 });
+
+test("mines request field names from destructured handler parameters", () => {
+  const { parse } = require("../src/static/ast");
+  const { extractIoHints } = require("../src/static/io-hints");
+  const code = `
+    const handler1 = ({ body, query }, res) => {
+      res.json({ title: body.title, q: query.search });
+    };
+    const handler2 = ({ body: { title, count }, params }, res) => {
+      const { id } = params;
+      res.json({ id, title, count });
+    };
+    const handler3 = (req, res) => {
+      const { body } = req;
+      res.json({ title: body.title });
+    };
+  `;
+  const ast = parse(code, "/virtual/test.js");
+  const fn1 = ast.body[0].declarations[0].init;
+  const io1 = extractIoHints(fn1);
+  assert.deepEqual(io1.request.body, ["title"]);
+  assert.deepEqual(io1.request.query, ["search"]);
+
+  const fn2 = ast.body[1].declarations[0].init;
+  const io2 = extractIoHints(fn2);
+  assert.deepEqual(io2.request.body, ["count", "title"]);
+  assert.deepEqual(io2.request.params, ["id"]);
+
+  const fn3 = ast.body[2].declarations[0].init;
+  const io3 = extractIoHints(fn3);
+  assert.deepEqual(io3.request.body, ["title"]);
+});
+
+test("shadowed request and body variables in inner functions or blocks do not leak into request inputs", () => {
+  const { parse } = require("../src/static/ast");
+  const { extractIoHints } = require("../src/static/io-hints");
+  const code = `
+    const handler = (req, res) => {
+      const { body } = req;
+      const realField = body.realField;
+
+      // Inner helper with parameter named body
+      function helper(body) {
+        return body.fakeField;
+      }
+
+      // Inner block with variable named body
+      if (realField) {
+        const body = { innerField: true };
+        console.log(body.innerField);
+      }
+
+      res.json({ ok: true, realField });
+    };
+  `;
+  const ast = parse(code, "/virtual/test.js");
+  const fn = ast.body[0].declarations[0].init;
+  const io = extractIoHints(fn);
+  assert.deepEqual(io.request.body, ["realField"]);
+});
+
+test("shadowed request and body variables in catch clauses and loops do not leak into request inputs", () => {
+  const { parse } = require("../src/static/ast");
+  const { extractIoHints } = require("../src/static/io-hints");
+  const code = `
+    const handler = (req, res) => {
+      const { body } = req;
+      const realField = body.realField;
+
+      try {
+        doSomething();
+      } catch (body) {
+        console.log(body.fromCatch);
+      }
+
+      for (const body of items) {
+        console.log(body.fromLoop);
+      }
+
+      for (let body = 0; body < 5; body++) {
+        console.log(body.fromFor);
+      }
+
+      for (const body in obj) {
+        console.log(body.fromForIn);
+      }
+
+      switch (realField) {
+        case "test": {
+          const body = { fromSwitch: true };
+          console.log(body.fromSwitch);
+          break;
+        }
+      }
+
+      res.json({ ok: true, realField });
+    };
+  `;
+  const ast = parse(code, "/virtual/test.js");
+  const fn = ast.body[0].declarations[0].init;
+  const io = extractIoHints(fn);
+  assert.deepEqual(io.request.body, ["realField"]);
+});

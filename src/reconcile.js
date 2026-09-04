@@ -115,7 +115,7 @@ function exactMatch(route, staticRoutes, runtimeRoutes, claimed, staticKeyCounts
   // ambiguous. Keep both observations separate instead of assigning runtime
   // authority to whichever app happened to be traversed first.
   if ((staticKeyCounts.get(key(route)) || 0) > 1) return null;
-  return candidates[0];
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function observation(route) {

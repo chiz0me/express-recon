@@ -1317,7 +1317,10 @@ function documentationGateHits(report, statuses) {
   }
   if (statuses.has("docs-conflict")) hits += summary.conflicts;
   if (statuses.has("docs-incomplete")) {
-    hits += summary.dynamicOperations + summary.duplicateOperations;
+    hits +=
+      summary.dynamicOperations +
+      summary.duplicateOperations +
+      (summary.pathVariantTruncations || 0);
     if (summary.incompleteInventory) hits++;
     if (summary.incompleteDocumentationDiscovery) hits++;
   }

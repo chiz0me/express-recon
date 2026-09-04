@@ -146,3 +146,193 @@ test("scan file-count and total-byte limits fail coverage closed", () => {
   assert.equal(byBytes.scanCoverage.limited, true);
   assert.ok(byBytes.diagnostics.some((message) => message.includes("scan.maxTotalBytes")));
 });
+
+test("reconstructs paths across nested member expression mounts", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-nested-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "routes.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const router = express.Router();",
+        'router.get("/users", (_req, res) => res.send("users"));',
+        "module.exports = { v1: { sub: router } };",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        'const api = require("./routes");',
+        "const app = express();",
+        'app.use("/api", api.v1.sub);',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const { routes } = scanRepo(dir, CONFIG);
+    const keys = Object.keys(index(routes)).sort();
+    assert.deepEqual(keys, ["GET /api/users"]);
+    assert.equal(routes[0].pathConfidence, "full");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolves routes registered via variable-bound app.route()", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-bound-route-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const app = express();",
+        "function auth() {}",
+        'const item = app.route("/items").all(auth);',
+        'item.get((_req, res) => res.send("get"));',
+        'item.post((_req, res) => res.send("post"));',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const { routes } = audit(
+      { mode: "static", src: dir },
+      { authMiddleware: { auth: "authenticated" } },
+    );
+    const keys = Object.keys(index(routes)).sort();
+    assert.deepEqual(keys, ["GET /items", "POST /items"]);
+    assert.equal(routes[0].pathConfidence, "full");
+    assert.equal(routes[0].authStatus, "proven");
+    assert.equal(routes[1].authStatus, "proven");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolves middleware names using computed string properties", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-computed-prop-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const app = express();",
+        "const auth = { requireAuth: () => {} };",
+        'app.get("/guarded", auth["requireAuth"], (_req, res) => res.send("ok"));',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const { routes } = audit(
+      { mode: "static", src: dir },
+      { authMiddleware: { "auth.requireAuth": "authenticated" } },
+    );
+    assert.equal(routes[0].authStatus, "proven");
+    assert.equal(routes[0].middlewares[0].name, "auth.requireAuth");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("app.route() aliases respect lexical scope across functions", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-scope-route-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const app = express();",
+        "function setupFirst(app) {",
+        '  const item = app.route("/first");',
+        '  item.get((_req, res) => res.send("first"));',
+        "}",
+        "function setupSecond(app) {",
+        '  const item = app.route("/second");',
+        '  item.get((_req, res) => res.send("second"));',
+        "}",
+        "setupFirst(app);",
+        "setupSecond(app);",
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const { routes } = audit({ mode: "static", src: dir });
+    const keys = Object.keys(index(routes)).sort();
+    assert.deepEqual(keys, ["GET /first", "GET /second"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("outer app.route() alias does not shadow inner router redeclaration", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-shadow-router-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const app = express();",
+        'const item = app.route("/outer");',
+        'item.get((_req, res) => res.send("outer"));',
+        "function setupSubroutes(app) {",
+        "  const item = express.Router();",
+        '  item.get("/inner", (_req, res) => res.send("inner"));',
+        '  app.use("/mounted", item);',
+        "}",
+        "setupSubroutes(app);",
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const { routes } = audit({ mode: "static", src: dir });
+    const keys = Object.keys(index(routes)).sort();
+    assert.deepEqual(keys, ["GET /mounted/inner", "GET /outer"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("mutable app.route() aliases follow assignments and var redeclarations", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-mutable-route-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        '"use strict";',
+        'const express = require("express");',
+        "const app = express();",
+        'let mutable = app.route("/first");',
+        'mutable.get((_req, res) => res.send("first"));',
+        'mutable = app.route("/second");',
+        'mutable.post((_req, res) => res.send("second"));',
+        'var repeated = app.route("/third");',
+        'repeated.get((_req, res) => res.send("third"));',
+        'var repeated = app.route("/fourth");',
+        'repeated.patch((_req, res) => res.send("fourth"));',
+        'let throughBlock = app.route("/fifth");',
+        "{",
+        '  throughBlock = app.route("/sixth");',
+        "}",
+        'throughBlock.delete((_req, res) => res.send("sixth"));',
+        'let unresolved = app.route("/seventh");',
+        "unresolved = chooseRouteAtRuntime();",
+        'unresolved.get((_req, res) => res.send("unknown"));',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const { routes, routeGraph } = audit({ mode: "static", src: dir });
+    assert.deepEqual(Object.keys(index(routes)).sort(), [
+      "DELETE /sixth",
+      "GET /<dynamic>",
+      "GET /first",
+      "GET /third",
+      "PATCH /fourth",
+      "POST /second",
+    ]);
+    assert.equal(index(routes)["GET /<dynamic>"].pathConfidence, "partial");
+    assert.equal(routeGraph.complete, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -7,104 +7,122 @@
 
 # express-recon
 
-Offline-first route inventory, authentication audit, and OpenAPI reconciliation
-for Express, Fastify, and NestJS. It parses JavaScript and TypeScript without
-booting the target app, and gives developers, CI jobs, and AI agents the same
-versioned evidence contract. Express additionally supports trusted runtime and
-hybrid observation; Fastify and NestJS are static-first.
+Fast, offline-first route scanner, authentication auditor, and OpenAPI generator for **Express**, **Fastify**, and **NestJS**.
 
-> `public` means “no authentication middleware recognized by the supplied
-> configuration.” It does not prove that a route is internet-reachable.
-> `proven` is also configuration-relative: it means a known guard is present,
-> not that the guard's implementation is correct.
+It statically inspects supported JavaScript and TypeScript route patterns, authentication middleware, and schema evidence to generate an OpenAPI (Swagger) inventory — **without executing your code or running your server** (with optional worker execution available for runtime Express inspection). Unresolved paths and incomplete route graphs remain visible for review instead of being presented as confirmed coverage.
+
+> 💡 **In Simple Words**:
+>
+> - **Route Inventory**: Recovers supported endpoints (`GET /users`, `POST /login`, etc.) and attached middleware, while reporting analysis gaps explicitly.
+> - **`public`**: Means no recognized authentication middleware was found by your audit configuration on this route. (This is relative to your configuration and does not prove the endpoint is reachable from the public internet).
+> - **`proven`**: Means a recognized authentication guard or middleware configured in your allowlist was located on the route (it does not prove the internal logic inside that guard is bug-free).
+> - **`unknown`**: Means the route has an inline function or custom logic that needs a quick manual review by a developer.
+> - **OpenAPI / Swagger**: Automatically generates or updates an OpenAPI 3.1 contract from your actual routes and validation schemas.
+
+---
+
+## Why express-recon?
+
+- 🔒 **Safe Static-First Analysis**: Static mode analyzes code using Abstract Syntax Tree (AST) parsing without booting your application, connecting to databases, or executing code. For advanced Express inspection, optional runtime and hybrid modes execute trusted code in an isolated worker process.
+- 🌐 **Local-First and Private by Default**: Runs entirely on your local machine or CI runner without external cloud dependencies. No source code, routes, or tokens are sent externally unless you explicitly invoke remote features (such as scanning remote Git repositories or sending webhook notifications).
+- ⚡ **Multi-Framework Support**: Works seamlessly across Express 4 & 5, Fastify 4 & 5, and NestJS 10 & 11 (including TypeScript DTOs and decorators).
+- 🛡️ **CI/CD Quality Gates**: Can block pull requests on configured route, documentation, completeness, or policy findings.
+- 🤖 **AI-Ready with MCP**: Comes with a built-in Model Context Protocol (MCP) server so AI coding assistants (like Cursor, Claude Desktop, or Gemini CLI) can understand your backend architecture safely.
+
+---
 
 ## Start here
 
-Requirements: Node.js `^20.19.0` or `>=22.12.0`.
+**System Requirements**: Node.js `^20.19.0` or `>=22.12.0`.
 
-Install it in the target repository so CI and teammates use the locked version:
+Install `express-recon` in your project as a development dependency so your whole team and your CI pipeline use the locked version:
 
 ```bash
 npm install --save-dev express-recon
 npx --no-install express-recon --help
 ```
 
-The package installs two binaries: `express-recon` for CLI workflows and
-`express-recon-mcp` for the static local MCP server.
+The package installs two binaries: `express-recon` for CLI workflows and `express-recon-mcp` for the static local MCP server.
 
-Local `discover`, static `inventory`/`audit`, `docs`/`refresh`, and middleware review do
-not use the network, install target dependencies, or import target code. Package
-installation is the only network step in this local workflow.
+> ℹ️ **Good to know**:
+> Local commands like `discover`, `inventory`, `audit`, `docs`, `refresh`, and middleware review do not use the network, do not install packages, and do not import application code. Installing the npm package is the only step that uses the network.
 
-## Five-minute offline workflow
+---
 
-### 1. Discover the repository
+## Five-minute quick start tutorial
+
+Follow these four simple steps to scan your project, find all API endpoints, and check your security guards.
+
+### Step 1: Discover your repository structure
+
+Run `discover` to find all applications, frameworks, entry files, and existing Swagger/OpenAPI files in your project:
 
 ```bash
 npx --no-install express-recon discover --src . --out .express-recon
 ```
 
-Inspect `.express-recon/discovery.json` for package roots, direct framework
-dependency scopes and signal strength, distinct applications, stable application
-IDs, likely entries, existing OpenAPI documents, swagger-jsdoc sources, and
-`discoveryCoverage`. A dependency is evidence that a framework is present; it
-is not by itself proof that the package owns a runnable application.
+**What happens?**
+This creates `.express-recon/discovery.json`. It inspects your project and identifies:
 
-### 2. Build a judgment-free route inventory
+- Which frameworks are in use (Express, Fastify, or NestJS).
+- Each distinct application and its unique ID (for example, `app:src/app.js#app`).
+- Where your main server file is located.
+- Any existing OpenAPI specifications or JSDoc comments.
+
+### Step 2: Build a complete route inventory
+
+Run `inventory` to get a list of every API route without any security judgment:
 
 ```bash
 npx --no-install express-recon inventory --src . --format json,md --out .express-recon
 ```
 
-This writes `routes.json` and `routes.md`. Check `scanCoverage.complete`, its
-`scope.fingerprint`, and diagnostics before treating the inventory as complete.
-Routes with `pathConfidence: "partial"` are retained evidence, not fully
-resolved paths.
+**What happens?**
+This writes two files:
 
-Add a root-relative `.express-reconignore` to exclude generated, vendored, or
-out-of-scope packages, source, and API documents. It supports `*`, `**`, `?`,
-comments, and later `!pattern` re-inclusion rules. Use `--no-ignore-file` for an
-explicit ignore-file-free run; built-in dependency/build/hidden/test exclusions
-still apply.
+1. `routes.json`: A machine-readable catalog of every endpoint, method, and middleware.
+2. `routes.md`: A clean, readable Markdown table showing all your routes.
 
-Hidden directories stay excluded unless `--include-hidden` (or
-`scan.includeHidden: true`) is set. Use that opt-in when contracts intentionally
-live under a path such as `.cursor/`; `.git`, dependencies, and generated/build
-directories (including `.express-recon/`) remain excluded. Because hidden trees can contain private tooling
-or configuration, do not enable it indiscriminately in organization scans.
+> 💡 **Ignoring files**:
+> If you have files you want to skip (such as build outputs, tests, or legacy code), create an `.express-reconignore` file in your project root. It uses standard glob patterns (like `client/**` or `dist/**`).
+>
+> **Important**: Add `.express-recon/` to your `.gitignore` so generated reports are not accidentally committed, unless you intentionally want to save a baseline.
 
-`.express-reconignore` controls scan inputs; it is separate from `.gitignore`.
-Add the output directory (for example `.express-recon/`) to `.gitignore` unless
-you intentionally review and commit a baseline. Reports may contain sensitive
-route and source metadata.
+### Step 3: Identify authentication guards
 
-### 3. Identify real authentication guards
+Run `suggest-auth` to automatically detect functions in your code that look like authentication middleware:
 
 ```bash
 npx --no-install express-recon suggest-auth --src . > .express-recon/auth-candidates.json
 ```
 
-Suggestions are candidates, not security decisions. Verify the middleware
-implementation, then create a data-only configuration such as
-`recon.config.yaml`:
+**What happens?**
+The tool looks for common auth naming patterns (such as `requireAuth`, `authenticate`, `verifyToken`, `jwtGuard`, `requireAdmin`) and ranks them for you.
+
+Check these candidates, then create a simple configuration file named `recon.config.yaml` in your project root:
 
 ```yaml
+# 1. Tell express-recon which middleware protect your APIs:
 authMiddleware:
   requireAuth: authenticated
-  requireSession:
-    tags: [session]
-    roles: [member]
+  requireAdmin:
+    tags: [admin]
+    roles: [administrator]
 
+# 2. List routes that are intentionally public (so audit will not flag them):
 acceptedPublic:
   - applicationId: app:src/app.js#app
     method: GET
     path: /health
+  - "POST /login"
+  - "POST /register"
 ```
 
-Use the structured `acceptedPublic` form in multi-app repositories. The legacy
-`"GET /health"` form applies to every app containing that method/path.
+> 💡 **Tip**: In single-app repositories, simple strings like `"POST /login"` work great. For multi-app monorepos, use the structured form with `applicationId` to target the specific app.
 
-### 4. Audit and gate the result
+### Step 4: Audit routes and enforce security in CI/CD
+
+Now, run `audit` to check every route against your configuration and fail if any unauthenticated endpoint is exposed:
 
 ```bash
 npx --no-install express-recon audit --src . --config recon.config.yaml \
@@ -112,96 +130,84 @@ npx --no-install express-recon audit --src . --config recon.config.yaml \
   --fail-on public,unknown,incomplete
 ```
 
-Exit code `2` means the requested quality gate matched; it is an expected
-policy result, not a scanner crash. Exit code `1` means invalid input or an
-operational failure.
+**Understanding Exit Codes**:
+
+- **Exit code `0`**: All checks passed! Every route is either authenticated (`proven`) or explicitly listed in `acceptedPublic`.
+- **Exit code `2`**: Security rule matched! One or more routes are unprotected (`public`), need review (`unknown`), or have incomplete static coverage. In CI/CD pipelines (like GitHub Actions), this will intentionally fail the build to stop vulnerable code from being deployed.
+- **Exit code `1`**: General operational error (such as a missing file or invalid CLI flag).
 
 ## Choose the right workflow
 
-| Goal                                  | Command                               | Target code runs? |                  Network? | Primary evidence                      |
-| ------------------------------------- | ------------------------------------- | ----------------: | ------------------------: | ------------------------------------- |
-| Understand an unfamiliar repo         | `discover`                            |                No |                        No | packages, apps, entries, docs         |
-| List routes without security judgment | `inventory`                           | No in static mode |                        No | route registry                        |
-| Classify auth and enforce policies    | `audit`                               | No in static mode |                        No | findings and summary                  |
-| Merge OpenAPI, JSDoc, and code        | `docs`                                |                No |                        No | spec plus drift report                |
-| Refresh and retain reviewed API docs  | `refresh`                             |                No |                        No | current spec plus enrichment overlay  |
-| Prepare human/AI middleware review    | `review-middleware`                   | No in static mode |                        No | bounded evidence bundle               |
-| Validate a review response            | `import-review`                       |                No |                        No | advisory config suggestions           |
-| Scan one Git ref                      | `scan-repo`                           |                No |        Yes, for Git fetch | provenance plus static results        |
-| Inventory a GitHub organization       | `scan-org`                            |                No | Yes, API plus Git fetches | per-repo reports plus aggregate index |
-| Browse saved reports                  | `render`                              |                No |                        No | offline HTML site                     |
-| Notify a trusted webhook              | `notify`                              |                No |        Yes, explicit POST | bounded signed change events          |
-| Recover dynamic wiring                | runtime/hybrid `inventory` or `audit` |           **Yes** |    Target code may use it | runtime observations                  |
+Here is a quick cheat sheet to help you pick the right command for your task:
 
-The repository is the acquisition and discovery boundary. Each detected root is
-a separate application with a stable ID: `app:<file>#<binding>` for Express,
-`fastify:<file>#<binding>` for Fastify, and `nestjs:<file>#<binding>` for NestJS.
-Identical paths in separate apps remain separate throughout findings, baselines,
-policies, and OpenAPI trace metadata.
+| What do you want to do?                          | Command to run       |   Does code run?    |   Uses network?    | Primary output                                      |
+| :----------------------------------------------- | :------------------- | :-----------------: | :----------------: | :-------------------------------------------------- |
+| **Understand an unfamiliar repo**                | `discover`           |         No          |         No         | Apps, packages, entry points, and existing docs     |
+| **List all routes without security checks**      | `inventory`          | No (in static mode) |         No         | Complete route registry in JSON & Markdown          |
+| **Check auth and enforce security rules**        | `audit`              | No (in static mode) |         No         | Security findings, audit summary, and policy checks |
+| **Combine OpenAPI, JSDoc, and code routes**      | `docs`               |         No          |         No         | Reconciled OpenAPI 3.1 specification & drift report |
+| **Keep an AI-enriched OpenAPI spec up to date**  | `refresh`            |         No          |         No         | Updated OpenAPI spec preserving manual descriptions |
+| **Review complex middleware with an AI agent**   | `review-middleware`  | No (in static mode) |         No         | Bounded evidence bundle for human or AI review      |
+| **Validate and import review suggestions**       | `import-review`      |         No          |         No         | Validated advisory configuration suggestions        |
+| **Scan a single remote Git repository**          | `scan-repo`          |         No          |  Yes (Git fetch)   | Provenance plus complete static inventory/audit     |
+| **Scan every repository in a GitHub Org**        | `scan-org`           |         No          |  Yes (GitHub API)  | Multi-repo inventory with progress and HTML sites   |
+| **View saved reports in a browser (Swagger UI)** | `render`             |         No          |         No         | Clean, self-contained offline HTML website          |
+| **Send route change alerts to Slack/Webhook**    | `notify`             |         No          | Yes (Webhook POST) | Signed, secure notification events                  |
+| **Inspect complex dynamic Express routing**      | `inventory` (hybrid) |       **Yes**       |   App-dependent    | Combined static and runtime route observations      |
 
-### Framework support
+---
 
-| Framework | Static inventory and audit                                                                    | Lifecycle evidence                                             | Runtime / hybrid                             |
-| --------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------- |
-| Express   | Apps, routers, mounts, direct registrars, plus Zod/Joi and `express-validator` input evidence | `use()` and route middleware                                   | Supported for trusted local Express 4/5 code |
-| Fastify   | Roots, routes, plugins, prefixes, direct registrars, and static route `schema` options        | Request-stage hooks and per-route hooks                        | Not yet; use `--mode static`                 |
-| NestJS    | Factory/module/controller graphs plus TypeScript DTO and `class-validator` evidence           | Middleware consumers, guards, interceptors, pipes, and filters | Not yet; use `--mode static`                 |
+## Framework support at a glance
 
-Dynamic Fastify plugins become opaque route-provider evidence. Dynamic NestJS
-middleware scopes become `unknown` review evidence, while host routing,
-versioning, prefix exclusions, and unresolved module wiring are retained as
-partial-confidence diagnostics. Fastify hook registration order, encapsulation,
-and `fastify-plugin` prefix transparency are modeled statically. The adapters
-never import framework packages from the target repository.
+`express-recon` understands the unique routing and lifecycle patterns of each framework:
 
-Organization summaries distinguish repositories with application/adapter/route
-evidence from repositories where a supported framework appears only as a direct
-runtime, peer, or development dependency. Both remain discoverable, but a
-dependency-only package is not presented as a runnable service.
+| Framework            | Static route discovery                                                                                      | Lifecycle & Middleware evidence                                     | Runtime / Hybrid mode                  |
+| :------------------- | :---------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------ | :------------------------------------- |
+| **Express (4 & 5)**  | Apps, routers, nested mounts, route chaining (`app.route()`), input schemas (Zod, Joi, `express-validator`) | `app.use()`, router middleware, and route-level guards              | Fully supported for trusted local code |
+| **Fastify (4 & 5)**  | Root instances, plugins, prefixes, encapsulated scopes, direct registrars, and route `schema` options       | Request hooks (`onRequest`, `preHandler`, etc.) and per-route hooks | Static-first (use `--mode static`)     |
+| **NestJS (10 & 11)** | Modules, controllers, global prefixes, route mappings, TypeScript DTOs, and `class-validator`               | Guards (`@UseGuards`), interceptors, pipes, and filters             | Static-first (use `--mode static`)     |
 
-## The evidence model
+> ℹ️ **How it handles unknown patterns**:
+> If Fastify or NestJS uses dynamic wiring (such as an unresolved object spread or dynamic module import), `express-recon` does not pretend everything is fine. It marks the affected route as `unknown` or adds an opaque route diagnostic, alerting you that manual review is needed.
 
-express-recon deliberately separates facts from decisions:
+---
 
-- `inventory` records observed routes, middleware chains, source locations, app
-  identity, handler hints, and coverage. It makes no security judgment.
-- `audit` applies a reviewed `authMiddleware` allowlist, accepted-public
-  baseline, and optional policies to that inventory.
-- `public` means no configured guard matched. `unknown` means opaque middleware
-  might contain a guard and requires review. `proven` means a configured guard
-  was observed.
-- Express `hybrid` retains both static and runtime observations. Runtime evidence is
-  authoritative only when route/app identity is unambiguous; otherwise the
-  observations remain separate.
-- `routes[].io.schemas` keeps typed request/response contracts separate from the
-  legacy field-name hints. Every contract identifies its evidence kind,
-  confidence, and source; disagreements remain in `schemas.conflicts`.
-- AI review may suggest configuration, but only explicit reviewed configuration
-  can change an audit classification.
+## Key concepts explained in simple words
 
-Every JSON report is deterministic and versioned. Run
-`npx --no-install express-recon schema` for its JSON Schema. For field-by-field details, see
-the [CLI and report reference](./docs/reference.md).
+`express-recon` follows a strict principle: **separate facts from security decisions**.
+
+1. **`inventory` records facts**: It lists routes, middleware names, source file line numbers, and request/response shapes. It never makes a security judgment on its own.
+2. **`audit` applies your security decisions**: It takes the inventory and checks it against your `authMiddleware` rules and `acceptedPublic` list.
+3. **The Three Auth Statuses**:
+   - 🟢 **`proven`**: The route has a confirmed guard that matched your `authMiddleware` configuration.
+   - 🔴 **`public`**: No configured guard matched this route. This indicates that no recognized authentication middleware was found under your current configuration (it is configuration-relative and does not prove reachability or lack of network-level security).
+   - 🟡 **`unknown`**: An inline closure or anonymous function is in the middleware chain. It might be checking auth, or it might not. You should inspect it manually.
+4. **Stable Application IDs**: In modern projects, a single repository might contain multiple services. `express-recon` gives each detected app a stable identifier (e.g. `app:src/app.js#app`, `fastify:src/server.js#server`, or `nestjs:src/main.ts#app`). Identical paths in separate apps are never accidentally mixed up.
+
+Every JSON report is deterministic and versioned. Run `npx --no-install express-recon schema` to view its JSON Schema. For field-by-field details, see the [CLI and report reference](./docs/reference.md).
 
 ## Common workflows
 
-### Multi-app repositories
+### 1. Working with Monorepos and Multi-App Repositories
 
-Start with discovery and select by stable ID:
+If your repository contains multiple services (for example, a public API in `apps/public` and an admin API in `apps/admin`), run `discover` first to see their unique application IDs:
 
 ```bash
 npx --no-install express-recon discover --src . --out .express-recon
+```
+
+Then, target a specific app using `--app-id`:
+
+```bash
 npx --no-install express-recon docs --src . \
   --app-id 'app:apps/public/src/app.js#app' \
   --out .express-recon/public-api
 ```
 
-`docs` first matches the OpenAPI document's owning package to the detected apps
-in that package. Ambiguous or cross-package merges require `--app-id`; this also
-prevents a root-level or unrelated spec from being silently paired with the only
-app elsewhere in a monorepo. `--app-id all` is an intentional
-collision-reporting merge, not the default. For trusted hybrid scans, bind the
-runtime entry to the same ID:
+> 💡 **Why use `--app-id`?**
+> In a monorepo, multiple packages might have an `app.js` or `server.ts`. Specifying `--app-id` ensures that `express-recon` audits only the intended application and does not accidentally mix routes from different services.
+
+For trusted hybrid scans on an Express app, you can bind the runtime entry point to that exact app ID:
 
 ```bash
 npx --no-install express-recon audit --mode hybrid --src . \
@@ -210,7 +216,11 @@ npx --no-install express-recon audit --mode hybrid --src . \
   --config recon.config.yaml --format json
 ```
 
-### Existing OpenAPI and swagger-jsdoc
+---
+
+### 2. Merging Existing OpenAPI specs and swagger-jsdoc
+
+If your project already has an OpenAPI specification or JSDoc comments (`@openapi` or `@swagger`), run `docs` to reconcile them with your actual code:
 
 ```bash
 npx --no-install express-recon docs --src . --app-id 'app:src/app.js#app' \
@@ -218,392 +228,190 @@ npx --no-install express-recon docs --src . --app-id 'app:src/app.js#app' \
   --fail-on docs-conflict,docs-incomplete
 ```
 
-Precedence is deterministic: existing OpenAPI wins, JSDoc fills missing fields,
-and generated inventory fills the remainder. `docs-report.json` records
-code-only/docs-only operations, authored and static-schema conflicts,
-duplicates, dynamic paths, and incomplete discovery. Data-only
-JavaScript/TypeScript OpenAPI modules are
-reconstructed with a bounded static interpreter; repository code is never
-imported or run, external package code is never loaded, and unsupported helpers
-or computation fail closed. Swagger 2 is detected but must be converted before
-merging. See the
-[OpenAPI guide](./docs/openapi.md).
+**How conflicts are resolved**:
 
-### Refresh and retain AI-enriched OpenAPI
+1. **Authored OpenAPI specification** has the highest priority and is treated as truth.
+2. **JSDoc comments** fill in any missing parameter descriptions, summaries, and tags.
+3. **Static code analysis** fills in any remaining routes or parameter shapes found in your source code.
+4. **Conflict detection**: If code and docs disagree (for example, a route exists in code but is missing from docs, or vice versa), it is clearly flagged in `docs-report.json`.
 
-Use `refresh` for a recurring documentation workspace rather than feeding the
-last generated document back into `docs`:
+> 📘 Learn more in the detailed [OpenAPI guide](./docs/openapi.md).
+
+---
+
+### 3. Keeping AI-Enriched OpenAPI Documentation in Sync (`refresh`)
+
+When documenting an API, you or an AI agent might write rich summaries and descriptions in `openapi.json`. When the backend code changes, you don't want those manual descriptions to be wiped out!
+
+The `refresh` command creates a living documentation workspace:
 
 ```bash
+# 1. Initialize or update the documentation workspace:
 npx --no-install express-recon refresh --src . \
   --app-id 'app:src/app.js#app'
 ```
 
-The default state is `.express-recon/api`. Every run performs a fresh static
-inventory and OpenAPI/JSDoc reconciliation, compares `routes.json` with the
-previous run, reapplies still-valid enrichment, and rebuilds
-`api-reference/index.html`. Pass `--no-render` for JSON-only automation.
-Removed generated routes disappear from the current `openapi.json`; their old
-enrichment stays dormant instead of making them look active.
+By default, this writes to `.express-recon/api`. On every run, it performs a fresh static inventory, compares routes with the previous run, and rebuilds an offline Swagger UI site under `api-reference/`.
 
-An AI or human edits only `summary`, `description`, `parameters`,
-`requestBody`, `responses`, and `components.schemas` in the workspace's
-`openapi.json`, then explicitly accepts those edits:
+**How to safely enrich descriptions**:
 
-```bash
-npx --no-install express-recon refresh --src . --accept-enrichment
-```
+1. You or an AI agent can edit `summary`, `description`, `parameters`, `requestBody`, `responses`, and `components.schemas` in `.express-recon/api/openapi.json`.
+2. Explicitly accept your changes:
+   ```bash
+   npx --no-install express-recon refresh --src . --accept-enrichment
+   ```
 
-Acceptance extracts those fields into `openapi.enrichment.json`; paths,
-methods, tags, `operationId`, security, and scanner trace metadata remain owned
-by static analysis. If a description depends on delegated code beyond the
-reported route/handler files, add repository-relative paths to that operation's
-`x-express-recon.enrichmentSources` before acceptance. Their hashes then join
-the operation evidence check.
+**Why this is helpful**:
 
-An ordinary refresh refuses to overwrite an edited `openapi.json`. Accepted
-content is reapplied only while the deterministic operation plus route,
-handler, and declared enrichment-source evidence still match. New or changed
-operations appear in `refresh-report.json` as unreviewed or stale, so an agent
-can inspect only that bounded set instead of spending tokens on the entire API.
-The prior app, base spec, explicit JSDoc selection, repo-local config, scan
-scope, and render choice are reused from the ownership manifest. Absolute
-config or ignore-file paths are never persisted and must be supplied again.
-Use explicit flags to make an intentional policy/scope/render change.
-`--overwrite` deliberately resets a valid tool-owned state, but neither refresh
-mode deletes a nonempty unowned directory.
+- Your accepted descriptions are saved in `openapi.enrichment.json`.
+- When backend code changes, routes that stayed the same keep their descriptions automatically.
+- Only newly added or modified routes are flagged as `unreviewed` or `stale` in `refresh-report.json`.
+- If a description depends on delegated code beyond the detected route and handler files, add repository-relative paths to that operation's `x-express-recon.enrichmentSources` before acceptance.
+- In CI/CD, you can gate on `--fail-on enrichment-stale,enrichment-unreviewed` to ensure all API changes are properly documented.
 
-CI can gate `enrichment-stale`, `enrichment-unreviewed`, semantic
-`routes-added`/`routes-removed`/`routes-changed`, and OpenAPI
-`contract-changed`/`contract-breaking`/`contract-potentially-breaking` in
-addition to the `docs-*` statuses. The state is written
-before exit code `2`; its `routes.json` already contains the automatic delta and
-can be passed directly to `notify` for Slack or a signed webhook workflow.
+---
 
-### Advisory AI middleware classification
+### 4. Reviewing Complex Middleware with an AI Agent
+
+If your project has complex custom middleware that the static scanner cannot automatically verify, you can bundle the evidence for review:
 
 ```bash
+# 1. Create a review bundle of all uncertain middleware:
 npx --no-install express-recon review-middleware --src . --out .express-recon/review
 
-# Give middleware-review.json to a human or model using its embedded schema,
-# then validate the exact response locally:
+# 2. Provide middleware-review.json to a teammate or an AI model, then validate their response:
 npx --no-install express-recon import-review \
   --review .express-recon/review/middleware-review.json \
   --assessment middleware-assessment.yaml \
   --out .express-recon/review
 ```
 
-The bundle contains bounded definitions, callsites, routes, deterministic hints,
-coverage, and content fingerprints. Repository excerpts are untrusted data.
-`import-review` rejects stale or malformed assessments and emits advisory
-suggestions; it never edits config or promotes a route to `proven`. See the
-[AI agent guide](./docs/ai-agent-guide.md).
+The review bundle extracts exact code snippets, callsites, and routes. The `import-review` command validates the assessment against a strict schema and provides advisory suggestions without granting automatic authority. See the [AI agent guide](./docs/ai-agent-guide.md).
 
-### Scan a GitHub or Git repository
+### 5. Scanning Remote Git Repositories and GitHub Organizations
+
+#### Scanning a single Git repository (`scan-repo`)
+
+You can scan a remote repository directly without manually cloning it or running `npm install`:
 
 ```bash
 npx --no-install express-recon scan-repo --repo owner/project --ref main \
   --out .express-recon/remote
 ```
 
-This performs one shallow HTTPS/local Git acquisition without checkout,
-submodules, symlink materialization, hooks, credentials, dependency installation,
-or target execution. The combined `repo-scan.json` includes commit provenance,
-acquisition completeness, discovery, inventory/audit, and documentation status.
-Remote scans cannot enable runtime, hybrid, or auto-entry execution.
-Set `GH_TOKEN` (preferred) or `GITHUB_TOKEN` when the GitHub repository is
-private; authentication is scoped to `github.com` and is never persisted.
-CI can gate source/route completeness, unresolved documentation selection,
-documentation drift/conflicts, and—when an explicit audit config is supplied—
-public, unknown, or policy-violating routes with `scan-repo --fail-on ...`.
+**How it works safely**:
 
-Git fetch is time-bounded, but a hostile server can ignore partial-clone filters;
-the network packfile is not a hard byte-bounded security boundary. See
-[SECURITY.md](./SECURITY.md) before scanning adversarial repositories.
+- Performs a shallow Git fetch over HTTPS without checking out files, running hooks, installing dependencies, or executing code.
+- Generates `repo-scan.json` containing discovery, inventory/audit, documentation status, and commit provenance.
+- For private repositories, set the `GH_TOKEN` (recommended) or `GITHUB_TOKEN` environment variable. The token is used in-memory and never saved to disk.
+- See [SECURITY.md](./SECURITY.md) for details on the security model.
 
-### Inventory a GitHub organization
+#### Scanning an entire GitHub organization (`scan-org`)
+
+To get a complete security inventory of every backend service across your company or GitHub organization:
 
 ```bash
+# 1. Scan all repositories in an organization (skips forks and archived repos by default):
 npx --no-install express-recon scan-org --org acme \
   --concurrency 2 --max-repos 500 \
   --fail-on incomplete
-# Writes .express-recon/acme by default.
 
-# After an interruption or incomplete run, use the same scan-defining options:
+# 2. Resume an interrupted scan (picks up right where it left off!):
 npx --no-install express-recon scan-org --org acme \
   --concurrency 4 --max-repos 500 \
   --fail-on incomplete --resume
 
-# Refresh a completed inventory; unchanged upstream repositories are reused:
+# 3. Update an existing scan (only rescans repos that had new git commits):
 npx --no-install express-recon scan-org --org acme \
   --max-repos 500 --concurrency 2 --update
 
-# Optional machine-readable progress (JSON Lines on stderr):
-npx --no-install express-recon scan-org --org acme \
-  --progress json 2>scan-progress.jsonl
-
-# Compare a fresh scan with a separate, completed prior output directory:
+# 4. Compare today's scan with last month's scan to see newly added or removed routes:
 npx --no-install express-recon scan-org --org acme \
   --baseline .express-recon/acme-before \
   --out .express-recon/acme-current --concurrency 2 --max-repos 500 \
   --fail-on incomplete
 ```
 
-`scan-org` enumerates every repository visible through the GitHub organization
-API, skips forks and archived repositories by default, and runs the existing
-static `scan-repo` pipeline on each eligible repository. Public organizations do
-not require a token. Set `GH_TOKEN` or `GITHUB_TOKEN` to include repositories
-visible to that token and to fetch private repositories; the token is never
-written to reports or Git configuration.
+Organization scans always use durable output: omitting `--out` derives `.express-recon/<lowercase-organization>` from the current directory.
 
-Repository status is framework-aware: `express`, `fastify`, and `nestjs` identify
-a single detected framework; `multi-framework` identifies more than one. The
-legacy `not-express` status is retained for artifact compatibility and now means
-that no supported framework was detected after a complete scan. An incomplete
-negative remains `inconclusive`. Aggregate summaries include supported, Express,
-Fastify, and NestJS repository counts.
+**Key features for organization scanning**:
 
-The default concurrency is `1`, so only one bounded snapshot exists at a time.
-`--concurrency 2` through `8` opts into a small worker pool. Every snapshot is
-deleted in `finally` before its report is returned. Organization scans always
-use durable output: omitting `--out` derives
-`.express-recon/<lowercase-organization>` from the current directory. Completed
-reports are written immediately under `repositories/<name>/`, while
-`organization-inventory.json` retains a compact aggregate index. This avoids
-holding every detailed route report in memory, streaming it through stdout, or
-leaving source snapshots on disk. Pass `--out` to override the location.
-Each repository is attempted twice by default after isolated cleanup; use
-`--repo-attempts 1` through `3` to tune that bound. Repeatable
-`--repo-include`/`--repo-exclude` globs filter by repository name or full name
-before any Git fetch and are recorded as inventory scope.
+- **Framework Detection**: Distinguishes Express, Fastify, and NestJS apps from packages that merely list the framework as a dependency.
+- **Checkpoint & Resume (`--resume`)**: If your network disconnects or CI times out, running with `--resume` verifies SHA-256 digests and only scans incomplete or failed repositories.
+- **Smart Updates (`--update`)**: Compares GitHub push commit markers and only scans repositories that have changed since the last inventory.
+- **Delta Reports (`--baseline`)**: Compares two organization runs and generates `organization-delta.json`, detailing new routes, deleted routes, and auth regressions.
+- **Token Efficiency for AI**: Set `EXPRESS_RECON_CONTEXT=agent` so AI assistants inspect the compact aggregate index first without wasting context tokens on massive logs. See the [AI agent guide](./docs/ai-agent-guide.md#keep-organization-scans-token-efficient).
 
-Valid OpenAPI 3 and Swagger 2 documents are retained as bounded parsed-data
-artifacts under each repository's `specifications/` directory before that source
-snapshot is deleted. If several OpenAPI documents share an application, the
-documentation status is `cataloged`: no canonical document is guessed or
-combined. `render` automatically creates a separate offline API reference for
-every retained contract. A focused `scan-repo --spec <path>` remains the way to
-request one intentional canonical OpenAPI 3 merge; Swagger 2 is viewable but not
-used as a merge base.
+Check out our production-ready [scheduled organization inventory example](./examples/github-actions/scheduled-org-inventory/README.md) for automated GitHub Actions workflows with Slack notifications.
 
-Progress is enabled by default for `scan-org` and is always written to stderr,
-so durable JSON artifacts remain machine-readable. Interactive
-terminals get a live status line with processed/total, active repositories, and
-the current phase. CI/non-TTY runs get newline-delimited enumeration-page, start, phase,
-completion, failure, resume, checkpoint, and final-summary messages. Use
-`--progress plain` for stable human-readable CI logs, `--progress json` for a
-JSONL event stream, or `--no-progress` to suppress progress while retaining
-operational errors. Progress is phase-level rather than a fabricated ETA: a
-slow Git fetch remains in `acquiring` until Git returns or its timeout fires.
-When an AI agent launches the scan, set `EXPRESS_RECON_CONTEXT=agent`. The CLI
-then uses the same durable default output and defaults progress to `none`;
-explicit output/progress flags still win. Let the agent inspect the compact
-aggregate first and open only relevant per-repository artifacts. Static scanning
-itself uses no model tokens; returning logs/reports to the model and optional
-middleware review do. The
-[AI agent guide](./docs/ai-agent-guide.md#keep-organization-scans-token-efficient)
-defines the reusable token-discipline rules.
+---
 
-In the organization output, `organization-checkpoint.json` is replaced atomically
-after every complete repository. `--resume` verifies the checkpoint fingerprint
-and every recorded artifact's size and SHA-256 digest, reuses only complete
-results, and retries failed, inconclusive, missing, or damaged work. The
-checkpoint is kept while aggregate coverage is incomplete and removed after a
-complete aggregate has been written. Entries created before retained
-specification catalogs are selectively rescanned only when they had discovered
-documentation inputs; unrelated completed repositories remain reusable.
-Concurrency may change for a resume; the organization,
-checkpoint compatibility generation, repository cap, filters, config, and scan
-scope must still match. Explicitly compatible releases upgrade older checkpoints
-after their original fingerprint and artifact digests have been verified. During
-the framework-support migration, legacy positive Express entries remain reusable,
-while legacy negative entries are invalidated and rescanned so Fastify or NestJS
-repositories cannot stay hidden behind an old `not-express` result.
-Resume reuse is visible as `RESUME` events, and `CHECKPOINT` is emitted only
-after a completed repository's artifacts and atomically replaced checkpoint are
-durable.
+### 6. Browsing Saved Reports as an Offline HTML Website (`render`)
 
-If the selected or default output is nonempty and neither action is specified, a local interactive
-terminal asks whether to update, resume, overwrite, or cancel when those choices
-are available; cancel is the default.
-CI, agent, non-TTY, and JSON-progress runs never prompt and fail before GitHub
-access or file changes with an actionable `--resume`/`--overwrite` message.
-`--overwrite` starts a fresh checkpoint and replaces only colliding organization
-artifacts; it does not recursively clean the directory, so unrelated files are
-preserved. Use a new output directory when old and new artifacts must be kept
-fully separate.
-
-The default repository cap is 100; raise `--max-repos` deliberately for larger
-organizations. Hitting the cap, an API pagination failure, a failed/incomplete
-repository scan, or an inconclusive unsupported result makes aggregate coverage
-incomplete. Use `--include-archived` and `--include-forks` when those repositories
-belong in the inventory. “Complete” always means complete for API-visible
-repositories and the selected filters—it cannot account for repositories the
-token cannot see.
-
-By default, each repository's committed `.express-reconignore` participates in
-its scope. For a centrally governed security inventory, pass
-`--no-ignore-file` or one absolute, trusted `--ignore-file` for every repository.
-The aggregate records config/scan/scope fingerprints, while each detailed route
-report records the resolved ignore-file evidence.
-
-Resume continues the recorded commits; it is not an incremental “scan latest”
-operation. `--update` compares current GitHub push markers with a completed
-inventory, reuses integrity-checked artifacts only when repository identity,
-default branch, push marker, and scanner version match, and rescans everything
-else. It also uses the prior inventory as the automatic delta baseline. After a
-complete replacement inventory is durable, files named by the prior inventory
-but no longer referenced are pruned; unrelated files are preserved. Run with
-`--overwrite` to rebuild every selected repository. Raising a repository cap or
-changing filters changes scope and therefore requires a fresh output or
-overwrite.
-
-`--baseline <prior-output>` compares a new output directory with a separate
-organization output directory. Compatible repositories are compared from their
-saved `repo-scan.json` artifacts one at a time, producing
-`organization-delta.json` with repository additions/removals, status and
-documentation changes, exact added/removed paths, and configuration-relative
-authentication regressions or improvements. Counts remain exact while retained
-route details are capped at 100 per repository and 5,000 overall; the aggregate
-keeps only the first 20 changed repository summaries for bounded CI and Slack
-use. Added or removed repositories are reported as lifecycle changes rather than
-pretending every path in them was created or deleted. Both inventories must
-describe the same organization and scan scope, and incomplete or unavailable
-evidence makes comparison coverage explicitly incomplete.
-Organization CI can gate `incomplete`, `failed`, `inconclusive`,
-`route-graph-incomplete`, `docs-needs-input`, the three `docs-*` statuses, and—
-with `--baseline` or `--update`—`routes-added`, `routes-removed`,
-`routes-changed`, or `auth-regression`. `public`, `unknown`, and `policy` gates
-require an explicit audit configuration. `incomplete` also treats partial paths
-and opaque route providers as incomplete route-graph evidence and gates
-comparison coverage when a baseline exists.
-If the current scan is interrupted or incomplete, a bounded
-`comparison-baseline/` containing only the prior aggregate and required
-`repo-scan.json` files is kept beside the checkpoint. A later `--resume`
-automatically reuses it even when `--baseline` is omitted, then removes it after
-a complete aggregate and delta are durable.
-
-For a scheduled organization CI job, persist the complete selected/default
-output directory in a protected cache or artifact if a later run must resume it. Keep private-repo
-inventories out of pull-request caches, and use a low concurrency first so the
-runner's disk/network envelope is measured before increasing it.
-
-The copy-ready [scheduled organization inventory example](./examples/github-actions/scheduled-org-inventory/README.md)
-restores compatible state, selects resume versus baseline comparison safely,
-streams progress, renders offline HTML, applies per-run storage and retention
-bounds, and notifies Slack about inventory changes or incomplete coverage from a
-separate job.
-
-### Browse saved reports as HTML
-
-Generate a static site from an existing output directory without rescanning:
+Turn your JSON scan reports into a beautiful, static HTML website with an interactive Swagger UI:
 
 ```bash
-# Zero-config from a repo with exactly one saved result in .express-recon/:
+# Render from the default .express-recon/ output directory:
 npx --no-install express-recon render
 
-# Explicit paths remain available for scripts and custom layouts:
+# Render from an organization scan:
 npx --no-install express-recon render \
   --input .express-recon/acme \
   --out .express-recon/acme-site
 
-# Build the same change view later from two saved output folders, without a scan:
+# Render a side-by-side comparison of changes between two scans:
 npx --no-install express-recon render \
   --baseline .express-recon/acme-before \
   --input .express-recon/acme-current \
   --out .express-recon/acme-changes-site
 
-# Render one OpenAPI contract with the packaged Swagger UI:
+# Render a single OpenAPI file with packaged Swagger UI:
 npx --no-install express-recon render \
   --input .express-recon/docs/openapi.json \
   --out .express-recon/api-reference
 ```
 
-With no paths, `render` looks only at the current directory, `.express-recon/`,
-and its immediate child directories. Exactly one directory containing a
-conventional report is required; zero or multiple matches fail with a request
-for `--input`. It does not recursively search the repository. The default output
-is a sibling named `<input>-html`, so `.express-recon/acme` renders to
-`.express-recon/acme-html`. A direct conventional report such as
-`.express-recon/acme/routes.json` uses the same parent-based output, while an
-arbitrarily named file such as `payments.yaml` renders to `payments-html` beside
-it. `--input` and `--out` independently override those defaults, and an existing
-default output is reused only when its express-recon manifest proves which files
-the renderer owns. Conventional files in the same input folder intentionally
-share that default site; pass `--out` when separate simultaneous views are
-required.
+With no paths, `render` looks only at the current directory, `.express-recon/`, and its immediate child directories. The default output is a sibling named `<input>-html`.
 
-Within an input directory, `render` prefers `organization-inventory.json`, then
-`repo-scan.json`, `routes.json`, and conventional `openapi.*`/`swagger.*` names.
-An organization becomes a compact overview plus one report page per confirmed
-supported-framework repository and one diagnostics page per inconclusive scan.
-Every retained OpenAPI 3 or Swagger 2 artifact belonging to a supported entry
-also gets a stock Swagger UI page under `openapi/`; all such pages share one local bundle. Definite
-unsupported, skipped, empty, and failed entries remain visible in the overview
-without report or API pages. The renderer reads and releases selected artifacts
-individually instead of combining every route or specification into one enormous
-page. When `organization-delta.json` is present, the overview adds change metrics
-and repository transitions, and current repository pages show the bounded exact
-route changes retained for that repository.
+**Why the offline site is great**:
 
-An individual OpenAPI 3 or Swagger 2 JSON/YAML file uses a packaged, stock
-Swagger UI rather than an express-recon-specific contract viewer. Its spec is embedded locally so
-the site works through `file://`; no CDN is required. The API page uses an explicit
-high-contrast light canvas so a dark host preference cannot leave light-theme
-Swagger UI text on a dark browser background. Request submission, query
-string configuration, credential persistence, and Swagger's online validator are
-disabled. The content security policy also blocks browser connections, so
-external `$ref` values—relative or remote—are not resolved in the offline view.
-Bundle those references into one document first when their schemas must be
-visible.
+- **100% Offline**: Embedded CSS and JavaScript. Open `index.html` directly in your browser (`file://`) without running a web server or needing an internet connection.
+- **Packaged Swagger UI**: Easily browse and inspect API endpoint contracts without sending live network requests.
+- **Privacy & Security**: Built with a strict Content Security Policy (CSP). It disables external network calls, tracking, and remote analytics.
 
-The generated site contains local CSS and JavaScript only, works from `file://`,
-performs no network requests, executes no target code, and makes no model calls.
-Repository-controlled strings are HTML-escaped or safely serialized, referenced
-artifacts cannot escape the input folder, and a restrictive content security
-policy is included. `render-manifest.json` lists the generated pages, assets, and
-any detailed artifacts that could not be rendered. Treat original reports and
-specifications as the machine-readable contracts; HTML is a human review surface
-suitable for a CI artifact or static site host.
+---
 
-### Pull-request gates
+### 7. Enforcing Pull-Request Security Gates in CI/CD
+
+Prevent developers from accidentally merging unauthenticated routes or breaking documentation:
 
 ```bash
-# Produce a baseline from the base revision.
+# Step 1: Scan the base branch (e.g. main)
 npx --no-install express-recon audit --src ./base --config recon.config.yaml \
   --format json --out ./base-results --fail-on incomplete
 
-# Compare the full PR inventory and gate only new findings/regressions.
+# Step 2: Scan the pull request and fail ONLY on newly introduced public routes or regressions:
 npx --no-install express-recon audit --src ./current --config recon.config.yaml \
   --baseline ./base-results/routes.json \
   --format json,md --out ./current-results \
   --fail-on new,regression,incomplete
 ```
 
-Use the pinned [GitHub Actions example](./examples/github-actions/express-recon-pr.yml)
-for annotations, bounded job summaries, and complete report artifacts. It
-intentionally installs the scanner and reads config/ignore policy from the base
-revision, so a pull request cannot weaken its own gate. Protect the workflow,
-lockfile, config, and ignore file with CODEOWNERS or equivalent required review.
-Baseline comparison fails when two current reports carry different scan-scope
-fingerprints; scan both revisions with the same policy.
+- If a developer introduces a new route without auth, `audit` exits with code `2`, blocking the PR.
+- Existing accepted routes from the baseline do not cause false alarms.
+- See our ready-to-copy [GitHub Actions PR workflow](./examples/github-actions/express-recon-pr.yml) with automated PR comments and annotations.
 
-To send only newly discovered method/path pairs to Slack, add the
-[trusted Slack notifier example](./examples/github-actions/slack-new-routes/README.md).
-It consumes `delta.addedRoutes` from the audit artifact in a separate
-`workflow_run`, keeping the incoming webhook out of the pull-request job. The
-guide lists exactly which files to commit, how to configure the secret, how to
-preview the payload without sending it, and when a committed baseline is useful.
+To send real-time alerts when new routes are merged:
 
-For a receiver you control, use the
-[signed webhook example](./examples/github-actions/webhook-new-routes/README.md).
-The `notify` command emits bounded events for added/removed/semantically changed routes,
-authentication regressions, and incomplete scans from either a repository or
-organization comparison. Delivery uses HMAC-SHA256 Standard Webhooks headers,
-an exact committed hostname allowlist, HTTPS-only/no-redirect requests, current
-plus previous secret rotation, bounded retry, and deterministic event IDs for
-receiver-side deduplication. Secrets are read only from named environment
-variables; `--dry-run` needs neither a URL nor a secret.
+- Use our [trusted Slack notifier example](./examples/github-actions/slack-new-routes/README.md) to post new endpoints directly to your team's Slack channel.
+- Or use our [signed webhook example](./examples/github-actions/webhook-new-routes/README.md) for custom webhook listeners.
+  The `notify` command emits bounded events for added/removed/semantically changed routes,
+  authentication regressions, and incomplete scans from either a repository or
+  organization comparison. Delivery uses HMAC-SHA256 Standard Webhooks headers,
+  an exact committed hostname allowlist, HTTPS-only/no-redirect requests, current
+  plus previous secret rotation, bounded retry, and deterministic event IDs for
+  receiver-side deduplication. Secrets are read only from named environment
+  variables; `--dry-run` needs neither a URL nor a secret.
 
 ```bash
 npx --no-install express-recon notify \
@@ -764,6 +572,46 @@ API JSDoc coverage.
 - Organization scans are API-visible rather than proof of every repository that
   exists; token permissions define visibility.
 - Runtime/hybrid mode is Express-only and for trusted local code only.
+
+## Frequently asked questions (FAQ)
+
+<details>
+<summary><b>1. Does express-recon execute my backend code or start the server?</b></summary>
+
+**In static mode (the default), no.** Static analysis parses your code's AST using `oxc-parser`, reading `.js` and `.ts` files as structured text without booting your server, connecting to databases, or executing any code. If you explicitly choose runtime or hybrid mode for advanced Express inspection, it executes trusted code in an isolated worker process.
+
+</details>
+
+<details>
+<summary><b>2. Why did my audit command exit with code 2?</b></summary>
+
+Exit code `2` is an intentional policy gate signal, not an application crash. With `--fail-on public,unknown`, `express-recon` returns exit code `2` when a route has no configured guard match (`public`) or has middleware that still requires review (`unknown`). In CI/CD, this stops the job on those configured policy findings; it does not prove that a route is internet-reachable or that a recognized guard is effective at runtime.
+
+</details>
+
+<details>
+<summary><b>3. How do I mark an endpoint like /health or /login as public without failing the audit?</b></summary>
+
+Add it to the `acceptedPublic` list in your `recon.config.yaml`:
+
+```yaml
+acceptedPublic:
+  - "GET /health"
+  - "POST /login"
+```
+
+Once listed, `audit` knows this route is intentionally open to the public and will not flag it as a violation.
+
+</details>
+
+<details>
+<summary><b>4. Does it support TypeScript and path aliases?</b></summary>
+
+**Yes!** `express-recon` parses TypeScript natively, resolves `tsconfig.json` path aliases (such as `@/controllers/*`), handles barrel exports (`index.ts`), and extracts TypeScript DTO validation schemas.
+
+</details>
+
+---
 
 MIT licensed. Security issues should be reported privately as described in
 [SECURITY.md](./SECURITY.md).

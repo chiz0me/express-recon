@@ -38,6 +38,50 @@ const SKIP_DIRS = new Set([
   "out",
 ]);
 const MAX_TREE_OUTPUT = 64 * 1024 * 1024;
+const ACTIVE_TEMP_DIRS = new Set();
+
+function registerTempDir(dir) {
+  ACTIVE_TEMP_DIRS.add(dir);
+}
+
+function unregisterTempDir(dir) {
+  if (!dir || typeof dir !== "string") return false;
+  if (!ACTIVE_TEMP_DIRS.has(dir)) return false;
+  try {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    ACTIVE_TEMP_DIRS.delete(dir);
+    return true;
+  } catch {
+    // Retain in ACTIVE_TEMP_DIRS so exit handler can retry
+    return false;
+  }
+}
+
+/**
+ * Release and delete a materialized temporary repository directory.
+ *
+ * @param {string|{temp:string}} target directory path or object returned by acquireRepository
+ * @returns {boolean} true if a registered temporary directory was released, false otherwise
+ */
+function releaseRepository(target) {
+  const dir = typeof target === "string" ? target : target?.temp;
+  return unregisterTempDir(dir);
+}
+
+process.once("exit", () => {
+  for (const dir of ACTIVE_TEMP_DIRS) {
+    try {
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+      ACTIVE_TEMP_DIRS.delete(dir);
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+});
 
 function hasControlCharacters(value) {
   for (let index = 0; index < value.length; index++) {
@@ -353,6 +397,7 @@ function acquireRepository(source, opts = {}) {
   const requestedRef = opts.ref || "HEAD";
   if (!validRef(requestedRef)) throw new Error(`Invalid Git ref ${JSON.stringify(requestedRef)}`);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-repository-"));
+  registerTempDir(temp);
   const objectRepo = path.join(temp, "objects");
   const snapshot = path.join(temp, "snapshot");
   try {
@@ -410,9 +455,10 @@ function acquireRepository(source, opts = {}) {
         followedSymlinks: false,
         acquisition,
       },
+      cleanup: () => releaseRepository(temp),
     };
   } catch (err) {
-    fs.rmSync(temp, { recursive: true, force: true });
+    unregisterTempDir(temp);
     throw err;
   }
 }
@@ -730,7 +776,7 @@ function scanRepository(source, opts = {}) {
       documentation,
     };
   } finally {
-    fs.rmSync(acquired.temp, { recursive: true, force: true });
+    unregisterTempDir(acquired.temp);
   }
 }
 
@@ -738,6 +784,7 @@ module.exports = {
   acquireRepository,
   githubGitConfig,
   normalizeRepository,
+  releaseRepository,
   scanRepository,
   validRef,
 };

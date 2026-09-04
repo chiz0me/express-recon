@@ -22,7 +22,7 @@ const {
   createMiddlewareReview,
   validateAssessment,
 } = require("./review");
-const { acquireRepository, scanRepository } = require("./repository");
+const { acquireRepository, releaseRepository, scanRepository } = require("./repository");
 const { listOrganizationRepositories, scanOrganization } = require("./organization");
 const { renderHtmlSite } = require("./html");
 const {
@@ -79,6 +79,7 @@ const {
  * @property {typeof validateAssessment} validateAssessment Validate the provider-neutral assessment schema.
  * @property {typeof MIDDLEWARE_ASSESSMENT_SCHEMA} MIDDLEWARE_ASSESSMENT_SCHEMA JSON Schema for assessment responses.
  * @property {typeof acquireRepository} acquireRepository Materialize a bounded non-executing Git snapshot.
+ * @property {typeof releaseRepository} releaseRepository Clean up an acquired repository snapshot.
  * @property {typeof scanRepository} scanRepository Scan one Git ref and clean up its source snapshot.
  * @property {typeof listOrganizationRepositories} listOrganizationRepositories Enumerate API-visible organization repositories.
  * @property {typeof scanOrganization} scanOrganization Build a bounded organization inventory.
@@ -117,6 +118,7 @@ module.exports = {
   validateAssessment,
   MIDDLEWARE_ASSESSMENT_SCHEMA,
   acquireRepository,
+  releaseRepository,
   scanRepository,
   listOrganizationRepositories,
   scanOrganization,

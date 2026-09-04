@@ -99,10 +99,32 @@ function collectObjectBindings(program) {
   return result;
 }
 
+function flattenObject(object, objects, seen = new Set()) {
+  if (!object || object.type !== "ObjectExpression" || !objects) return object;
+  if (!object.properties.some((p) => p.type === "SpreadElement")) return object;
+  const flatProperties = [];
+  let hasUnresolvedSpread = false;
+  for (const prop of object.properties) {
+    if (prop.type === "SpreadElement") {
+      const spread = resolveObject(prop.argument, objects, new Set(seen));
+      if (spread?.type === "ObjectExpression") {
+        flatProperties.push(...spread.properties);
+        if (spread.hasUnresolvedSpread) hasUnresolvedSpread = true;
+      } else {
+        hasUnresolvedSpread = true;
+        flatProperties.push(prop);
+      }
+    } else {
+      flatProperties.push(prop);
+    }
+  }
+  return { ...object, properties: flatProperties, hasUnresolvedSpread };
+}
+
 function resolveObject(node, objects, seen = new Set()) {
   const value = unwrapValue(node);
   if (!value) return null;
-  if (value.type === "ObjectExpression") return value;
+  if (value.type === "ObjectExpression") return flattenObject(value, objects, seen);
   if (value.type !== "Identifier" || seen.has(value.name)) return null;
   const object = objects.get(value.name);
   if (!object) return null;
@@ -112,9 +134,16 @@ function resolveObject(node, objects, seen = new Set()) {
 
 function objectProperty(object, name) {
   if (!object) return null;
+  let hasTrailingSpread = false;
   for (let index = object.properties.length - 1; index >= 0; index--) {
     const property = object.properties[index];
-    if (property.type === "Property" && propertyName(property) === name) return property.value;
+    if (property.type === "SpreadElement") {
+      hasTrailingSpread = true;
+      continue;
+    }
+    if (property.type === "Property" && propertyName(property) === name) {
+      return hasTrailingSpread ? null : property.value;
+    }
   }
   return null;
 }
@@ -753,6 +782,7 @@ function dynamicModuleMetadata(node, model) {
 function collectModule(node, call, model, code, ctx) {
   const metadata = resolveObject(call.arguments[0], model.objects);
   const dynamicMappingsBefore = model.dynamicRouterMappings;
+  const isDynamic = !metadata || Boolean(metadata.hasUnresolvedSpread);
   const module = {
     kind: "module",
     id: `${ctx.filePath}#nestjs-module:${node.id.name}`,
@@ -763,14 +793,14 @@ function collectModule(node, call, model, code, ctx) {
     routerMappings: [],
     globalMiddleware: [],
     middlewareRegistrations: [],
-    metadataDynamic: !metadata,
+    metadataDynamic: isDynamic,
     dynamicRouterMappings: 0,
   };
-  if (!metadata) {
+  if (isDynamic) {
     model.diagnostics.push(
       `NestJS @Module metadata for ${node.id.name} in ${ctx.filePath} is dynamic`,
     );
-    return module;
+    if (!metadata) return module;
   }
   applyModuleMetadata(module, metadata, model, code, ctx);
   const registeredMetadata = dynamicModuleMetadata(node, model);

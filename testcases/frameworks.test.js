@@ -927,3 +927,224 @@ test("organization classification distinguishes runtime dependencies from applic
     developmentCount: 0,
   });
 });
+
+test("Fastify adapter resolves route options and hooks across object spread", () =>
+  temporaryRepository(
+    {
+      "app.js": `
+        const Fastify = require("fastify");
+        function guard() {}
+        const commonOptions = {
+          preHandler: guard,
+        };
+        const app = Fastify();
+        app.get("/guarded", { ...commonOptions }, async () => ({ ok: true }));
+      `,
+    },
+    (root) => {
+      const registry = audit(
+        { mode: "static", src: root },
+        { authMiddleware: { guard: "authenticated" } },
+      );
+      const routes = routeIndex(registry.routes);
+      assert.ok(routes["GET /guarded"]);
+      assert.equal(routes["GET /guarded"].authStatus, "proven");
+      assert.ok(routes["GET /guarded"].middlewares.some((m) => m.name === "guard"));
+    },
+  ));
+
+test("NestJS adapter resolves module metadata across object spread", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "nest-spread-app",
+        dependencies: { "@nestjs/core": "^11.0.0", "@nestjs/common": "^11.0.0" },
+      }),
+      "src/app.controller.ts": `
+        import { Controller, Get } from "@nestjs/common";
+        @Controller("spread")
+        export class AppController {
+          @Get("ping")
+          ping() { return "pong"; }
+        }
+      `,
+      "src/app.module.ts": `
+        import { Module } from "@nestjs/common";
+        import { AppController } from "./app.controller";
+        const baseMetadata = { controllers: [AppController] };
+        @Module({ ...baseMetadata })
+        export class AppModule {}
+      `,
+      "src/main.ts": `
+        import { NestFactory } from "@nestjs/core";
+        import { AppModule } from "./app.module";
+        async function bootstrap() {
+          const app = await NestFactory.create(AppModule);
+        }
+      `,
+    },
+    (root) => {
+      const registry = inventory({ mode: "static", src: root });
+      const routes = routeIndex(registry.routes);
+      assert.ok(routes["GET /spread/ping"]);
+    },
+  ));
+
+test("Fastify route options with trailing unknown spread mark auth uncertain and coverage incomplete", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "fastify-trailing-spread-app",
+        dependencies: { fastify: "^5.0.0" },
+      }),
+      "server.js": `
+        const Fastify = require("fastify");
+        function guard(req, reply, done) { done(); }
+        const runtimeOptions = getDynamicOptions();
+        const common = { preHandler: guard, ...runtimeOptions };
+        const app = Fastify();
+        app.get("/guarded", { ...common }, async () => ({ ok: true }));
+      `,
+    },
+    (root) => {
+      const reg = audit(
+        { mode: "static", src: root },
+        { authMiddleware: { guard: "authenticated" } },
+      );
+      const routes = routeIndex(reg.routes);
+      assert.ok(routes["GET /guarded"]);
+      assert.notEqual(routes["GET /guarded"].authStatus, "proven");
+      assert.equal(routes["GET /guarded"].authStatus, "unknown");
+      assert.equal(reg.routeGraph.complete, false);
+      assert.ok(
+        reg.diagnostics.some((d) => d.includes("coverage is incomplete") || d.includes("opaque")),
+      );
+    },
+  ));
+
+test("Fastify route options with leading spread overridden by trailing guard remain proven", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "fastify-leading-spread-app",
+        dependencies: { fastify: "^5.0.0" },
+      }),
+      "server.js": `
+        const Fastify = require("fastify");
+        function guard(req, reply, done) { done(); }
+        const runtimeOptions = getDynamicOptions();
+        const common = { ...runtimeOptions, preHandler: guard };
+        const app = Fastify();
+        app.get("/guarded", { ...common }, async () => ({ ok: true }));
+      `,
+    },
+    (root) => {
+      const reg = audit(
+        { mode: "static", src: root },
+        { authMiddleware: { guard: "authenticated" } },
+      );
+      const routes = routeIndex(reg.routes);
+      assert.ok(routes["GET /guarded"]);
+      assert.equal(routes["GET /guarded"].authStatus, "proven");
+    },
+  ));
+
+test("NestJS module metadata with trailing unknown spread marks coverage incomplete", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "nest-dynamic-spread-app",
+        dependencies: { "@nestjs/core": "^11.0.0", "@nestjs/common": "^11.0.0" },
+      }),
+      "src/app.controller.ts": `
+        import { Controller, Get } from "@nestjs/common";
+        @Controller("users")
+        export class AppController {
+          @Get("me")
+          me() { return { id: 1 }; }
+        }
+      `,
+      "src/app.module.ts": `
+        import { Module } from "@nestjs/common";
+        import { AppController } from "./app.controller";
+        const runtimeModule = getDynamicModule();
+        const metadata = { controllers: [AppController], ...runtimeModule };
+        @Module({ ...metadata })
+        export class AppModule {}
+      `,
+      "src/main.ts": `
+        import { NestFactory } from "@nestjs/core";
+        import { AppModule } from "./app.module";
+        async function bootstrap() {
+          const app = await NestFactory.create(AppModule);
+        }
+      `,
+    },
+    (root) => {
+      const reg = inventory({ mode: "static", src: root });
+      assert.equal(reg.routeGraph.complete, false);
+      assert.ok(reg.diagnostics.some((d) => d.includes("dynamic") || d.includes("incomplete")));
+    },
+  ));
+
+test("Fastify register options with trailing unknown spread marks route pathConfidence partial and coverage incomplete", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "fastify-spread-app",
+        dependencies: { fastify: "^4.0.0" },
+      }),
+      "plugin.js": `
+        module.exports = async function plugin(app) {
+          app.get("/items", async () => ({ items: [] }));
+        };
+      `,
+      "app.js": `
+        const fastify = require("fastify");
+        const plugin = require("./plugin");
+        const app = fastify();
+        const dynamic = getRuntimeConfig();
+        const options = { prefix: "/api", ...dynamic };
+        app.register(plugin, { ...options });
+        module.exports = app;
+      `,
+    },
+    (root) => {
+      const reg = inventory({ mode: "static", src: root });
+      assert.equal(reg.routes.length, 1);
+      assert.equal(reg.routes[0].path, "/api/items");
+      assert.equal(reg.routes[0].pathConfidence, "partial");
+      assert.equal(reg.routeGraph.complete, false);
+      assert.ok(reg.routeGraph.opaqueMounts.length > 0);
+      assert.ok(reg.diagnostics.some((d) => d.includes("opaque Fastify registration")));
+    },
+  ));
+
+test("Fastify uncertainty evidence in middleware.raw normalizes absolute root paths", () =>
+  temporaryRepository(
+    {
+      "package.json": JSON.stringify({
+        name: "fastify-raw-app",
+        dependencies: { fastify: "^4.0.0" },
+      }),
+      "app.js": `
+        const fastify = require("fastify");
+        const app = fastify();
+        const runtime = getOptions();
+        const options = { preHandler: () => {}, ...runtime };
+        app.get("/guarded", { ...options }, async () => ({ ok: true }));
+        module.exports = app;
+      `,
+    },
+    (root) => {
+      const reg = audit({ mode: "static", src: root });
+      const rep = buildReport(reg, { command: "audit", mode: "static", sourceRoot: root });
+      assert.equal(rep.routes.length, 1);
+      const uncertainMw = rep.routes[0].middlewares.find((m) =>
+        m.raw.includes("uncertain Fastify"),
+      );
+      assert.ok(uncertainMw);
+      assert.equal(uncertainMw.raw.includes(root), false);
+      assert.ok(uncertainMw.raw.startsWith("uncertain Fastify route options at ./app.js:"));
+    },
+  ));

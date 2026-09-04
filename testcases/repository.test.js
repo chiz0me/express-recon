@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync, spawnSync } = require("node:child_process");
 
-const { scanRepository } = require("../src/index");
+const { acquireRepository, releaseRepository, scanRepository } = require("../src/index");
 const { normalizeRepository, validRef } = require("../src/repository");
 
 const FIXTURE = path.join(__dirname, "fixtures", "repository-app");
@@ -469,4 +469,38 @@ test("scan-repo never accepts target execution options", () => {
   );
   assert.equal(result.status, 1);
   assert.match(result.stderr, /scan-repo does not accept/);
+});
+
+test("acquireRepository provides cleanup method and unregisters cleanly", () => {
+  withRepository((root) => {
+    const acquired = acquireRepository(root);
+    assert.ok(acquired.temp);
+    assert.equal(fs.existsSync(acquired.temp), true);
+    assert.equal(typeof acquired.cleanup, "function");
+
+    // Call cleanup
+    acquired.cleanup();
+    assert.equal(fs.existsSync(acquired.temp), false);
+
+    // Calling releaseRepository again on already deleted folder does not throw
+    assert.doesNotThrow(() => releaseRepository(acquired.temp));
+    assert.doesNotThrow(() => releaseRepository(acquired));
+  });
+});
+
+test("releaseRepository never deletes unrelated directories not in ACTIVE_TEMP_DIRS", () => {
+  const unrelated = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-unrelated-"));
+  try {
+    const canary = path.join(unrelated, "canary.txt");
+    fs.writeFileSync(canary, "preserve me", "utf8");
+
+    // Passing arbitrary path must return false and not delete anything
+    const released = releaseRepository(unrelated);
+    assert.equal(released, false);
+    assert.equal(fs.existsSync(unrelated), true);
+    assert.equal(fs.existsSync(canary), true);
+    assert.equal(fs.readFileSync(canary, "utf8"), "preserve me");
+  } finally {
+    fs.rmSync(unrelated, { recursive: true, force: true });
+  }
 });

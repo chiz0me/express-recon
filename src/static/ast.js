@@ -58,18 +58,20 @@ function parse(code, filename, onError) {
 }
 
 /** Depth-first pre-order visit of every ESTree node, in document order. */
-function walk(node, visit) {
+function walk(node, visit, ancestors = []) {
   if (!node || typeof node.type !== "string") return;
-  visit(node);
+  visit(node, ancestors);
+  ancestors.push(node);
   for (const key of Object.keys(node)) {
     if (key === "loc" || key === "start" || key === "end") continue;
     const child = node[key];
     if (Array.isArray(child)) {
-      for (const item of child) walk(item, visit);
+      for (const item of child) walk(item, visit, ancestors);
     } else if (child && typeof child.type === "string") {
-      walk(child, visit);
+      walk(child, visit, ancestors);
     }
   }
+  ancestors.pop();
 }
 
 /** Strip TS-only expression wrappers (`x as T`, `x!`, `(x)`) to the inner node. */
@@ -84,9 +86,16 @@ function calleeName(node) {
   const n = unwrap(node);
   if (!n) return null;
   if (n.type === "Identifier") return n.name;
-  if (n.type === "MemberExpression" && !n.computed) {
+  if (n.type === "ThisExpression") return "this";
+  if (n.type === "MemberExpression") {
+    const propName = !n.computed
+      ? n.property.name
+      : n.property?.type === "Literal" && typeof n.property.value === "string"
+        ? n.property.value
+        : null;
+    if (!propName) return null;
     const obj = calleeName(n.object);
-    return obj ? `${obj}.${n.property.name}` : null;
+    return obj ? `${obj}.${propName}` : null;
   }
   return null;
 }

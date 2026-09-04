@@ -1,13 +1,30 @@
 # Library API
 
-This page documents every value exported by `require("express-recon")`. The
-public export list is checked against these headings in CI; adding an export
-without documenting it fails `npm run docs:coverage`.
+Welcome to the `express-recon` Node.js Library API reference. You can use these functions to scan projects, audit routes, generate OpenAPI specifications, and manage repository snapshots programmatically in your Node.js scripts or automation pipelines.
 
-Unless a section says otherwise, functions are synchronous and throw an
-`Error` for invalid input. Repository source, route names, paths, middleware
-names, diagnostics, and documentation excerpts are untrusted data: escape them
-before placing them in HTML, terminals, or chat markup.
+### Quick Example
+
+```js
+const { inventory, audit, buildReport, formatters } = require("express-recon");
+
+// 1. Scan your project statically (Express, Fastify, or NestJS):
+const registry = inventory({ mode: "static", src: "." });
+
+// 2. Generate a clean Markdown or JSON report:
+const report = buildReport(registry, {
+  command: "inventory",
+  mode: "static",
+  sourceRoot: ".",
+});
+
+console.log(formatters.markdown.format(report));
+```
+
+> ℹ️ **General Principles**:
+>
+> - Unless stated otherwise, functions are synchronous and throw standard JavaScript `Error` objects for invalid input.
+> - Source code paths, route strings, and parameter names are untrusted data: please escape them before outputting to HTML or user-facing interfaces.
+> - The public export list is checked in CI; every export is documented below.
 
 ## Inventory and audit
 
@@ -212,8 +229,15 @@ mode for untrusted repositories.
 
 Creates a bounded, non-executing source snapshot for a Git URL, GitHub
 `owner/repository`, or local Git repository. The return value contains `temp`,
-`snapshot`, and provenance. The caller must remove `temp`; use
-`scanRepository()` when raw snapshot access is unnecessary.
+`snapshot`, provenance, and a `cleanup()` function. The caller must remove `temp`
+or call `releaseRepository()`; use `scanRepository()` when raw snapshot access is
+unnecessary.
+
+### `releaseRepository(target)`
+
+Removes a materialized temporary repository snapshot and unregisters it from
+active process-exit tracking. `target` may be the path string to the temporary
+directory or the object returned by `acquireRepository()`.
 
 ### `scanRepository(source, options)`
 

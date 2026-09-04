@@ -72,6 +72,154 @@ function formatError(error) {
   return `${location} ${safeText(error.message || error.keyword)}${detail}`;
 }
 
+const HTTP_VERBS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"];
+
+function resolveLocalPointer(document, reference) {
+  if (!document || typeof document !== "object" || !reference.startsWith("#/")) return undefined;
+  let current = document;
+  for (const encoded of reference.slice(2).split("/")) {
+    let key;
+    try {
+      key = decodeURIComponent(encoded).replaceAll("~1", "/").replaceAll("~0", "~");
+    } catch {
+      return undefined;
+    }
+    if (!current || typeof current !== "object" || !Object.hasOwn(current, key)) return undefined;
+    current = current[key];
+  }
+  return current;
+}
+
+/**
+ * Resolve a local Parameter Object reference for semantic template checks. External, broken, or
+ * cyclic references remain structurally valid evidence whose contents are unknown offline.
+ */
+function resolveParameter(item, document, seen = new Set()) {
+  if (!item || typeof item !== "object") return { parameter: null, unresolved: false };
+  if (typeof item.$ref === "string") {
+    if (seen.size >= 10 || seen.has(item.$ref)) {
+      return { parameter: null, unresolved: true };
+    }
+    const nextSeen = new Set(seen);
+    nextSeen.add(item.$ref);
+    const target = resolveLocalPointer(document, item.$ref);
+    if (!target) return { parameter: null, unresolved: true };
+    return resolveParameter(target, document, nextSeen);
+  }
+  return { parameter: item, unresolved: false };
+}
+
+function validatePathTemplates(paths, label, document) {
+  if (!paths || typeof paths !== "object" || Array.isArray(paths)) return;
+  for (const pathKey of Object.keys(paths)) {
+    if (pathKey.startsWith("x-")) continue;
+    if (!pathKey.startsWith("/")) {
+      throw new Error(`${label} path ${JSON.stringify(pathKey)} must start with '/'`);
+    }
+    let inBrace = false;
+    let paramStart = -1;
+    const pathParams = [];
+    const pathParamSet = new Set();
+    for (let i = 0; i < pathKey.length; i++) {
+      const ch = pathKey[i];
+      if (ch === "{") {
+        if (inBrace) {
+          throw new Error(
+            `${label} path ${JSON.stringify(pathKey)} has nested or malformed parameter braces`,
+          );
+        }
+        inBrace = true;
+        paramStart = i + 1;
+      } else if (ch === "}") {
+        if (!inBrace) {
+          throw new Error(
+            `${label} path ${JSON.stringify(pathKey)} has unmatched closing brace '}'`,
+          );
+        }
+        const paramName = pathKey.slice(paramStart, i);
+        if (!paramName || !/^[A-Za-z0-9_.-]+$/.test(paramName)) {
+          throw new Error(
+            `${label} path ${JSON.stringify(pathKey)} contains invalid parameter name ${JSON.stringify(paramName)}`,
+          );
+        }
+        if (pathParamSet.has(paramName)) {
+          throw new Error(
+            `${label} path ${JSON.stringify(pathKey)} contains duplicate parameter name ${JSON.stringify(paramName)}`,
+          );
+        }
+        pathParams.push(paramName);
+        pathParamSet.add(paramName);
+        inBrace = false;
+      }
+    }
+    if (inBrace) {
+      throw new Error(`${label} path ${JSON.stringify(pathKey)} has unclosed parameter brace '{'`);
+    }
+
+    const pathItem = paths[pathKey];
+    if (!pathItem || typeof pathItem !== "object" || Array.isArray(pathItem)) continue;
+
+    const pathLevelParams = Array.isArray(pathItem.parameters) ? pathItem.parameters : [];
+    const pathLevelPathParams = new Set();
+    let unresolvedPathLevelParameter = typeof pathItem.$ref === "string";
+    for (const rawP of pathLevelParams) {
+      const resolved = resolveParameter(rawP, document);
+      unresolvedPathLevelParameter ||= resolved.unresolved;
+      const p = resolved.parameter;
+      if (p && typeof p === "object" && p.in === "path" && typeof p.name === "string") {
+        pathLevelPathParams.add(p.name);
+      }
+    }
+
+    let hasOperations = false;
+    for (const verb of HTTP_VERBS) {
+      const operation = pathItem[verb];
+      if (!operation || typeof operation !== "object" || Array.isArray(operation)) continue;
+      hasOperations = true;
+
+      const opLevelParams = Array.isArray(operation.parameters) ? operation.parameters : [];
+      const opPathParams = new Set(pathLevelPathParams);
+      let unresolvedOperationParameter = unresolvedPathLevelParameter;
+      for (const rawP of opLevelParams) {
+        const resolved = resolveParameter(rawP, document);
+        unresolvedOperationParameter ||= resolved.unresolved;
+        const p = resolved.parameter;
+        if (p && typeof p === "object" && p.in === "path" && typeof p.name === "string") {
+          opPathParams.add(p.name);
+        }
+      }
+
+      if (!unresolvedOperationParameter) {
+        for (const param of pathParams) {
+          if (!opPathParams.has(param)) {
+            throw new Error(
+              `${label} path ${JSON.stringify(pathKey)} operation ${verb.toUpperCase()} is missing required path parameter declaration for '{${param}}'`,
+            );
+          }
+        }
+      }
+
+      for (const declared of opPathParams) {
+        if (!pathParamSet.has(declared)) {
+          throw new Error(
+            `${label} path ${JSON.stringify(pathKey)} operation ${verb.toUpperCase()} declares path parameter '${declared}' which is not in the path template`,
+          );
+        }
+      }
+    }
+
+    if (!hasOperations && pathParams.length > 0 && !unresolvedPathLevelParameter) {
+      for (const param of pathParams) {
+        if (!pathLevelPathParams.has(param)) {
+          throw new Error(
+            `${label} path ${JSON.stringify(pathKey)} is missing required path parameter declaration for '{${param}}'`,
+          );
+        }
+      }
+    }
+  }
+}
+
 /**
  * Validate a complete OpenAPI 3.0/3.1 document against the official schema.
  * Validation is entirely local: schemas are bundled and no external `$ref`
@@ -84,6 +232,7 @@ function validateOpenApiDocument(document, label = "OpenAPI document") {
   if (typeof document.openapi !== "string") {
     throw new Error(`${label} must declare an OpenAPI 3.0.x or 3.1.x version`);
   }
+  validatePathTemplates(document.paths, label, document);
   const selected = validatorFor(document.openapi);
   if (selected.validate(document)) return { version: document.openapi, family: selected.family };
   const errors = (selected.validate.errors || []).slice(0, MAX_ERRORS).map(formatError);

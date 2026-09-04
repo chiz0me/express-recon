@@ -710,6 +710,7 @@ function reconcileDocumentation(report, opts = {}) {
   );
   const dynamicOperations = [...codeOps.keys()].filter((key) => key.includes("{dynamic}"));
   const duplicateOperations = generated["x-express-recon"]?.duplicateOperations || [];
+  const pathVariantTruncations = generated["x-express-recon"]?.pathVariantTruncations || [];
   const graph = routeGraphUncertainty(report, selection);
   const incompleteInventory = report.scanCoverage?.complete === false || graph.incomplete;
   const incompleteDocumentationDiscovery =
@@ -752,6 +753,7 @@ function reconcileDocumentation(report, opts = {}) {
       schemaConflicts: schemaConflicts.length,
       dynamicOperations: dynamicOperations.length,
       duplicateOperations: duplicateOperations.length,
+      pathVariantTruncations: pathVariantTruncations.length,
       incompleteInventory,
       incompleteDocumentationDiscovery,
     },
@@ -764,6 +766,7 @@ function reconcileDocumentation(report, opts = {}) {
     schemaConflicts,
     dynamicOperations: dynamicOperations.sort(),
     duplicateOperations,
+    pathVariantTruncations,
     scanCoverage: report.scanCoverage || null,
     routeGraph: {
       complete: !graph.incomplete,

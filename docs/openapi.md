@@ -1,26 +1,32 @@
 # OpenAPI and swagger-jsdoc guide
 
-express-recon can build a deterministic OpenAPI 3.1 skeleton or reconcile
-generated evidence into an existing OpenAPI 3.0 or 3.1 document for an Express,
-Fastify, or NestJS repository. It does
-not claim that code-derived schemas are a finished API contract: explicit
-framework/validator metadata can be high confidence, while inferred field reads
-and returned expressions remain review evidence.
+`express-recon` automatically generates and reconciles OpenAPI 3.0 and 3.1 documentation for **Express**, **Fastify**, and **NestJS** applications.
 
-## Pick the right command
+> 💡 **In Simple Words**:
+> In many backend projects, Swagger/OpenAPI documentation gets outdated quickly. Developers add, change, or delete API endpoints in code, but forget to update the documentation YAML or JSON files.
+> `express-recon` addresses this by reading supported route handlers, TypeScript DTOs, and validation schemas (Zod, Joi, class-validator, Fastify schemas) to generate an evidence-backed OpenAPI specification. Explicit schemas carry higher confidence; inferred placeholders and incomplete analysis remain marked for review.
 
-Use `docs` when the repository may already contain an OpenAPI document or
-`@openapi`/`@swagger` JSDoc blocks:
+---
+
+## Pick the right command for your task
+
+### 1. Merge existing docs with your code (`docs`)
+
+Use `docs` when your project already has an OpenAPI specification (`openapi.yaml` / `openapi.json`) or `@openapi` / `@swagger` JSDoc comments in your route files:
 
 ```bash
+# Step 1: Discover application roots and OpenAPI candidates
 express-recon discover --src . --out .express-recon
+
+# Step 2: Merge docs with your code routes
 express-recon docs --src . \
   --app-id 'app:src/app.js#app' \
   --out .express-recon/docs
 ```
 
-Use `inventory` or `audit` with `--format openapi` when you only need a
-code-derived skeleton:
+### 2. Generate a fresh OpenAPI spec from code (`inventory`)
+
+Use `inventory` or `audit` with `--format openapi` when you don't have any existing documentation and want a fresh OpenAPI 3.1 skeleton generated purely from your source code:
 
 ```bash
 express-recon inventory --src . --format openapi --out .express-recon
@@ -157,6 +163,8 @@ The report separates:
   annotated with the affected operation and evidence sources;
 - `dynamicOperations`: paths containing an unresolved dynamic segment;
 - `duplicateOperations`: method/path collisions that OpenAPI cannot represent;
+- `pathVariantTruncations`: route expressions whose optional variants exceeded
+  the bounded OpenAPI expansion limit;
 - `scanCoverage`, `routeGraph` (including partial-route and opaque-provider
   counts), and diagnostics.
 
@@ -170,8 +178,8 @@ express-recon docs --src . --app-id 'app:src/app.js#app' \
 
 - `docs-drift` matches code-only or verified docs-only operations.
 - `docs-conflict` matches authored value conflicts.
-- `docs-incomplete` matches dynamic/duplicate operations, incomplete route
-  coverage or documentation discovery, unresolved route graphs, and possible
+- `docs-incomplete` matches dynamic/duplicate/truncated operations, incomplete
+  route coverage or documentation discovery, unresolved route graphs, and possible
   opaque route-provider mounts.
 
 A matched gate exits `2`; invalid input or an operational error exits `1`.

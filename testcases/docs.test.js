@@ -521,6 +521,43 @@ test("docs-incomplete gates incomplete documentation discovery, not only route s
   }
 });
 
+test("docs reports and gates bounded optional-path expansion", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-docs-path-bound-"));
+  try {
+    const routePath =
+      "/bounded" + Array.from({ length: 20 }, (_unused, index) => `{/:part${index}}`).join("");
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "bounded-docs", dependencies: { express: "^5" } }),
+    );
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      [
+        'const express = require("express");',
+        "const app = express();",
+        `app.get(${JSON.stringify(routePath)}, (_req, res) => res.send("ok"));`,
+        "module.exports = app;",
+      ].join("\n"),
+    );
+
+    const inventoryValue = buildReport(inventory({ mode: "static", src: root }), {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+    });
+    const result = reconcileDocumentation(inventoryValue, { root });
+    assert.equal(result.report.summary.pathVariantTruncations, 1);
+    assert.equal(result.report.pathVariantTruncations[0].reason, "variant-limit");
+
+    const gated = spawnSync("node", [CLI, "docs", "--src", root, "--fail-on", "docs-incomplete"], {
+      encoding: "utf8",
+    });
+    assert.equal(gated.status, 2, gated.stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("docs adds security only from an explicit tag-to-scheme mapping", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-docs-security-"));
   try {

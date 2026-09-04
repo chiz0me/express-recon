@@ -116,10 +116,11 @@ function collectRequireBinding(node, bindings, requireAliases) {
     if (!info) return;
     for (const prop of node.id.properties) {
       if (prop.key && prop.value && prop.value.type === "Identifier") {
+        const propName = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
         addBinding(bindings, prop.value.name, {
           source: info.source,
           exportName: "default",
-          props: info.props.concat(prop.key.name),
+          props: info.props.concat(propName),
         });
       }
     }
@@ -133,9 +134,81 @@ function collectImportBinding(node, bindings) {
       addBinding(bindings, spec.local.name, { source, exportName: "default", props: [] });
     else if (spec.type === "ImportNamespaceSpecifier")
       addBinding(bindings, spec.local.name, { source, exportName: "*", props: [] });
-    else if (spec.type === "ImportSpecifier")
-      addBinding(bindings, spec.local.name, { source, exportName: spec.imported.name, props: [] });
+    else if (spec.type === "ImportSpecifier") {
+      const importedName =
+        spec.imported.type === "Identifier" ? spec.imported.name : spec.imported.value;
+      addBinding(bindings, spec.local.name, { source, exportName: importedName, props: [] });
+    }
   }
+}
+
+function boundNamesFromPattern(pattern, out = []) {
+  if (!pattern) return out;
+  if (pattern.type === "Identifier") {
+    out.push(pattern.name);
+  } else if (pattern.type === "AssignmentPattern") {
+    boundNamesFromPattern(pattern.left, out);
+  } else if (pattern.type === "RestElement") {
+    boundNamesFromPattern(pattern.argument, out);
+  } else if (pattern.type === "ObjectPattern") {
+    for (const prop of pattern.properties || []) {
+      if (prop.type === "Property") boundNamesFromPattern(prop.value, out);
+      else if (prop.type === "RestElement") boundNamesFromPattern(prop.argument, out);
+    }
+  } else if (pattern.type === "ArrayPattern") {
+    for (const elem of pattern.elements || []) {
+      if (elem) boundNamesFromPattern(elem, out);
+    }
+  }
+  return out;
+}
+
+function enclosingScopeNode(ancestors, program) {
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const a = ancestors[i];
+    if (
+      a.type === "BlockStatement" ||
+      a.type === "FunctionDeclaration" ||
+      a.type === "FunctionExpression" ||
+      a.type === "ArrowFunctionExpression" ||
+      a.type === "StaticBlock" ||
+      a.type === "ForStatement" ||
+      a.type === "ForInStatement" ||
+      a.type === "ForOfStatement" ||
+      a.type === "CatchClause" ||
+      a.type === "Program"
+    ) {
+      return a;
+    }
+  }
+  return program;
+}
+
+/** `var` belongs to its nearest function/static/program scope, not an enclosing block. */
+function enclosingVarScopeNode(ancestors, program) {
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const ancestor = ancestors[i];
+    if (
+      ancestor.type === "FunctionDeclaration" ||
+      ancestor.type === "FunctionExpression" ||
+      ancestor.type === "ArrowFunctionExpression" ||
+      ancestor.type === "StaticBlock" ||
+      ancestor.type === "Program"
+    ) {
+      return ancestor;
+    }
+  }
+  return program;
+}
+
+/** Assignments execute in their nearest function/static/program context. */
+function enclosingExecutionScopeNode(ancestors, program) {
+  return enclosingVarScopeNode(ancestors, program);
+}
+
+/** Store only source offsets from an AST scope so binding records stay compact. */
+function scopeRange(scope) {
+  return { start: scope.start, end: scope.end };
 }
 
 /**
@@ -189,15 +262,205 @@ function collectBindings(program) {
   };
 
   const routers = new Map();
-  walk(program, (node) => {
-    if (node.type !== "VariableDeclarator" || node.id.type !== "Identifier" || !node.init) return;
-    if (isAppInit(node.init)) routers.set(node.id.name, { kind: "app", start: node.start });
-    else if (isRouterInit(node.init)) {
-      routers.set(node.id.name, { kind: "router", start: node.start });
+  const declarations = new Map();
+  let nextBindingId = 1;
+
+  /** Test whether two compact lexical-scope records denote the same scope. */
+  function sameScope(left, right) {
+    return left.start === right.start && left.end === right.end;
+  }
+
+  /** Classify the value currently held by a binding. */
+  function bindingState(value, eventStart) {
+    if (value && isAppInit(value)) return { kind: "app", start: eventStart };
+    if (value && isRouterInit(value)) return { kind: "router", start: eventStart };
+    const base = value ? routeChainBase(value) : null;
+    if (base && base.host.type === "Identifier") {
+      return {
+        kind: "route",
+        host: base.host.name,
+        pathNode: base.pathNode,
+        allArgs: base.allArgs,
+        start: base.start,
+      };
+    }
+    const candidate = value && unwrap(value);
+    if (
+      candidate &&
+      [
+        "Identifier",
+        "MemberExpression",
+        "CallExpression",
+        "NewExpression",
+        "AwaitExpression",
+        "ConditionalExpression",
+        "LogicalExpression",
+        "SequenceExpression",
+      ].includes(candidate.type)
+    ) {
+      return { kind: "unknown", start: eventStart };
+    }
+    return { kind: "other", start: eventStart };
+  }
+
+  /** Declare a lexical binding and record its initial value as the first state event. */
+  function declareBinding(name, state, scope, declarationKind, declaredAt) {
+    if (!name) return;
+    const list = declarations.get(name) || [];
+    const existingVar =
+      declarationKind === "var"
+        ? list.find(
+            (item) =>
+              item.isDeclaration && item.declarationKind === "var" && sameScope(item.scope, scope),
+          )
+        : null;
+    list.push({
+      ...state,
+      scope,
+      activeScope: scope,
+      bindingId: existingVar?.bindingId || nextBindingId++,
+      declarationKind,
+      isDeclaration: true,
+      eventStart: declaredAt,
+    });
+    declarations.set(name, list);
+  }
+
+  /** Select the innermost lexical declaration visible at a source location. */
+  function lexicalBindingAt(name, node) {
+    const list = declarations.get(name) || [];
+    const byBinding = new Map();
+    for (const item of list) {
+      if (!item.isDeclaration || item.scope.start > node.start || node.end > item.scope.end)
+        continue;
+      if (!byBinding.has(item.bindingId)) byBinding.set(item.bindingId, item);
+    }
+    const candidates = [...byBinding.values()];
+    candidates.sort((left, right) => {
+      const leftSize = left.scope.end - left.scope.start;
+      const rightSize = right.scope.end - right.scope.start;
+      if (leftSize !== rightSize) return leftSize - rightSize;
+      if (left.scope.start !== right.scope.start) return right.scope.start - left.scope.start;
+      return right.eventStart - left.eventStart;
+    });
+    return candidates[0] || null;
+  }
+
+  walk(program, (node, ancestors) => {
+    if (node.type === "VariableDeclarator") {
+      const declaration = [...ancestors]
+        .reverse()
+        .find((ancestor) => ancestor.type === "VariableDeclaration");
+      const declarationKind = declaration?.kind || "const";
+      const scope = scopeRange(
+        declarationKind === "var"
+          ? enclosingVarScopeNode(ancestors, program)
+          : enclosingScopeNode(ancestors, program),
+      );
+      if (node.id.type === "Identifier") {
+        const state = bindingState(node.init, node.start);
+        if (state.kind === "app") {
+          routers.set(node.id.name, { kind: "app", start: node.start });
+        } else if (state.kind === "router") {
+          routers.set(node.id.name, { kind: "router", start: node.start });
+        }
+        declareBinding(node.id.name, state, scope, declarationKind, node.start);
+      } else {
+        for (const name of boundNamesFromPattern(node.id)) {
+          declareBinding(
+            name,
+            { kind: "other", start: node.start },
+            scope,
+            declarationKind,
+            node.start,
+          );
+        }
+      }
+    } else if (node.type === "FunctionDeclaration") {
+      if (node.id?.type === "Identifier") {
+        const scope = enclosingScopeNode(ancestors, program);
+        declareBinding(
+          node.id.name,
+          { kind: "other", start: node.start },
+          scopeRange(scope),
+          "function",
+          node.start,
+        );
+      }
+      for (const param of node.params || []) {
+        for (const name of boundNamesFromPattern(param)) {
+          declareBinding(
+            name,
+            { kind: "other", start: node.start },
+            scopeRange(node),
+            "parameter",
+            node.start,
+          );
+        }
+      }
+    } else if (node.type === "FunctionExpression" || node.type === "ArrowFunctionExpression") {
+      for (const param of node.params || []) {
+        for (const name of boundNamesFromPattern(param)) {
+          declareBinding(
+            name,
+            { kind: "other", start: node.start },
+            scopeRange(node),
+            "parameter",
+            node.start,
+          );
+        }
+      }
+    } else if (node.type === "CatchClause" && node.param) {
+      for (const name of boundNamesFromPattern(node.param)) {
+        declareBinding(
+          name,
+          { kind: "other", start: node.start },
+          scopeRange(node),
+          "catch",
+          node.start,
+        );
+      }
     }
   });
 
-  return { requires: bindings, routers, factoryNames, requireAliases };
+  // Assignments are collected after declarations so each event can attach to
+  // the correct lexical binding, including `var` redeclarations and outer
+  // bindings mutated from a nested block.
+  walk(program, (node, ancestors) => {
+    if (
+      node.type !== "AssignmentExpression" ||
+      node.operator !== "=" ||
+      node.left.type !== "Identifier"
+    ) {
+      return;
+    }
+    const binding = lexicalBindingAt(node.left.name, node);
+    if (!binding) return;
+    const state = bindingState(node.right, node.start);
+    const list = declarations.get(node.left.name) || [];
+    list.push({
+      ...state,
+      scope: binding.scope,
+      activeScope: scopeRange(enclosingExecutionScopeNode(ancestors, program)),
+      bindingId: binding.bindingId,
+      declarationKind: binding.declarationKind,
+      isDeclaration: false,
+      eventStart: node.start,
+    });
+    declarations.set(node.left.name, list);
+    if (state.kind === "app" || state.kind === "router") {
+      routers.set(node.left.name, { kind: state.kind, start: node.start });
+    }
+  });
+
+  return {
+    requires: bindings,
+    routers,
+    declarations,
+    routeBindings: declarations,
+    factoryNames,
+    requireAliases,
+  };
 }
 
 /**
@@ -298,15 +561,29 @@ function refFromExpr(node, ctx) {
     if (b) return { t: "module", source: b.source, exportName: b.exportName, props: b.props };
     return { t: "local", name: n.name };
   }
-  if (n.type === "MemberExpression" && !n.computed && n.object.type === "Identifier") {
-    const b = ctx.requires.get(n.object.name);
-    if (b)
-      return {
-        t: "module",
-        source: b.source,
-        exportName: b.exportName,
-        props: b.props.concat(n.property.name),
-      };
+  if (n.type === "MemberExpression" && !n.computed && n.property.type === "Identifier") {
+    let target = n;
+    const props = [];
+    while (
+      target &&
+      target.type === "MemberExpression" &&
+      !target.computed &&
+      target.property.type === "Identifier"
+    ) {
+      props.unshift(target.property.name);
+      target = unwrap(target.object);
+    }
+    if (target?.type === "Identifier") {
+      const b = ctx.requires.get(target.name);
+      if (b) {
+        return {
+          t: "module",
+          source: b.source,
+          exportName: b.exportName,
+          props: b.props.concat(props),
+        };
+      }
+    }
     return { t: "unknown" };
   }
   if (n.type === "CallExpression") {
@@ -522,10 +799,76 @@ function chainRootIdentifier(objectNode) {
   return null;
 }
 
+function resolveRouteBinding(name, node, ctx) {
+  const decls = ctx?.declarations?.get(name) || ctx?.routeBindings?.get(name);
+  if (!decls || decls.length === 0) return null;
+  const declarationByBinding = new Map();
+  for (const item of decls) {
+    const declaration = item.isDeclaration !== false;
+    if (!declaration || !item.scope || item.scope.start > node.start || node.end > item.scope.end) {
+      continue;
+    }
+    const bindingId = item.bindingId ?? item;
+    const previous = declarationByBinding.get(bindingId);
+    if (!previous || (item.eventStart ?? item.start) > (previous.eventStart ?? previous.start)) {
+      declarationByBinding.set(bindingId, item);
+    }
+  }
+  const bindings = [...declarationByBinding.values()];
+  bindings.sort((left, right) => {
+    const leftSize = left.scope.end - left.scope.start;
+    const rightSize = right.scope.end - right.scope.start;
+    if (leftSize !== rightSize) return leftSize - rightSize;
+    if (left.scope.start !== right.scope.start) return right.scope.start - left.scope.start;
+    return (right.eventStart ?? right.start) - (left.eventStart ?? left.start);
+  });
+  const binding = bindings[0];
+  if (!binding) return null;
+
+  const bindingId = binding.bindingId ?? binding;
+  const states = decls
+    .filter((item) => {
+      const itemBindingId = item.bindingId ?? item;
+      const activeScope = item.activeScope || item.scope;
+      return (
+        itemBindingId === bindingId &&
+        activeScope &&
+        activeScope.start <= node.start &&
+        node.end <= activeScope.end &&
+        (item.eventStart ?? item.start) <= node.start
+      );
+    })
+    .sort((left, right) => (right.eventStart ?? right.start) - (left.eventStart ?? left.start));
+  if (states[0]?.kind === "route") return states[0];
+  if (states[0]?.kind === "unknown") {
+    const priorRoute = states.find((state) => state.kind === "route");
+    if (priorRoute) {
+      return {
+        ...states[0],
+        kind: "route",
+        host: priorRoute.host,
+        pathNode: null,
+        allArgs: [],
+      };
+    }
+  }
+  return null;
+}
+
 /** Resolve the `(host, pathNode)` of an HTTP-method call, or null if not a route. */
-function routeTarget(node) {
+function routeTarget(node, ctx) {
   const object = unwrap(node.callee.object);
   if (object.type === "Identifier") {
+    const b = resolveRouteBinding(object.name, node, ctx);
+    if (b) {
+      return {
+        host: b.host,
+        pathNode: b.pathNode,
+        pathArg: false,
+        allArgs: b.allArgs || [],
+        chainStart: b.start,
+      };
+    }
     return { host: object.name, pathNode: node.arguments[0], pathArg: true, allArgs: [] };
   }
   if (object.type === "CallExpression") {
@@ -540,7 +883,19 @@ function routeTarget(node) {
       };
     }
     const root = chainRootIdentifier(object);
-    if (root) return { host: root, pathNode: node.arguments[0], pathArg: true, allArgs: [] };
+    if (root) {
+      const b = resolveRouteBinding(root, node, ctx);
+      if (b) {
+        return {
+          host: b.host,
+          pathNode: b.pathNode,
+          pathArg: false,
+          allArgs: b.allArgs || [],
+          chainStart: b.start,
+        };
+      }
+      return { host: root, pathNode: node.arguments[0], pathArg: true, allArgs: [] };
+    }
   }
   return null;
 }
@@ -572,7 +927,7 @@ function extractRoutes(program, code, ctx, out) {
     if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
     const method = node.callee.property.name;
     if (!HTTP_METHODS.has(method)) return;
-    const target = routeTarget(node);
+    const target = routeTarget(node, ctx);
     if (!target || !isLocalHost(target.host, ctx)) return;
     // `app.get('view engine')` — a lone string on a known app/router var is the
     // settings getter, not a route. Unresolved hosts keep flowing to the graph
@@ -957,7 +1312,8 @@ function collectNamedExport(node, exportRefs) {
 function analyzeFile(code, filePath, onParseError) {
   const program = parse(code, filePath, onParseError);
   if (!program) return null;
-  const { requires, routers, requireAliases } = collectBindings(program);
+  const { requires, routers, declarations, routeBindings, requireAliases } =
+    collectBindings(program);
   const consts = collectStringConsts(program);
   const valueBindings = collectValueBindings(program);
   const lineAt = lineCounter(code);
@@ -968,6 +1324,8 @@ function analyzeFile(code, filePath, onParseError) {
   const ctx = {
     requires,
     routers,
+    declarations,
+    routeBindings,
     requireAliases,
     consts,
     valueBindings,

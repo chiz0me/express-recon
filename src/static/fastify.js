@@ -72,10 +72,32 @@ function collectObjectBindings(program) {
   return bindings;
 }
 
+function flattenObject(object, bindings, seen = new Set()) {
+  if (!object || object.type !== "ObjectExpression" || !bindings) return object;
+  if (!object.properties.some((p) => p.type === "SpreadElement")) return object;
+  const flatProperties = [];
+  let hasUnresolvedSpread = false;
+  for (const prop of object.properties) {
+    if (prop.type === "SpreadElement") {
+      const spread = resolveObject(prop.argument, bindings, new Set(seen));
+      if (spread?.type === "ObjectExpression") {
+        flatProperties.push(...spread.properties);
+        if (spread.hasUnresolvedSpread) hasUnresolvedSpread = true;
+      } else {
+        hasUnresolvedSpread = true;
+        flatProperties.push(prop);
+      }
+    } else {
+      flatProperties.push(prop);
+    }
+  }
+  return { ...object, properties: flatProperties, hasUnresolvedSpread };
+}
+
 function resolveObject(node, bindings, seen = new Set()) {
   const value = unwrapValue(node);
   if (!value) return null;
-  if (value.type === "ObjectExpression") return value;
+  if (value.type === "ObjectExpression") return flattenObject(value, bindings, seen);
   if (value.type !== "Identifier" || seen.has(value.name)) return null;
   const object = bindings.get(value.name);
   if (!object) return null;
@@ -85,11 +107,25 @@ function resolveObject(node, bindings, seen = new Set()) {
 
 function objectProperty(object, name) {
   if (!object) return null;
+  let hasTrailingSpread = false;
   for (let index = object.properties.length - 1; index >= 0; index--) {
     const property = object.properties[index];
-    if (property.type === "Property" && propertyName(property) === name) return property.value;
+    if (property.type === "SpreadElement") {
+      hasTrailingSpread = true;
+      continue;
+    }
+    if (property.type === "Property" && propertyName(property) === name) {
+      if (hasTrailingSpread) {
+        return { uncertain: true, value: property.value };
+      }
+      return property.value;
+    }
   }
-  return null;
+  return hasTrailingSpread ? { uncertain: true, value: null } : null;
+}
+
+function propertyValue(prop) {
+  return prop && typeof prop === "object" && "uncertain" in prop ? prop.value : prop;
 }
 
 function staticValues(node, consts, defaultValue = null) {
@@ -116,13 +152,27 @@ function valueDescriptors(node, code, stage) {
   return nodes.map((item) => stagedDescriptor(item, code, stage));
 }
 
-function routeHooks(options, code) {
+function routeHooks(options, code, model, node, ctx) {
   const result = [];
+  let hasUncertainHook = false;
   for (const name of REQUEST_HOOKS) {
     const value = objectProperty(options, name);
-    if (value) result.push(...valueDescriptors(value, code, "hook"));
+    if (value && typeof value === "object" && value.uncertain) {
+      hasUncertainHook = true;
+    } else if (value) {
+      result.push(...valueDescriptors(value, code, "hook"));
+    }
   }
-  return result;
+  if (hasUncertainHook || options?.hasUnresolvedSpread) {
+    result.push({
+      name: "<anonymous>",
+      kind: "unknown",
+      raw: `uncertain Fastify route options at ${model?.filePath || ""}:${ctx ? ctx.lineAt(node?.start || 0) : 1}`,
+      stage: "hook",
+    });
+    hasUncertainHook = true;
+  }
+  return { hooks: result, hasUncertainHook };
 }
 
 function bindingFrom(ctx, local, source) {
@@ -318,7 +368,7 @@ function expressionRef(node, model, ctx) {
     }
     if (wrapper && value.arguments[0]) {
       const options = resolveObject(value.arguments[1], model.objects);
-      const encapsulate = unwrapValue(objectProperty(options, "encapsulate"));
+      const encapsulate = unwrapValue(propertyValue(objectProperty(options, "encapsulate")));
       const ref = expressionRef(value.arguments[0], model, ctx);
       if (ref.type === "plugin") {
         const plugin = model.functions.byStart.get(Number(ref.id.split(":").at(-1)));
@@ -447,6 +497,9 @@ function addRoute(
   dynamicOptions,
 ) {
   const paths = staticValues(pathNode, ctx.consts);
+  const hookInfo = routeHooks(options, code, model, node, ctx);
+  const isDynamic =
+    dynamicOptions || hookInfo.hasUncertainHook || Boolean(options?.hasUnresolvedSpread);
   for (const routePath of paths) {
     const route = {
       method,
@@ -460,12 +513,21 @@ function addRoute(
               stage: "hook",
             },
           ]
-        : routeHooks(options, code),
+        : hookInfo.hooks,
       line: ctx.lineAt(node.callee?.property?.start ?? node.start),
     };
     ctx.attachIo(route, handler, ctx);
-    applyFastifySchema(route.io, objectProperty(options, "schema"), ctx);
+    const schemaProp = objectProperty(options, "schema");
+    const schemaNode =
+      schemaProp && typeof schemaProp === "object" && schemaProp.uncertain ? null : schemaProp;
+    applyFastifySchema(route.io, schemaNode, ctx);
     owner.routes.push(route);
+    if (isDynamic) {
+      owner.opaqueRoutes.push({
+        paths: [routePath],
+        line: ctx.lineAt(node.start),
+      });
+    }
   }
   model.routeCallStarts.add(node.start);
 }
@@ -475,7 +537,7 @@ function extractShorthand(node, owner, method, model, code, ctx) {
   const options = resolveObject(node.arguments[1], model.objects);
   const hasOptionsArgument = node.arguments.length >= 3;
   const handler = options
-    ? node.arguments[2] || objectProperty(options, "handler")
+    ? node.arguments[2] || propertyValue(objectProperty(options, "handler"))
     : hasOptionsArgument
       ? node.arguments[2]
       : node.arguments[1];
@@ -499,19 +561,32 @@ function extractFullRoute(node, owner, model, code, ctx) {
     owner.opaqueRoutes.push({ paths: [null], line: ctx.lineAt(node.start) });
     return;
   }
-  const methods = methodsFrom(objectProperty(options, "method"), ctx.consts);
+  const methods = methodsFrom(propertyValue(objectProperty(options, "method")), ctx.consts);
   if (!methods.length) {
-    const pathNode = objectProperty(options, "url") || objectProperty(options, "path");
+    const pathNode = propertyValue(
+      objectProperty(options, "url") || objectProperty(options, "path"),
+    );
     owner.opaqueRoutes.push({
       paths: staticValues(pathNode, ctx.consts),
       line: ctx.lineAt(node.start),
     });
     return;
   }
-  const pathNode = objectProperty(options, "url") || objectProperty(options, "path");
-  const handler = objectProperty(options, "handler");
+  const pathNode = propertyValue(objectProperty(options, "url") || objectProperty(options, "path"));
+  const handler = propertyValue(objectProperty(options, "handler"));
   for (const method of methods) {
-    addRoute(owner, method, pathNode, options, handler, node, code, ctx, model);
+    addRoute(
+      owner,
+      method,
+      pathNode,
+      options,
+      handler,
+      node,
+      code,
+      ctx,
+      model,
+      options.hasUnresolvedSpread,
+    );
   }
 }
 
@@ -563,7 +638,13 @@ function extractCalls(program, model, code, ctx) {
     if (property === "register") {
       owner.fastifySignal = true;
       const options = resolveObject(node.arguments[1], model.objects);
-      const prefixNode = objectProperty(options, "prefix");
+      const prefixProp = objectProperty(options, "prefix");
+      const prefixNode = propertyValue(prefixProp);
+      const uncertain = Boolean(
+        prefixProp?.uncertain ||
+        (options?.hasUnresolvedSpread && !prefixProp) ||
+        (!options && node.arguments[1]),
+      );
       const prefixes =
         !options && node.arguments[1]
           ? [null]
@@ -573,6 +654,7 @@ function extractCalls(program, model, code, ctx) {
       owner.registrations.push({
         ref: expressionRef(node.arguments[0], model, ctx),
         prefixes,
+        uncertain,
         line: ctx.lineAt(node.start),
       });
     }
@@ -873,6 +955,22 @@ function emitRoutes(scope, prefix, inherited, partial, applicationId, context, s
         );
       }
     }
+    if (registration.uncertain) {
+      const label =
+        registration.ref.source ||
+        registration.ref.label ||
+        registration.ref.exportName ||
+        "plugin";
+      for (const registeredPrefix of prefixes) {
+        context.opaqueMounts.push({
+          applicationId,
+          path: registeredPrefix === null ? null : joinPath(prefix, registeredPrefix) || "/",
+          pathConfidence: "partial",
+          middlewares: [`${registration.direct ? "invoke" : "register"}:${label}`],
+          source: { file: scope.file, line: registration.line },
+        });
+      }
+    }
     for (const registeredPrefix of prefixes) {
       const dynamic = registeredPrefix === null;
       const childPrefix = joinPath(prefix, dynamic ? "<dynamic>" : registeredPrefix);
@@ -880,7 +978,7 @@ function emitRoutes(scope, prefix, inherited, partial, applicationId, context, s
         target,
         childPrefix,
         own,
-        partial || dynamic,
+        partial || dynamic || registration.uncertain,
         applicationId,
         context,
         new Set(stack).add(target.id),

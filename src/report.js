@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { buildFindings } = require("./findings");
 const pkg = require("../package.json");
@@ -87,11 +88,34 @@ function normalizeIoSchemas(schemas, root) {
   };
 }
 
+function normalizeMiddlewares(middlewares, root) {
+  if (!middlewares || !Array.isArray(middlewares) || !root) return middlewares;
+  const normalizedRoot = path.resolve(root);
+  let realRoot = null;
+  try {
+    realRoot = fs.realpathSync(normalizedRoot);
+  } catch {
+    // ignore
+  }
+  return middlewares.map((mw) => {
+    if (!mw || typeof mw !== "object" || typeof mw.raw !== "string") return mw;
+    let raw = mw.raw;
+    if (realRoot && raw.includes(realRoot)) {
+      raw = raw.split(realRoot).join(".");
+    }
+    if (raw.includes(normalizedRoot)) {
+      raw = raw.split(normalizedRoot).join(".");
+    }
+    return raw !== mw.raw ? { ...mw, raw } : mw;
+  });
+}
+
 function normalizeRoute(route, root) {
   return {
     ...route,
     applicationId: route.applicationId ?? null,
     source: normalizeSource(route.source, root),
+    middlewares: normalizeMiddlewares(route.middlewares, root),
     ...(route.io
       ? {
           io: {
@@ -145,7 +169,18 @@ function normalizeApplications(applications, root) {
 function normalizeDiagnostics(diagnostics, root) {
   if (!root) return diagnostics;
   const normalizedRoot = path.resolve(root);
-  return diagnostics.map((message) => message.split(normalizedRoot).join("."));
+  let realRoot = null;
+  try {
+    realRoot = fs.realpathSync(normalizedRoot);
+  } catch {
+    // ignore
+  }
+  return diagnostics.map((message) => {
+    let msg = message;
+    if (realRoot && msg.includes(realRoot)) msg = msg.split(realRoot).join(".");
+    if (msg.includes(normalizedRoot)) msg = msg.split(normalizedRoot).join(".");
+    return msg;
+  });
 }
 
 function normalizeRouteGraph(graph, root) {
@@ -199,7 +234,7 @@ function buildReport(registry, meta) {
     mode: meta.mode,
     applications: normalizeApplications(registry.applications, sourceRoot),
     routes,
-    globalMiddleware: registry.globalMiddleware,
+    globalMiddleware: normalizeMiddlewares(registry.globalMiddleware, sourceRoot),
   };
   const fingerprint = configHash(meta.config);
   if (fingerprint) report.configHash = fingerprint;

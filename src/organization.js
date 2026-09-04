@@ -567,6 +567,17 @@ function scanInWorker(source, options, onProgress) {
       env: environment,
     });
     let settled = false;
+    const finish = (err, result) => {
+      if (settled) return;
+      settled = true;
+      worker
+        .terminate()
+        .catch(() => {})
+        .finally(() => {
+          if (err) reject(err);
+          else resolve(result);
+        });
+    };
     worker.on("message", (message) => {
       if (message?.type === "progress") {
         try {
@@ -576,17 +587,15 @@ function scanInWorker(source, options, onProgress) {
         }
         return;
       }
-      settled = true;
-      if (message?.ok) resolve(message.scan);
-      else reject(new Error(message?.error || "Organization scan worker failed"));
+      if (message?.ok) finish(null, message.scan);
+      else finish(new Error(message?.error || "Organization scan worker failed"));
     });
     worker.once("error", (err) => {
-      settled = true;
-      reject(err);
+      finish(err);
     });
     worker.once("exit", (code) => {
-      if (!settled && code !== 0) reject(new Error(`Organization scan worker exited ${code}`));
-      else if (!settled) reject(new Error("Organization scan worker exited without a result"));
+      if (!settled && code !== 0) finish(new Error(`Organization scan worker exited ${code}`));
+      else if (!settled) finish(new Error("Organization scan worker exited without a result"));
     });
   });
 }

@@ -1,8 +1,17 @@
 # express-recon reference
 
-This is the durable reference for the CLI, configuration, report contract,
-scanner behavior, and library API. Start with the project [README](../README.md)
-if you have not run the offline workflow yet.
+Welcome to the comprehensive reference manual for the `express-recon` CLI, configuration options, route policies, and output report contracts.
+
+If you are new to the tool or looking for a quick 5-minute tutorial, start with the [README](../README.md).
+
+> 💡 **Quick Navigation Guide**:
+>
+> - [Commands](#commands): Full list of all CLI commands and supported flags.
+> - [Artifacts and exit codes](#artifacts-and-exit-codes): Understand generated files and exit codes (`0`, `1`, `2`).
+> - [Configuration](#configuration): How to configure auth middleware, accepted public routes, and scan limits.
+> - [Route policies](#route-policies): How to write granular security policies for HTTP methods and paths.
+> - [Report contract](#report-contract): Machine-readable JSON schema for scan reports.
+> - [Library API](#library-api): How to use express-recon programmatically in JavaScript/Node.js.
 
 ## Contents
 
@@ -829,6 +838,10 @@ Exit codes:
 |  `0` | Command completed and no requested gate matched.                   |
 |  `1` | Invalid CLI/config input or operational failure.                   |
 |  `2` | Command completed, but at least one `--fail-on` condition matched. |
+
+> 💡 **Understanding Exit Code 2 in CI/CD**:
+> In automated CI/CD pipelines (such as GitHub Actions or GitLab CI), an exit code of `2` indicates that a security policy violation was detected (such as finding an unauthenticated route when you specified `--fail-on public`).
+> This is an intentional security gate designed to stop vulnerable code from being deployed or merged into `main`, not a program crash or failure.
 
 Diagnostics go to stderr and remain in machine reports where applicable. JSON
 and OpenAPI stdout remain parseable even when a gate exits `2`. `scan-org`

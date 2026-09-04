@@ -9,14 +9,243 @@ const UNREFINED_NOTE =
 // spec stays valid (OpenAPI has no "all" operation key).
 const ALL_VERBS = ["get", "post", "put", "patch", "delete", "head", "options", "trace"];
 const BODY_METHODS = new Set(["post", "put", "patch", "delete"]);
+const MAX_PATH_VARIANTS = 128;
+const MAX_OPTIONAL_GROUP_DEPTH = 32;
+
+function parseIdentifierFrom(str, start) {
+  let j = start;
+  const len = str.length;
+  while (j < len) {
+    const ch = str[j];
+    if (
+      (ch >= "a" && ch <= "z") ||
+      (ch >= "A" && ch <= "Z") ||
+      (ch >= "0" && ch <= "9") ||
+      ch === "_"
+    ) {
+      j++;
+    } else {
+      break;
+    }
+  }
+  return str.slice(start, j);
+}
+
+function skipRegexAndModifierFrom(str, index) {
+  let pos = index;
+  const len = str.length;
+  if (pos < len && str[pos] === "(") {
+    let depth = 1;
+    pos++;
+    while (pos < len && depth > 0) {
+      if (str[pos] === "\\") {
+        pos += 2;
+        continue;
+      }
+      if (str[pos] === "(") depth++;
+      else if (str[pos] === ")") depth--;
+      pos++;
+    }
+  }
+  while (pos < len && (str[pos] === "?" || str[pos] === "*" || str[pos] === "+")) {
+    pos++;
+  }
+  return pos;
+}
+
+/** Return the complete `:name(pattern)?` token at an unescaped colon, if present. */
+function parameterTokenAt(str, index) {
+  const ident = parseIdentifierFrom(str, index + 1);
+  if (!ident) return null;
+  let baseEnd = index + 1 + ident.length;
+  if (str[baseEnd] === "(") {
+    let depth = 1;
+    baseEnd++;
+    while (baseEnd < str.length && depth > 0) {
+      if (str[baseEnd] === "\\") {
+        baseEnd = Math.min(str.length, baseEnd + 2);
+        continue;
+      }
+      if (str[baseEnd] === "(") depth++;
+      else if (str[baseEnd] === ")") depth--;
+      baseEnd++;
+    }
+  }
+  let end = baseEnd;
+  while (end < str.length && (str[end] === "?" || str[end] === "*" || str[end] === "+")) {
+    end++;
+  }
+  const modifiers = str.slice(baseEnd, end);
+  return {
+    end,
+    optional: modifiers.includes("?"),
+    included: str.slice(index, baseEnd) + modifiers.replaceAll("?", ""),
+  };
+}
+
+/** Locate a closing optional-group brace while respecting path-to-regexp escapes. */
+function findMatchingBrace(str, startIndex) {
+  let depth = 0;
+  for (let i = startIndex; i < str.length; i++) {
+    if (str[i] === "\\") {
+      i++;
+    } else if (str[i] === "{") {
+      depth++;
+    } else if (str[i] === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
 
 /**
- * Convert a supported framework path to an OpenAPI path template, returning the template
- * and its ordered, unique path-parameter names. `:name`/`:name?` → `{name}`,
- * Express-5 `{name}` is kept, `*`/splats → `{wildcard}`, and an unresolved
- * `<dynamic>` segment → `{dynamic}`.
+ * Append text to the last token when possible so path tokenization remains linear in the input.
  */
-function toOpenApiPath(exprPath) {
+function appendPathText(tokens, value) {
+  if (!value) return;
+  const previous = tokens.at(-1);
+  if (previous?.kind === "text") previous.value += value;
+  else tokens.push({ kind: "text", value });
+}
+
+/**
+ * Parse Express optional groups and legacy `:name?` parameters without expanding them. Escaped
+ * syntax stays intact for the later URL-template conversion. Nesting is deliberately bounded;
+ * deeper groups are omitted and reported as truncated rather than risking call-stack exhaustion.
+ */
+function tokenizeOptionalPath(str, state, depth = 0) {
+  const tokens = [];
+  let i = 0;
+  while (i < str.length) {
+    if (str[i] === "\\" && i + 1 < str.length) {
+      appendPathText(tokens, str.slice(i, i + 2));
+      i += 2;
+      continue;
+    }
+
+    if (str[i] === "{") {
+      const close = findMatchingBrace(str, i);
+      if (close === -1) {
+        appendPathText(tokens, str[i++]);
+        continue;
+      }
+      const inner = str.slice(i + 1, close);
+      let nextIndex = close + 1;
+      while (
+        nextIndex < str.length &&
+        (str[nextIndex] === "?" || str[nextIndex] === "*" || str[nextIndex] === "+")
+      ) {
+        nextIndex++;
+      }
+      if (depth >= MAX_OPTIONAL_GROUP_DEPTH) {
+        state.truncated = true;
+        state.depthLimited = true;
+      } else {
+        tokens.push({
+          kind: "optional",
+          tokens: tokenizeOptionalPath(inner, state, depth + 1),
+        });
+      }
+      i = nextIndex;
+      continue;
+    }
+
+    if (str[i] === ":") {
+      const parameter = parameterTokenAt(str, i);
+      if (parameter) {
+        if (parameter.optional) {
+          let prefix = "";
+          const previous = tokens.at(-1);
+          if (previous?.kind === "text" && /[/.]$/.test(previous.value)) {
+            prefix = previous.value.slice(-1);
+            previous.value = previous.value.slice(0, -1);
+            if (!previous.value) tokens.pop();
+          }
+          tokens.push({
+            kind: "optional",
+            tokens: [{ kind: "text", value: prefix + parameter.included }],
+          });
+        } else {
+          appendPathText(tokens, str.slice(i, parameter.end));
+        }
+        i = parameter.end;
+        continue;
+      }
+    }
+
+    appendPathText(tokens, str[i]);
+    i++;
+  }
+  return tokens;
+}
+
+/** Return text that is present even when every remaining optional token is omitted. */
+function requiredPathText(tokens, start) {
+  let text = "";
+  for (let i = start; i < tokens.length; i++) {
+    if (tokens[i].kind === "text") text += tokens[i].value;
+  }
+  return text;
+}
+
+/** Combine token alternatives with a strict unique-variant ceiling. */
+function expandPathTokens(tokens, state, limit) {
+  let variants = [""];
+  for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+    const token = tokens[tokenIndex];
+    let alternatives;
+    if (token.kind === "text") {
+      alternatives = [token.value];
+    } else {
+      const included = expandPathTokens(token.tokens, state, limit);
+      alternatives = ["", ...included];
+    }
+
+    const next = [];
+    const seen = new Set();
+    let full = false;
+    for (const base of variants) {
+      for (const suffix of alternatives) {
+        const candidate = base + suffix;
+        if (seen.has(candidate)) continue;
+        if (next.length === limit) {
+          state.truncated = true;
+          full = true;
+          break;
+        }
+        seen.add(candidate);
+        next.push(candidate);
+      }
+      if (full) break;
+    }
+    if (full) {
+      const requiredSuffix = requiredPathText(tokens, tokenIndex + 1);
+      return requiredSuffix ? next.map((variant) => variant + requiredSuffix) : next;
+    }
+    variants = next;
+  }
+  return variants;
+}
+
+/**
+ * Expand Express 5 groups (`{/:id}`) and Express 4 optional parameters (`:id?`) with a hard
+ * ceiling. The detailed result lets callers disclose when not every concrete route fits.
+ */
+function expandPathVariants(exprPath, limit = MAX_PATH_VARIANTS) {
+  const state = { truncated: false, depthLimited: false };
+  const tokens = tokenizeOptionalPath(exprPath || "/", state);
+  const variants = expandPathTokens(tokens, state, Math.max(1, limit));
+  return { variants, truncated: state.truncated, depthLimited: state.depthLimited };
+}
+
+/**
+ * Convert a single concrete framework path to an OpenAPI path template, returning the template
+ * and its ordered, unique path-parameter names. `:name` → `{name}`, `*`/splats →
+ * `{wildcard}`, and an unresolved `<dynamic>` segment → `{dynamic}`. Optional
+ * groups and parameters have already been expanded by this point.
+ */
+function toOpenApiPathSingle(exprPath) {
   const used = new Set();
   const unique = (base) => {
     let name = base || "param";
@@ -25,20 +254,159 @@ function toOpenApiPath(exprPath) {
     used.add(name);
     return name;
   };
-  const segments = (exprPath || "/").split("/").map((seg) => {
-    if (seg === "") return seg;
-    if (seg === "<dynamic>") return `{${unique("dynamic")}}`;
-    if (/^\{[A-Za-z0-9_]+\}$/.test(seg)) return `{${unique(seg.slice(1, -1))}}`;
-    if (seg.startsWith(":")) {
-      const base = seg.slice(1).replace(/[^A-Za-z0-9_].*$/, "");
-      return `{${unique(base)}}`;
+
+  const str = exprPath || "/";
+  let result = "";
+  let i = 0;
+  const len = str.length;
+
+  while (i < len) {
+    if (str.startsWith("<dynamic>", i)) {
+      result += `{${unique("dynamic")}}`;
+      i += 9;
+      continue;
     }
-    if (seg.includes("*")) return `{${unique("wildcard")}}`;
-    return seg;
-  });
-  const joined = segments.join("/") || "/";
-  const path = joined.startsWith("/") ? joined : `/${joined}`;
-  return { path, params: [...used] };
+
+    const ch = str[i];
+
+    if (ch === "\\") {
+      const literal = str[i + 1];
+      if (literal === undefined) {
+        result += "%5C";
+        i++;
+        continue;
+      }
+      if (literal === "{") result += "%7B";
+      else if (literal === "}") result += "%7D";
+      else if (literal === "?") result += "%3F";
+      else if (literal === "#") result += "%23";
+      else if (literal === "\\") result += "%5C";
+      else result += literal;
+      i += 2;
+      continue;
+    }
+
+    if (ch === "{") {
+      const close = findMatchingBrace(str, i);
+      if (close === -1) {
+        result += ch;
+        i++;
+        continue;
+      }
+
+      const inner = str.slice(i + 1, close);
+      let nextIndex = close + 1;
+      while (
+        nextIndex < len &&
+        (str[nextIndex] === "?" || str[nextIndex] === "*" || str[nextIndex] === "+")
+      ) {
+        nextIndex++;
+      }
+
+      if (inner.startsWith("*")) {
+        // Express 5 wildcard/splat parameter: {*splat}
+        let rawName = inner.slice(1);
+        const paren = rawName.indexOf("(");
+        if (paren !== -1) rawName = rawName.slice(0, paren);
+        while (rawName.endsWith("?") || rawName.endsWith("*") || rawName.endsWith("+")) {
+          rawName = rawName.slice(0, -1);
+        }
+        const paramName = unique(rawName || "wildcard");
+        result += `{${paramName}}`;
+      } else if (inner.includes(":") || inner.includes("*")) {
+        // Group containing parameters: e.g. {.:ext}, {/:left-:right}
+        let k = 0;
+        while (k < inner.length) {
+          if (inner[k] === ":") {
+            const ident = parseIdentifierFrom(inner, k + 1);
+            let endPos = k + 1 + ident.length;
+            endPos = skipRegexAndModifierFrom(inner, endPos);
+            const paramName = unique(ident || "param");
+            result += `{${paramName}}`;
+            k = endPos;
+          } else if (inner[k] === "*") {
+            const ident = parseIdentifierFrom(inner, k + 1);
+            let endPos = k + 1 + ident.length;
+            endPos = skipRegexAndModifierFrom(inner, endPos);
+            const paramName = unique(ident || "wildcard");
+            result += `{${paramName}}`;
+            k = endPos;
+          } else {
+            result += inner[k];
+            k++;
+          }
+        }
+      } else if (/^[A-Za-z0-9_]+$/.test(inner)) {
+        // Standard path parameter: {id}
+        result += `{${unique(inner)}}`;
+      } else {
+        // Literal group without parameters: e.g. {.json}
+        result += inner;
+      }
+
+      i = nextIndex;
+      continue;
+    }
+
+    if (ch === ":") {
+      const ident = parseIdentifierFrom(str, i + 1);
+      if (ident.length > 0) {
+        let endPos = i + 1 + ident.length;
+        endPos = skipRegexAndModifierFrom(str, endPos);
+        result += `{${unique(ident)}}`;
+        i = endPos;
+        continue;
+      }
+    }
+
+    if (ch === "*") {
+      const ident = parseIdentifierFrom(str, i + 1);
+      let endPos = i + 1 + ident.length;
+      endPos = skipRegexAndModifierFrom(str, endPos);
+      result += `{${unique(ident || "wildcard")}}`;
+      i = endPos;
+      continue;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  result = result.replace(/\/+/g, "/");
+  if (result.length > 1 && result.endsWith("/")) {
+    result = result.slice(0, -1);
+  }
+  if (!result.startsWith("/")) result = `/${result}`;
+
+  return { path: result, params: [...used] };
+}
+
+/** Convert a framework path and retain bounded-expansion completeness metadata. */
+function toOpenApiPathsDetailed(exprPath) {
+  const expanded = expandPathVariants(exprPath || "/");
+  const seen = new Set();
+  const variants = [];
+  for (const raw of expanded.variants) {
+    const single = toOpenApiPathSingle(raw);
+    if (!seen.has(single.path)) {
+      seen.add(single.path);
+      variants.push(single);
+    }
+  }
+  return {
+    variants: variants.length > 0 ? variants : [{ path: "/", params: [] }],
+    truncated: expanded.truncated,
+    depthLimited: expanded.depthLimited,
+  };
+}
+
+/** Convert a framework route into its bounded set of concrete OpenAPI templates. */
+function toOpenApiPaths(exprPath) {
+  return toOpenApiPathsDetailed(exprPath).variants;
+}
+
+function toOpenApiPath(exprPath) {
+  return toOpenApiPaths(exprPath)[0];
 }
 
 /** Tag from the first literal path segment (parameters/root → "default"). */
@@ -173,7 +541,7 @@ function buildRequestBody(verb, io) {
 function buildResponses(io) {
   const responses = {};
   if (io) {
-    for (const r of io.responses) {
+    for (const r of io.responses || []) {
       if (r.status == null) continue;
       const value = responseContract(io, r.status);
       const resp = { description: parameterDescription(value) };
@@ -183,7 +551,7 @@ function buildResponses(io) {
       }
       responses[String(r.status)] = resp;
     }
-    for (const code of io.statusCodes) {
+    for (const code of io.statusCodes || []) {
       if (responses[String(code)]) continue;
       const value = responseContract(io, code);
       responses[String(code)] = {
@@ -330,47 +698,62 @@ function build(report) {
   const opIds = new Set();
   const paths = {};
   const duplicateOperations = [];
+  const pathVariantTruncations = [];
 
   for (const route of report.routes.slice().sort(compareRoutes)) {
-    const { path: templated, params: pathParams } = toOpenApiPath(route.path);
-    const tag = firstSegmentTag(templated);
-    const verbs = route.method === "ALL" ? ALL_VERBS : [route.method.toLowerCase()];
-    let item = Object.hasOwn(paths, templated) ? paths[templated] : null;
-    if (!item) {
-      item = {};
-      Object.defineProperty(paths, templated, {
-        value: item,
-        enumerable: true,
-        configurable: true,
-        writable: true,
+    const expanded = toOpenApiPathsDetailed(route.path);
+    const variants = expanded.variants;
+    if (expanded.truncated) {
+      const routePath = String(route.path || "/");
+      pathVariantTruncations.push({
+        applicationId: route.applicationId ?? null,
+        method: route.method,
+        path: routePath.length > 500 ? `${routePath.slice(0, 499)}…` : routePath,
+        source: route.source || null,
+        maxVariants: MAX_PATH_VARIANTS,
+        reason: expanded.depthLimited ? "optional-group-depth-limit" : "variant-limit",
       });
     }
-    for (const verb of verbs) {
-      if (item[verb]) {
-        duplicateOperations.push({
-          keptApplicationId: item[verb]["x-express-recon"].applicationId,
-          droppedApplicationId: route.applicationId ?? null,
-          method: verb.toUpperCase(),
-          path: templated,
-          keptSource: item[verb]["x-express-recon"].source,
-          droppedSource: route.source || null,
+    for (const { path: templated, params: pathParams } of variants) {
+      const tag = firstSegmentTag(templated);
+      const verbs = route.method === "ALL" ? ALL_VERBS : [route.method.toLowerCase()];
+      let item = Object.hasOwn(paths, templated) ? paths[templated] : null;
+      if (!item) {
+        item = {};
+        Object.defineProperty(paths, templated, {
+          value: item,
+          enumerable: true,
+          configurable: true,
+          writable: true,
         });
-        continue;
       }
-      let opId = sanitizeOperationId(verb, templated);
-      let n = 2;
-      while (opIds.has(opId)) opId = `${sanitizeOperationId(verb, templated)}_${n++}`;
-      opIds.add(opId);
-      item[verb] = buildOperation(
-        route,
-        verb,
-        opId,
-        tag,
-        isAudit,
-        pathParams,
-        report.openapi,
-        usedSchemes,
-      );
+      for (const verb of verbs) {
+        if (item[verb]) {
+          duplicateOperations.push({
+            keptApplicationId: item[verb]["x-express-recon"].applicationId,
+            droppedApplicationId: route.applicationId ?? null,
+            method: verb.toUpperCase(),
+            path: templated,
+            keptSource: item[verb]["x-express-recon"].source,
+            droppedSource: route.source || null,
+          });
+          continue;
+        }
+        let opId = sanitizeOperationId(verb, templated);
+        let n = 2;
+        while (opIds.has(opId)) opId = `${sanitizeOperationId(verb, templated)}_${n++}`;
+        opIds.add(opId);
+        item[verb] = buildOperation(
+          route,
+          verb,
+          opId,
+          tag,
+          isAudit,
+          pathParams,
+          report.openapi,
+          usedSchemes,
+        );
+      }
     }
   }
 
@@ -397,6 +780,7 @@ function build(report) {
     schemasArePlaceholders: true,
     structuredSchemaEvidence: report.routes.some((route) => Boolean(route.io?.schemas)),
     ...(duplicateOperations.length ? { duplicateOperations } : {}),
+    ...(pathVariantTruncations.length ? { pathVariantTruncations } : {}),
   };
   return doc;
 }
@@ -405,4 +789,4 @@ function format(report) {
   return JSON.stringify(build(report), null, 2);
 }
 
-module.exports = { build, format };
+module.exports = { build, format, toOpenApiPath, toOpenApiPaths };

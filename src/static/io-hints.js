@@ -141,20 +141,60 @@ function collectHeaderCall(node, reqName, request) {
   if (key != null) request.headers.add(key);
 }
 
-/** `const { a, b } = req.<source>` destructuring. */
-function collectDestructure(node, reqName, request) {
+/** `const { a, b } = req.<source>` or `const { body } = req` destructuring. */
+function collectDestructure(node, reqName, request, boundBuckets) {
   if (node.id.type !== "ObjectPattern" || !node.init) return;
   const init = unwrap(node.init);
-  if (!init || init.type !== "MemberExpression" || init.computed) return;
-  const root = unwrap(init.object);
-  if (!root || root.type !== "Identifier" || root.name !== reqName) return;
-  const source = init.property.name;
-  const bucket = REQUEST_SOURCES.has(source) ? source : source === "headers" ? "headers" : null;
-  if (!bucket) return;
-  for (const prop of node.id.properties) {
-    if (prop.type === "Property" && prop.key.type === "Identifier")
-      request[bucket].add(prop.key.name);
+  if (!init) return;
+  if (init.type === "MemberExpression" && !init.computed) {
+    const root = unwrap(init.object);
+    if (!root || root.type !== "Identifier" || root.name !== reqName) return;
+    const source = init.property.name;
+    const bucket = REQUEST_SOURCES.has(source) ? source : source === "headers" ? "headers" : null;
+    if (!bucket) return;
+    for (const prop of node.id.properties || []) {
+      if (prop.type === "Property" && prop.key.type === "Identifier")
+        request[bucket].add(prop.key.name);
+    }
+  } else if (init.type === "Identifier" && init.name === reqName) {
+    for (const prop of node.id.properties || []) {
+      if (prop.type !== "Property" || prop.computed) continue;
+      const name = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+      const bucket = REQUEST_SOURCES.has(name) ? name : name === "headers" ? "headers" : null;
+      if (!bucket) continue;
+      if (prop.value.type === "ObjectPattern") {
+        for (const nested of prop.value.properties || []) {
+          if (nested.type === "Property" && !nested.computed && nested.key.type === "Identifier") {
+            request[bucket].add(nested.key.name);
+          }
+        }
+      } else if (prop.value.type === "Identifier" && boundBuckets) {
+        boundBuckets.set(prop.value.name, bucket);
+      }
+    }
   }
+}
+
+function collectParamDestructure(paramNode, request) {
+  const node = unwrap(paramNode);
+  if (!node || node.type !== "ObjectPattern") return null;
+  const boundBuckets = new Map();
+  for (const prop of node.properties || []) {
+    if (prop.type !== "Property" || prop.computed) continue;
+    const name = prop.key.type === "Identifier" ? prop.key.name : String(prop.key.value);
+    const bucket = REQUEST_SOURCES.has(name) ? name : name === "headers" ? "headers" : null;
+    if (!bucket) continue;
+    if (prop.value.type === "Identifier") {
+      boundBuckets.set(prop.value.name, bucket);
+    } else if (prop.value.type === "ObjectPattern") {
+      for (const nested of prop.value.properties || []) {
+        if (nested.type === "Property" && !nested.computed && nested.key.type === "Identifier") {
+          request[bucket].add(nested.key.name);
+        }
+      }
+    }
+  }
+  return boundBuckets;
 }
 
 function toSortedArray(set) {
@@ -180,6 +220,83 @@ function handlerBindings(fnNode, inherited) {
   return bindings;
 }
 
+function patternBinds(pattern, name) {
+  if (!pattern) return false;
+  if (pattern.type === "Identifier") return pattern.name === name;
+  if (pattern.type === "AssignmentPattern") return patternBinds(pattern.left, name);
+  if (pattern.type === "RestElement") return patternBinds(pattern.argument, name);
+  if (pattern.type === "ObjectPattern") {
+    for (const prop of pattern.properties || []) {
+      if (prop.type === "Property") {
+        if (patternBinds(prop.value, name)) return true;
+      } else if (prop.type === "RestElement") {
+        if (patternBinds(prop.argument, name)) return true;
+      }
+    }
+  }
+  if (pattern.type === "ArrayPattern") {
+    for (const elem of pattern.elements || []) {
+      if (elem && patternBinds(elem, name)) return true;
+    }
+  }
+  return false;
+}
+
+function declaresNameInNode(stmt, name) {
+  if (!stmt) return false;
+  if (stmt.type === "VariableDeclaration") {
+    for (const decl of stmt.declarations || []) {
+      if (patternBinds(decl.id, name)) return true;
+    }
+  }
+  if (stmt.type === "FunctionDeclaration") {
+    if (stmt.id?.name === name) return true;
+  }
+  return false;
+}
+
+function isIdentifierShadowed(name, ancestors, topBody) {
+  if (!name || !ancestors) return false;
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const a = ancestors[i];
+    if (
+      a.type === "FunctionDeclaration" ||
+      a.type === "FunctionExpression" ||
+      a.type === "ArrowFunctionExpression"
+    ) {
+      for (const p of a.params || []) {
+        if (patternBinds(p, name)) return true;
+      }
+    }
+    if (a.type === "CatchClause") {
+      if (a.param && patternBinds(a.param, name)) return true;
+    }
+    if (a.type === "ForStatement") {
+      if (a.init && declaresNameInNode(a.init, name)) return true;
+    }
+    if (a.type === "ForInStatement" || a.type === "ForOfStatement") {
+      if (a.left) {
+        if (a.left.type === "VariableDeclaration") {
+          if (declaresNameInNode(a.left, name)) return true;
+        } else if (patternBinds(a.left, name)) {
+          return true;
+        }
+      }
+    }
+    if (a.type === "SwitchCase") {
+      for (const stmt of a.consequent || []) {
+        if (declaresNameInNode(stmt, name)) return true;
+      }
+    }
+    if (a !== topBody && (a.type === "BlockStatement" || a.type === "StaticBlock")) {
+      for (const stmt of a.body || []) {
+        if (declaresNameInNode(stmt, name)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Statically mine request/response shape hints from a route handler's AST body.
  * A best-effort audit aid: it captures field names the code references, not a
@@ -199,16 +316,53 @@ function extractIoHints(fnNode, options = {}) {
   const responseSchemas = [];
   const reqName = paramName(fnNode.params, 0);
   const resName = paramName(fnNode.params, 1);
+  const boundBuckets = collectParamDestructure(fnNode.params?.[0], request) || new Map();
   const body = fnNode.body;
   const scopedOptions = { ...options, bindings: handlerBindings(fnNode, options.bindings) };
   if (body) {
-    walk(body, (node) => {
-      if (reqName) {
+    walk(body, (node, ancestors) => {
+      if (reqName && !isIdentifierShadowed(reqName, ancestors, body)) {
         if (node.type === "MemberExpression") collectMemberRead(node, reqName, request);
         else if (node.type === "CallExpression") collectHeaderCall(node, reqName, request);
-        else if (node.type === "VariableDeclarator") collectDestructure(node, reqName, request);
+        else if (node.type === "VariableDeclarator")
+          collectDestructure(node, reqName, request, boundBuckets);
       }
-      if (resName && node.type === "CallExpression") {
+      if (boundBuckets.size > 0) {
+        if (node.type === "MemberExpression" && !node.computed) {
+          const root = unwrap(node.object);
+          if (
+            root?.type === "Identifier" &&
+            boundBuckets.has(root.name) &&
+            !isIdentifierShadowed(root.name, ancestors, body) &&
+            node.property.type === "Identifier"
+          ) {
+            request[boundBuckets.get(root.name)].add(node.property.name);
+          }
+        } else if (
+          node.type === "VariableDeclarator" &&
+          node.id.type === "ObjectPattern" &&
+          node.init
+        ) {
+          const init = unwrap(node.init);
+          if (
+            init?.type === "Identifier" &&
+            boundBuckets.has(init.name) &&
+            !isIdentifierShadowed(init.name, ancestors, body)
+          ) {
+            const bucket = boundBuckets.get(init.name);
+            for (const prop of node.id.properties || []) {
+              if (prop.type === "Property" && !prop.computed && prop.key.type === "Identifier") {
+                request[bucket].add(prop.key.name);
+              }
+            }
+          }
+        }
+      }
+      if (
+        resName &&
+        !isIdentifierShadowed(resName, ancestors, body) &&
+        node.type === "CallExpression"
+      ) {
         collectResponse(node, resName, responses, statusCodes, responseSchemas, scopedOptions);
       }
     });
