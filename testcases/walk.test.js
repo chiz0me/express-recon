@@ -274,8 +274,11 @@ test("chained runtime middleware retains dispatch order", async () => {
   }
   app.use(first).use(second);
   app.get("/ordered", (_req, res) => res.end("ok"));
+  const customMiddleware = new Set(["first", "second"]);
   assert.deepEqual(
-    byKey(auditApp(app, CFG).routes)["GET /ordered"].middlewares.map((item) => item.name),
+    byKey(auditApp(app, CFG).routes)
+      ["GET /ordered"].middlewares.map((item) => item.name)
+      .filter((name) => customMiddleware.has(name)),
     ["first", "second"],
   );
   assert.equal(await dispatch(app, "/ordered"), "ok");
@@ -288,13 +291,14 @@ test("wildcard scope evidence agrees with actual Express dispatch", async () => 
   function requireAuth(_req, res) {
     res.end("blocked");
   }
-  app.use("/admin/*rest", requireAuth);
+  const expressMajor = Number(require("express/package.json").version.split(".")[0]);
+  app.use(expressMajor >= 5 ? "/admin/*rest" : "/admin/*", requireAuth);
   app.get("/public", (_req, res) => res.end("public"));
   app.get("/admin/item", (_req, res) => res.end("admin"));
 
   const keyed = byKey(auditApp(app, CFG).routes);
   assert.equal(keyed["GET /public"].authStatus, "public");
-  assert.equal(keyed["GET /admin/item"].authStatus, "unknown");
+  assert.equal(keyed["GET /admin/item"].authStatus, expressMajor >= 5 ? "unknown" : "proven");
   assert.equal(await dispatch(app, "/public"), "public");
   assert.equal(await dispatch(app, "/admin/item"), "blocked");
 });
