@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/chiz0me/express-recon/main/schemas/render/v1/repository.schema.json",
+  "title": "Render repository v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}$"
+    },
+    "commit": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "outcome": {
+      "enum": ["scanned", "inconclusive", "failed", "skipped", "empty", "unsupported"]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": ["boolean", "null"]
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      },
+      "required": ["complete", "reasons"]
+    },
+    "frameworks": {
+      "type": "array",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+      }
+    },
+    "routes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:#?%\\u0000-\\u001f])[A-Za-z0-9._ /@+-]+$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": ["path", "label"]
+    },
+    "specifications": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:#?%\\u0000-\\u001f])[A-Za-z0-9._ /@+-]+$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": ["path", "label"]
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:#?%\\u0000-\\u001f])[A-Za-z0-9._ /@+-]+$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": ["path", "label"]
+      }
+    },
+    "statistics": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "value": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": ["id", "label", "value", "unit"]
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 50,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*\\.[a-zA-Z0-9._-]+$"
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": ["name", "commit", "outcome", "coverage", "frameworks"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "scanned"
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": ["routes"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": ["failed", "inconclusive"]
+          }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "coverage": {
+            "properties": {
+              "complete": {
+                "enum": [false, null]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

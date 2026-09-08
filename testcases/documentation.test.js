@@ -128,6 +128,9 @@ test("the npm package exposes only the intended runtime and agent surfaces", () 
   assert.deepEqual(pkg.files, [
     "src",
     "skills",
+    "schemas",
+    "docs/render-integration.md",
+    "examples/render-bundle",
     "LICENSE",
     "README.md",
     "assets/logo/mark.svg",

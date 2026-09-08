@@ -1,0 +1,5 @@
+{
+  "tool": "sample-recon",
+  "synthetic": true,
+  "diagnostics": ["Example only; contains no real repository data"]
+}

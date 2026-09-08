@@ -1,0 +1,75 @@
+{
+  "kind": "render-bundle",
+  "schemaVersion": "1.0",
+  "id": "sample-export",
+  "producer": {
+    "name": "sample-recon",
+    "version": "1.0.0"
+  },
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "organization": {
+    "host": "github.com",
+    "owner": "example-org"
+  },
+  "coverage": {
+    "complete": false,
+    "reasons": ["worker could not be scanned"]
+  },
+  "statistics": [
+    {
+      "id": "files-examined",
+      "label": "Files examined",
+      "value": 12,
+      "unit": "files"
+    }
+  ],
+  "repositories": [
+    {
+      "name": "catalog",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "outcome": "scanned",
+      "coverage": {
+        "complete": true,
+        "reasons": []
+      },
+      "frameworks": ["django"],
+      "routes": {
+        "path": "routes.json",
+        "label": "Django route observations"
+      },
+      "specifications": [
+        {
+          "path": "openapi.json",
+          "label": "Catalog API"
+        }
+      ],
+      "evidence": [
+        {
+          "path": "evidence.json",
+          "label": "Producer diagnostics"
+        }
+      ],
+      "statistics": [
+        {
+          "id": "handlers-resolved",
+          "label": "Handlers resolved",
+          "value": 1,
+          "unit": "handlers"
+        }
+      ],
+      "extensions": {
+        "sample-recon.scan-mode": "static"
+      }
+    },
+    {
+      "name": "worker",
+      "commit": null,
+      "outcome": "failed",
+      "coverage": {
+        "complete": false,
+        "reasons": ["Repository unavailable in this synthetic example"]
+      },
+      "frameworks": []
+    }
+  ]
+}

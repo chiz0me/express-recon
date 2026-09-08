@@ -33,21 +33,23 @@ broader changes are intentional.
 
 ### Development script index
 
-| Script                   | Purpose                                                                |
-| ------------------------ | ---------------------------------------------------------------------- |
-| `npm run check`          | Run every required local quality gate.                                 |
-| `npm run docs:check`     | Run documentation coverage plus focused documentation tests.           |
-| `npm run docs:coverage`  | Measure and require complete supported-surface documentation.          |
-| `npm test`               | Run the complete Node test suite without coverage thresholds.          |
-| `npm run test:coverage`  | Run tests with enforced line, branch, and function thresholds.         |
-| `npm run lint`           | Run `oxlint`.                                                          |
-| `npm run fmt`            | Format the repository with `oxfmt`.                                    |
-| `npm run fmt:check`      | Check formatting for `src/` and `testcases/`.                          |
-| `npm run logo:build`     | Rebuild committed SVG variants; add `-- --social` for the preview PNG. |
-| `npm run audit:prod`     | Audit production dependencies at high severity.                        |
-| `npm run check:version`  | Verify package, CLI/plugin, and generated version consistency.         |
-| `npm run version`        | Synchronize versioned plugin metadata during npm versioning.           |
-| `npm run prepublishOnly` | Re-run the version guard immediately before publication.               |
+| Script                   | Purpose                                                                   |
+| ------------------------ | ------------------------------------------------------------------------- |
+| `npm run check`          | Run every required local quality gate.                                    |
+| `npm run docs:check`     | Run documentation coverage plus focused documentation tests.              |
+| `npm run docs:coverage`  | Measure and require complete supported-surface documentation.             |
+| `npm run schemas:check`  | Check native schema snapshot against the runtime contract.                |
+| `npm run schemas:export` | Regenerate the native schema snapshot after intentional contract changes. |
+| `npm test`               | Run the complete Node test suite without coverage thresholds.             |
+| `npm run test:coverage`  | Run tests with enforced line, branch, and function thresholds.            |
+| `npm run lint`           | Run `oxlint`.                                                             |
+| `npm run fmt`            | Format the repository with `oxfmt`.                                       |
+| `npm run fmt:check`      | Check formatting for `src/` and `testcases/`.                             |
+| `npm run logo:build`     | Rebuild committed SVG variants; add `-- --social` for the preview PNG.    |
+| `npm run audit:prod`     | Audit production dependencies at high severity.                           |
+| `npm run check:version`  | Verify package, CLI/plugin, and generated version consistency.            |
+| `npm run version`        | Synchronize versioned plugin metadata during npm versioning.              |
+| `npm run prepublishOnly` | Re-run the version guard immediately before publication.                  |
 
 ## Repository map
 
@@ -75,6 +77,14 @@ broader changes are intentional.
 | `skills/`                           | Bundled audit and OpenAPI workflows for coding agents                   |
 
 ## Design invariants
+
+Render-only interoperability is defined in [the integration guide](docs/render-integration.md).
+Keep native schema snapshots in sync with `src/schema.js`; never substitute the
+interchange schema for scanner/audit validation. Published interchange contracts
+are immutable: evolve them with explicit version handling and compatibility
+tests. Test the synthetic bundle, unsafe/missing artifacts, and native-output
+regressions when changing the renderer. No source-specific importer is needed
+for a new producer that follows the shared contract.
 
 - Static/offline is the default. Never import target code during discovery,
   static inventory, docs reconciliation, middleware review, or remote scans.

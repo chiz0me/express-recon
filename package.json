@@ -38,6 +38,9 @@
   "files": [
     "src",
     "skills",
+    "schemas",
+    "docs/render-integration.md",
+    "examples/render-bundle",
     "LICENSE",
     "README.md",
     "assets/logo/mark.svg",
@@ -47,7 +50,9 @@
   ],
   "main": "src/index.js",
   "scripts": {
-    "check": "npm run lint && npm run fmt:check && npm run docs:coverage && npm run test:coverage && npm run check:version",
+    "check": "npm run lint && npm run fmt:check && npm run docs:coverage && npm run schemas:check && npm run test:coverage && npm run check:version",
+    "schemas:check": "node scripts/export-schemas.js --check",
+    "schemas:export": "node scripts/export-schemas.js",
     "docs:check": "npm run docs:coverage && node --test testcases/documentation.test.js",
     "docs:coverage": "node scripts/check-documentation-coverage.js",
     "test": "node --test",

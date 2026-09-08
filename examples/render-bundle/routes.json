@@ -1,0 +1,23 @@
+{
+  "kind": "render-routes",
+  "schemaVersion": "1.0",
+  "routes": [
+    {
+      "id": "catalog:list",
+      "method": "GET",
+      "path": "/catalog",
+      "framework": "django",
+      "applicationId": "catalog-api",
+      "pathConfidence": "full",
+      "source": {
+        "file": "catalog/urls.py",
+        "line": 12
+      },
+      "middlewares": ["requireSession"],
+      "auth": {
+        "status": "unknown",
+        "basis": "Middleware name observed; guard semantics have not been verified"
+      }
+    }
+  ]
+}

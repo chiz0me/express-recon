@@ -305,6 +305,14 @@ equivalent integrity validation.
 
 ### `renderHtmlSite(inputPath, outputPath, options)`
 
+Also accepts the producer-neutral `render-bundle.json` contract, or discovers
+matching optional bundles beside organization output. The packaged
+`express-recon/src/render-bundle` module exposes `loadRenderBundle(file)` for
+offline validation/projection; it returns `{ manifest, report, warnings }`.
+Malformed contracts throw; missing or unreadable artifacts return warnings and
+incomplete coverage. This is a render-only API, not a scanner/audit input.
+See [the versioned integration contract](render-integration.md).
+
 Renders an existing `routes.json`, `repo-scan.json`, organization inventory,
 OpenAPI 3 or Swagger 2 JSON/YAML document, or containing directory into an
 offline HTML site. API-specification inputs use packaged Swagger UI assets with request submission, remote

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/chiz0me/express-recon/main/schemas/render/v1/routes.schema.json",
+  "title": "Render routes v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "kind": {
+      "const": "render-routes"
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 50,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*\\.[a-zA-Z0-9._-]+$"
+      },
+      "additionalProperties": true
+    },
+    "routes": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "method": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9-]{0,31}$"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "framework": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+          },
+          "applicationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "pathConfidence": {
+            "enum": ["full", "partial", "unknown"]
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:#?%\\u0000-\\u001f])[A-Za-z0-9._ /@+-]+$"
+                  },
+                  "line": {
+                    "type": ["integer", "null"],
+                    "minimum": 1
+                  }
+                },
+                "required": ["file", "line"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "middlewares": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          "auth": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "enum": ["public", "unknown", "proven"]
+              },
+              "basis": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            },
+            "required": ["status", "basis"]
+          },
+          "extensions": {
+            "type": "object",
+            "maxProperties": 50,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9-]*\\.[a-zA-Z0-9._-]+$"
+            },
+            "additionalProperties": true
+          }
+        },
+        "required": ["id", "method", "path", "framework", "pathConfidence"]
+      }
+    }
+  },
+  "required": ["schemaVersion", "kind", "routes"]
+}

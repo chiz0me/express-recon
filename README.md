@@ -387,6 +387,13 @@ producer statistics are included automatically. Original JSON evidence is linked
 for download. Existing Express scans and Gin scans retain separate detail pages.
 See the [render reference](docs/reference.md#render) for limits and trust boundaries.
 
+Other tools can export a versioned `render-bundle.json` with routes, OpenAPI,
+statistics, and JSON evidence. Matching bundles alongside an organization output
+are included automatically; arbitrary files are not guessed or executed.
+See the [schemas and integration guide](docs/render-integration.md),
+[synthetic example](examples/render-bundle/README.md), and reusable
+[`express-recon-render-port`](skills/express-recon-render-port/SKILL.md) skill.
+
 **Why the offline site is great**:
 
 - **100% Offline**: Embedded CSS and JavaScript. Open `index.html` directly in your browser (`file://`) without running a web server or needing an internet connection.

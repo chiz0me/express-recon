@@ -13,7 +13,9 @@ const { getAbsoluteFSPath: swaggerUiPath } = require("swagger-ui-dist");
 const { describeRenderableSpecification, loadSpec } = require("./docs");
 const { isFrameworkStatus } = require("./frameworks");
 const { isGinFleet, normalizeGinReport, readGinFleet } = require("./gin-artifacts");
-const isRenderableStatus = (status) => isFrameworkStatus(status) || status === "gin";
+const { importRenderBundles } = require("./render-bundle");
+const isRenderableStatus = (status) =>
+  isFrameworkStatus(status) || ["gin", "supported"].includes(status);
 const { OPENAPI_STYLES, SCRIPT, STYLES } = require("./html-assets");
 const {
   compareOrganizationReports,
@@ -27,6 +29,7 @@ const MAX_OPENAPI_BYTES = 32 * 1024 * 1024;
 const MAX_SPECIFICATIONS_PER_REPOSITORY = 500;
 const INPUT_CANDIDATES = [
   "organization-inventory.json",
+  "render-bundle.json",
   "fleet.json",
   "repo-scan.json",
   "routes.json",
@@ -491,7 +494,14 @@ function reportSummary(report) {
   );
   const base = [
     ["Routes", routes.length],
-    [report.tool === "gin-recon" ? "Go modules" : "Applications", list(report.applications).length],
+    [
+      report.mode === "imported"
+        ? "Application groups"
+        : report.tool === "gin-recon"
+          ? "Go modules"
+          : "Applications",
+      list(report.applications).length,
+    ],
     ["Mode", display(report.mode)],
     ["Coverage", completeness(coverage.complete)],
     ["Typed I/O routes", typedRoutes],
@@ -656,7 +666,8 @@ function repositoryPage(scan, fallback, navigation = {}) {
       repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
     afterRoutes:
       documentationPanel(scan.documentation, navigation.apiReferences) +
-      ginEvidencePanel(scan.gin, navigation.assetPrefix),
+      ginEvidencePanel(scan.gin, navigation.assetPrefix) +
+      importedEvidencePanel(scan.imported, navigation.assetPrefix),
   });
 }
 
@@ -687,6 +698,7 @@ function readJson(file) {
 }
 
 function inputKind(value) {
+  if (value?.kind === "render-bundle") return "render-bundle";
   if (isGinFleet(value)) return "gin-fleet";
   if (value?.kind === "github-organization-inventory" && Array.isArray(value.repositories)) {
     return "organization";
@@ -747,7 +759,7 @@ function resolveInput(input) {
         .readdirSync(resolved, { withFileTypes: true })
         .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
         .flatMap((entry) =>
-          ["organization-inventory.json", "fleet.json"].map((name) =>
+          ["organization-inventory.json", "render-bundle.json", "fleet.json"].map((name) =>
             path.join(resolved, entry.name, name),
           ),
         )
@@ -1093,8 +1105,8 @@ function organizationFrameworks(entry) {
     [
       ...list(evidence.names),
       ...list(evidence.items).map((item) => object(item).name),
-      entry.status,
-    ].filter((name) => ["express", "fastify", "nestjs", "gin"].includes(name)),
+      ...(["express", "fastify", "nestjs", "gin"].includes(entry.status) ? [entry.status] : []),
+    ].filter((name) => typeof name === "string" && /^[a-z][a-z0-9.-]{0,63}$/.test(name)),
   );
   if (entry.ginScan && isRenderableStatus(entry.status)) names.add("gin");
   if (names.size > 1 || entry.status === "multi-framework") names.add("multi-framework");
@@ -1113,7 +1125,7 @@ function frameworkBadges(frameworks) {
     (name) => name !== "not-reported" && (name !== "multi-framework" || frameworks.length === 1),
   );
   return visible.length
-    ? `<div class="framework-badges">${visible.map((name) => badge(labels[name], "neutral")).join("")}</div>`
+    ? `<div class="framework-badges">${visible.map((name) => badge(labels[name] || name, "neutral")).join("")}</div>`
     : `<span class="subtle">Not reported</span>`;
 }
 
@@ -1157,6 +1169,8 @@ function organizationRows(report, detailPages, apiReferencePages, reference = fa
         group,
         ...frameworks,
         entry.ginScan || entry.producer === "gin-recon" ? "gin gin-recon" : "express-recon",
+        entry.producer,
+        ...list(entry.importedScans).map((scan) => scan.imported.producer.name),
         ...roles,
         docsStatus,
         entry.error,
@@ -1166,7 +1180,11 @@ function organizationRows(report, detailPages, apiReferencePages, reference = fa
         .toLowerCase();
       const detailLabel =
         organizationDetailLabel(entry.status, evidence) ||
-        (detailPages[index] ? "View changes" : "");
+        (detailPages[index]
+          ? entry.scan?.imported || list(entry.importedScans).length
+            ? "View evidence"
+            : "View changes"
+          : "");
       const references = list(apiReferencePages[index]);
       const referenceLink = references.length
         ? references.length === 1
@@ -1178,6 +1196,9 @@ function organizationRows(report, detailPages, apiReferencePages, reference = fa
       const links = [
         detailPages[index] ? `<a href="${escapeHtml(detailPages[index])}">${detailLabel}</a>` : "",
         entry.ginDetailPage ? `<a href="${escapeHtml(entry.ginDetailPage)}">Gin report</a>` : "",
+        ...list(entry.importedDetailPages).map(
+          (page) => `<a href="${escapeHtml(page.href)}">${escapeHtml(page.label)} report</a>`,
+        ),
         referenceLink,
       ].filter(Boolean);
       const detail = links.length
@@ -1438,7 +1459,7 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
         supportedEntries.filter((entry) => organizationStatus(entry) === "incomplete").length,
       ],
       ["Reference", referenceCount],
-      ["Routes", count(summary.routes)],
+      [report.imports ? "Route observations" : "Routes", count(summary.routes)],
     ]),
     metrics([
       ["Repositories discovered", count(summary.repositoriesDiscovered) || entries.length],
@@ -1448,13 +1469,28 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
         count(summary.supportedRepositories ?? summary.expressRepositories),
       ],
       [
-        report.gin ? "Repositories with routes" : "Application repositories",
+        report.gin || report.imports ? "Repositories with routes" : "Application repositories",
         applicationRepositories,
       ],
-      ...(report.gin ? [] : [["Dependency-only repositories", dependencyOnlyRepositories]]),
+      ...(report.gin || report.imports
+        ? []
+        : [["Dependency-only repositories", dependencyOnlyRepositories]]),
       ["Express", count(summary.expressRepositories)],
       ["Fastify", count(summary.fastifyRepositories)],
       ["NestJS", count(summary.nestjsRepositories)],
+      ...(report.imports
+        ? [...new Set(entries.flatMap(organizationFrameworks))]
+            .filter(
+              (name) =>
+                !["express", "fastify", "nestjs", "multi-framework", "not-reported"].includes(
+                  name,
+                ) && !(name === "gin" && report.gin),
+            )
+            .map((name) => [
+              `${name} repositories`,
+              entries.filter((entry) => organizationFrameworks(entry).includes(name)).length,
+            ])
+        : []),
       ...(report.gin
         ? [
             [
@@ -1463,8 +1499,15 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
             ],
           ]
         : []),
-      [report.gin ? "Apps / Go modules" : "Applications", count(summary.applications)],
-      ["Routes", count(summary.routes)],
+      [
+        report.imports
+          ? "Application groups / observations"
+          : report.gin
+            ? "Apps / Go modules"
+            : "Applications",
+        count(summary.applications),
+      ],
+      [report.imports ? "Route observations" : "Routes", count(summary.routes)],
       ["API specifications", count(summary.apiSpecifications)],
       ["Specification repositories", count(summary.specificationRepositories)],
       ["Cataloged repositories", count(summary.catalogedRepositories)],
@@ -1474,6 +1517,7 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
       ["Coverage", completeness(coverage.complete)],
     ]),
     ginEvidencePanel(report.gin),
+    ...list(report.imports).map((source) => importedEvidencePanel(source)),
     organizationDeltaPanel(delta),
     organizationScopePanel(report),
     panel(
@@ -1485,8 +1529,13 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
   ].join("");
   return layout({
     title: display(organization.login, "Organization inventory"),
-    eyebrow: "GitHub organization inventory",
-    lede: "Automatically discovered supported HTTP frameworks and their static route evidence.",
+    eyebrow:
+      organization.host && organization.host !== "github.com"
+        ? "Organization inventory"
+        : "GitHub organization inventory",
+    lede: report.imports
+      ? "Saved route observations by producer. Framework support here describes imported evidence, not additional scanning capabilities."
+      : "Automatically discovered supported HTTP frameworks and their static route evidence.",
     body,
   });
 }
@@ -1494,6 +1543,38 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
 function writeFile(file, contents) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, contents, "utf8");
+}
+
+function importedEvidencePanel(source, prefix = "") {
+  if (!source) return "";
+  return panel(
+    `Imported evidence: ${source.producer.name}`,
+    notice(
+      `${source.producer.name} ${source.producer.version} · ${source.bundleId}`,
+      "Producer-reported evidence, not an Express Recon audit or verified exposure assessment. Route/application totals count observations separately across producers; they are not deduplicated.",
+    ) +
+      metrics([
+        ["Coverage", completeness(source.complete)],
+        ["Outcome", source.outcome || "bundle"],
+        ["Commit", source.commit || "not reported"],
+        ["Generated", source.generatedAt],
+        ...source.statistics.map((statistic) => [
+          `${statistic.label} (${statistic.unit})`,
+          statistic.value,
+        ]),
+      ]) +
+      `<div class="panel__body">${source.reasons.length ? `<ul>${source.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}<details><summary>Producer evidence and source files</summary>${source.auth?.length ? `<pre class="evidence-json">${escapeHtml(JSON.stringify(source.auth, null, 2))}</pre>` : ""}<ul>${source.files.map((file) => `<li><a href="${escapeHtml(prefix + file.href)}" download>${escapeHtml(file.label)}</a></li>`).join("")}</ul></details></div>`,
+  );
+}
+
+function writeImportedFiles(source, output, data) {
+  if (!source) return;
+  source.files = source.files.map(({ label, value }) => {
+    const href = `data/import-${data.length + 1}.json`;
+    writeFile(path.join(output, href), JSON.stringify(value, null, 2) + "\n");
+    data.push(href);
+    return { label, href };
+  });
 }
 
 function ginEvidencePanel(gin, prefix = "") {
@@ -1685,7 +1766,7 @@ function ownedOutputReference(reference) {
     REPORT_ASSETS.includes(reference) ||
     OPENAPI_ASSETS.includes(reference) ||
     /^repositories\/[A-Za-z0-9._-]+\.html$/.test(reference) ||
-    /^data\/gin-[0-9]+\.json$/.test(reference) ||
+    /^data\/(?:gin|import)-[0-9]+\.json$/.test(reference) ||
     /^openapi\/[A-Za-z0-9._-]+\.(?:html|js)$/.test(reference)
   );
 }
@@ -1873,7 +1954,9 @@ function renderOrganization(
   suppliedDelta = null,
   data = [],
 ) {
-  const delta = suppliedDelta || organizationDelta(input, warnings);
+  const delta =
+    suppliedDelta ||
+    (input.sourceKind === "render-bundle" ? null : organizationDelta(input, warnings));
   const changes = new Map(
     list(delta?.repositories).map((entry) => [
       String(entry?.repository?.fullName || "").toLowerCase(),
@@ -1886,6 +1969,7 @@ function renderOrganization(
   const usedOpenApi = new Set();
   let swaggerUiWritten = false;
   writeGinFiles(input.value.gin, output, data);
+  for (const source of list(input.value.imports)) writeImportedFiles(source, output, data);
   const safeError = (error) => {
     const realRoot = fs.realpathSync(input.root);
     return String(error.message).split(input.root).join(".").split(realRoot).join(".");
@@ -1900,6 +1984,7 @@ function renderOrganization(
     const name = display(repository.fullName, `repository ${index + 1}`);
     const wantsDetail = Boolean(
       organizationDetailLabel(entry.status, evidence) ||
+      entry.scan?.imported ||
       change?.changes?.routes ||
       change?.routeChanges,
     );
@@ -1917,12 +2002,25 @@ function renderOrganization(
       writeGinFiles(ginScan.gin, output, data);
       if (!scan) scan = ginScan;
     }
+    const importedScans = list(entry.importedScans);
+    if (!scan && importedScans.length) scan = importedScans[0];
+    for (const importedScan of new Set([scan, ...importedScans]))
+      writeImportedFiles(importedScan?.imported, output, data);
 
-    if (isRenderableStatus(entry.status)) {
+    if (isRenderableStatus(entry.status) || scan?.imported || importedScans.length) {
       let descriptors = [];
       try {
         descriptors = repositoryApiDescriptors(entry, scan);
         if (ginScan && scan !== ginScan) descriptors.push(...repositoryApiDescriptors({}, ginScan));
+        for (const importedScan of importedScans) {
+          if (scan !== importedScan)
+            descriptors.push(
+              ...repositoryApiDescriptors({}, importedScan).map((descriptor) => ({
+                ...descriptor,
+                importedScan,
+              })),
+            );
+        }
       } catch (error) {
         warnings.push(`${name} API specifications: ${safeError(error)}`);
       }
@@ -1955,6 +2053,7 @@ function renderOrganization(
             source: descriptor.source,
             format: descriptor.format || description.format,
             version: descriptor.version || description.version,
+            importedScan: descriptor.importedScan,
           });
           pages.push(pageReference);
           assets.push(configReference);
@@ -1985,12 +2084,36 @@ function renderOrganization(
         assetPrefix: "../",
         backHref: "../index.html",
         delta: change,
-        apiReferences: list(apiReferencePages[index]).map((reference) => ({
-          ...reference,
-          href: `../${reference.href}`,
-        })),
+        apiReferences: list(apiReferencePages[index])
+          .filter((reference) => !reference.importedScan)
+          .map((reference) => ({
+            ...reference,
+            href: `../${reference.href}`,
+          })),
       }),
     );
+    for (const importedScan of importedScans) {
+      if (scan === importedScan) continue;
+      const producer = importedScan.imported.producer.name;
+      let importedFilename = `${base}--${slug(producer)}.html`;
+      let importedSuffix = 2;
+      while (usedDetails.has(importedFilename.toLowerCase()))
+        importedFilename = `${base}--${slug(producer)}-${importedSuffix++}.html`;
+      usedDetails.add(importedFilename.toLowerCase());
+      const href = path.posix.join("repositories", importedFilename);
+      (entry.importedDetailPages ||= []).push({ href, label: producer });
+      pages.push(href);
+      writeFile(
+        path.join(output, href),
+        repositoryPage(importedScan, name, {
+          assetPrefix: "../",
+          backHref: "../index.html",
+          apiReferences: list(apiReferencePages[index])
+            .filter((reference) => reference.importedScan === importedScan)
+            .map((reference) => ({ ...reference, href: `../${reference.href}` })),
+        }),
+      );
+    }
     if (ginScan && scan !== ginScan) {
       let ginFilename = `${base}--gin.html`;
       let ginSuffix = 2;
@@ -2012,7 +2135,7 @@ function renderOrganization(
       );
     }
   }
-  if (input.value.gin) {
+  if (input.value.gin || input.value.imports) {
     input.value.summary.apiSpecifications = apiReferencePages.flat().length;
     input.value.summary.specificationRepositories = apiReferencePages.filter(
       (references) => references?.length,
@@ -2062,6 +2185,14 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
       `Optional Gin import skipped: ${String(error.message).split(input.discoveryRoot).join(".")}`,
     );
   }
+  try {
+    importRenderBundles(input, warnings);
+  } catch (error) {
+    if (input.kind !== "organization") throw error;
+    warnings.push(
+      `Optional render bundles skipped: ${String(error.message).split(input.discoveryRoot).join(".")}`,
+    );
+  }
   const output = prepareOutput(outputPath, input.kind);
   const pages = ["index.html"];
   const data = [];
@@ -2086,7 +2217,7 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
     kind: "express-recon-html-site",
     tool: "express-recon",
     toolVersion: pkg.version,
-    source: { kind: input.kind, file: path.basename(input.file) },
+    source: { kind: input.sourceKind || input.kind, file: path.basename(input.file) },
     entry: "index.html",
     pages,
     assets,

@@ -609,6 +609,11 @@ the trusted `workflow_run` boundary and receiver verification.
 
 ### `render`
 
+For third-party exporters, [the render integration guide](render-integration.md)
+defines the versioned `render-bundle.json` format, schemas, validation command,
+discovery precedence, limits, and producer-evidence semantics. Existing native
+and Gin formats remain supported without conversion.
+
 Render existing machine-readable artifacts as a browsable offline HTML site:
 
 ```bash

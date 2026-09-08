@@ -1,11 +1,13 @@
 # Examples
 
 Copy these examples into the repository that you want to scan. They are
-kept out of the npm package intentionally: install `express-recon` as a pinned
+kept out of the npm package intentionally (except the synthetic render contract example): install `express-recon` as a pinned
 development dependency in the consuming repository so its lockfile controls the
 scanner version used by CI.
 
 ## GitHub Actions
+
+For third-party render exporters, see the packaged [render bundle example](render-bundle/README.md).
 
 - [`github-actions/express-recon-pr.yml`](./github-actions/express-recon-pr.yml)
   compares the pull request with its base revision, adds bounded check output,
