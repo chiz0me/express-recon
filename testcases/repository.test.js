@@ -263,6 +263,10 @@ test("repository scans materialize hidden API contracts only with includeHidden"
 test("repository snapshots are removed after successful and failed scans", () => {
   withRepository((root) => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-cleanup-test-"));
+    const unrelated = path.join(tempRoot, "unrelated-canary");
+    const canary = path.join(unrelated, "preserve.txt");
+    fs.mkdirSync(unrelated);
+    fs.writeFileSync(canary, "preserve me");
     const modulePath = path.join(__dirname, "..", "src");
     const environment = {
       ...process.env,
@@ -277,7 +281,11 @@ test("repository snapshots are removed after successful and failed scans", () =>
         { encoding: "utf8", env: environment },
       );
       assert.equal(success.status, 0, success.stderr);
-      assert.deepEqual(fs.readdirSync(tempRoot), []);
+      assert.deepEqual(
+        fs.readdirSync(tempRoot).filter((name) => name.startsWith("express-recon-repository-")),
+        [],
+      );
+      assert.equal(fs.readFileSync(canary, "utf8"), "preserve me");
 
       const failure = spawnSync(
         process.execPath,
@@ -289,7 +297,11 @@ test("repository snapshots are removed after successful and failed scans", () =>
         { encoding: "utf8", env: environment },
       );
       assert.equal(failure.status, 0, failure.stderr);
-      assert.deepEqual(fs.readdirSync(tempRoot), []);
+      assert.deepEqual(
+        fs.readdirSync(tempRoot).filter((name) => name.startsWith("express-recon-repository-")),
+        [],
+      );
+      assert.equal(fs.readFileSync(canary, "utf8"), "preserve me");
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
@@ -369,6 +381,55 @@ if (args.includes("cat-file")) process.stdout.write("abc");
     assert.deepEqual(call("remote").config, []);
     assert.ok(calls.every((item) => item.hasRawTokenVariables === false));
     assert.doesNotMatch(JSON.stringify(calls.map((item) => item.args)), /token-for-test/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("repository acquisition timeout reports the configured budget and phase", () => {
+  if (process.platform === "win32") return;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-git-timeout-"));
+  const bin = path.join(root, "bin");
+  const fakeGit = path.join(bin, "git");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    fakeGit,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "init") fs.mkdirSync(args.at(-1), { recursive: true });
+if (args.includes("fetch")) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3_000);
+}
+`,
+    { mode: 0o755 },
+  );
+  try {
+    const modulePath = path.join(__dirname, "..", "src", "repository.js");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `try {
+          require(${JSON.stringify(modulePath)}).acquireRepository("acme/slow", {
+            scan: { timeoutMs: 1_000 },
+          });
+          process.exitCode = 2;
+        } catch (error) {
+          process.stderr.write(error.message);
+        }`,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH || ""}` },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      result.stderr,
+      "Repository acquisition exceeded scan.timeoutMs (1000ms) during Git fetch",
+    );
+    assert.doesNotMatch(result.stderr, /Git command timed out after \d+ms/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

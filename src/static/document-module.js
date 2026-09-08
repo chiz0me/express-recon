@@ -394,9 +394,9 @@ class StaticDocumentEvaluator {
     }
   }
 
-  requireModule(source, fromFile) {
+  requireModule(source, fromFile, importKind = "require") {
     if (source === "lodash") return this.lodashBuiltin;
-    const target = this.resolve(fromFile, source);
+    const target = this.resolve(fromFile, source, importKind);
     if (!target) {
       throw new StaticDocumentError(
         `external module ${JSON.stringify(source)} is not allowed in static documentation evaluation`,
@@ -464,7 +464,7 @@ class StaticDocumentEvaluator {
         }
         return;
       case "ImportDeclaration": {
-        const imported = this.requireModule(node.source.value, file);
+        const imported = this.requireModule(node.source.value, file, "import");
         for (const specifier of node.specifiers) {
           if (specifier.type === "ImportDefaultSpecifier")
             env.define(

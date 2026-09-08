@@ -51,7 +51,7 @@ function requireInfo(node, requireAliases = new Set(["require"])) {
     if (n.type === "CallExpression") {
       if (n.callee.type === "Identifier" && requireAliases.has(n.callee.name)) {
         const source = staticString(n.arguments[0]);
-        return source ? { source, exportName: "default", props } : null;
+        return source ? { source, exportName: "default", props, importKind: "require" } : null;
       }
       const c = unwrap(n.callee);
       // `require('x')(deps)` — calling the module's factory export: see through.
@@ -121,6 +121,7 @@ function collectRequireBinding(node, bindings, requireAliases) {
           source: info.source,
           exportName: "default",
           props: info.props.concat(propName),
+          importKind: info.importKind,
         });
       }
     }
@@ -131,13 +132,28 @@ function collectImportBinding(node, bindings) {
   const source = node.source.value;
   for (const spec of node.specifiers) {
     if (spec.type === "ImportDefaultSpecifier")
-      addBinding(bindings, spec.local.name, { source, exportName: "default", props: [] });
+      addBinding(bindings, spec.local.name, {
+        source,
+        exportName: "default",
+        props: [],
+        importKind: "import",
+      });
     else if (spec.type === "ImportNamespaceSpecifier")
-      addBinding(bindings, spec.local.name, { source, exportName: "*", props: [] });
+      addBinding(bindings, spec.local.name, {
+        source,
+        exportName: "*",
+        props: [],
+        importKind: "import",
+      });
     else if (spec.type === "ImportSpecifier") {
       const importedName =
         spec.imported.type === "Identifier" ? spec.imported.name : spec.imported.value;
-      addBinding(bindings, spec.local.name, { source, exportName: importedName, props: [] });
+      addBinding(bindings, spec.local.name, {
+        source,
+        exportName: importedName,
+        props: [],
+        importKind: "import",
+      });
     }
   }
 }
@@ -261,6 +277,23 @@ function collectBindings(program) {
     );
   };
 
+  /** Express Router matching option; null means a dynamic option object. */
+  const routerCaseSensitive = (init) => {
+    const value = init && unwrap(init);
+    const options = value?.arguments?.[0] && unwrap(value.arguments[0]);
+    if (!options) return false;
+    if (options.type !== "ObjectExpression") return null;
+    let result = false;
+    for (const property of options.properties || []) {
+      if (property.type === "SpreadElement") return null;
+      const key = property.key?.name ?? property.key?.value;
+      if (key !== "caseSensitive") continue;
+      result = staticBoolean(property.value);
+      if (result === null) return null;
+    }
+    return result;
+  };
+
   const routers = new Map();
   const declarations = new Map();
   let nextBindingId = 1;
@@ -272,8 +305,8 @@ function collectBindings(program) {
 
   /** Classify the value currently held by a binding. */
   function bindingState(value, eventStart) {
-    if (value && isAppInit(value)) return { kind: "app", start: eventStart };
-    if (value && isRouterInit(value)) return { kind: "router", start: eventStart };
+    if (value && isAppInit(value)) return { kind: "app", start: eventStart, value };
+    if (value && isRouterInit(value)) return { kind: "router", start: eventStart, value };
     const base = value ? routeChainBase(value) : null;
     if (base && base.host.type === "Identifier") {
       return {
@@ -282,6 +315,7 @@ function collectBindings(program) {
         pathNode: base.pathNode,
         allArgs: base.allArgs,
         start: base.start,
+        value,
       };
     }
     const candidate = value && unwrap(value);
@@ -298,9 +332,9 @@ function collectBindings(program) {
         "SequenceExpression",
       ].includes(candidate.type)
     ) {
-      return { kind: "unknown", start: eventStart };
+      return { kind: "unknown", start: eventStart, value };
     }
-    return { kind: "other", start: eventStart };
+    return { kind: "other", start: eventStart, value: value || null };
   }
 
   /** Declare a lexical binding and record its initial value as the first state event. */
@@ -360,9 +394,13 @@ function collectBindings(program) {
       if (node.id.type === "Identifier") {
         const state = bindingState(node.init, node.start);
         if (state.kind === "app") {
-          routers.set(node.id.name, { kind: "app", start: node.start });
+          routers.set(node.id.name, { kind: "app", start: node.start, caseSensitive: false });
         } else if (state.kind === "router") {
-          routers.set(node.id.name, { kind: "router", start: node.start });
+          routers.set(node.id.name, {
+            kind: "router",
+            start: node.start,
+            caseSensitive: routerCaseSensitive(node.init),
+          });
         }
         declareBinding(node.id.name, state, scope, declarationKind, node.start);
       } else {
@@ -449,9 +487,38 @@ function collectBindings(program) {
     });
     declarations.set(node.left.name, list);
     if (state.kind === "app" || state.kind === "router") {
-      routers.set(node.left.name, { kind: state.kind, start: node.start });
+      routers.set(node.left.name, {
+        kind: state.kind,
+        start: node.start,
+        caseSensitive: state.kind === "router" ? routerCaseSensitive(node.right) : false,
+      });
     }
   });
+
+  // Applications default to case-insensitive routing. A single static
+  // set/enable/disable declaration is safe to carry into matching evidence;
+  // conflicting or dynamic mutations remain unknown rather than guessing at
+  // the lazy router's creation point.
+  const appCaseSettings = new Map();
+  walk(program, (node) => {
+    if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
+    const host = chainRootIdentifier(node.callee.object);
+    const router = host && routers.get(host);
+    if (!router || router.kind !== "app") return;
+    const method = node.callee.property.name;
+    if (!["set", "enable", "disable"].includes(method)) return;
+    if (staticString(node.arguments[0]) !== "case sensitive routing") return;
+    const value =
+      method === "enable" ? true : method === "disable" ? false : staticBoolean(node.arguments[1]);
+    const settings = appCaseSettings.get(host) || [];
+    settings.push(value);
+    appCaseSettings.set(host, settings);
+  });
+  for (const [host, settings] of appCaseSettings) {
+    const known = settings.filter((value) => value !== null);
+    routers.get(host).caseSensitive =
+      known.length === settings.length && new Set(known).size === 1 ? known[0] : null;
+  }
 
   return {
     requires: bindings,
@@ -468,17 +535,180 @@ function collectBindings(program) {
  * const may fold earlier ones (`const V1 = "/v1"; const USERS = V1 + "/users"`).
  * `let`/`var` are skipped — they can be reassigned.
  */
-function collectStringConsts(program) {
-  const consts = new Map();
-  walk(program, (node) => {
-    if (node.type !== "VariableDeclaration" || node.kind !== "const") return;
-    for (const d of node.declarations) {
-      if (d.id.type !== "Identifier" || !d.init) continue;
-      const value = staticString(d.init, consts);
-      if (value !== null && !consts.has(d.id.name)) consts.set(d.id.name, value);
-    }
-  });
+function collectStringConsts(declarations) {
+  const resolving = new Set();
+
+  /** Innermost declaration binding whose lexical scope contains this use. */
+  const bindingAt = (name, reference) => {
+    const candidates = (declarations.get(name) || []).filter(
+      (item) =>
+        item.isDeclaration &&
+        item.scope.start <= reference.start &&
+        reference.end <= item.scope.end,
+    );
+    candidates.sort((left, right) => {
+      const leftSize = left.scope.end - left.scope.start;
+      const rightSize = right.scope.end - right.scope.start;
+      if (leftSize !== rightSize) return leftSize - rightSize;
+      if (left.scope.start !== right.scope.start) return right.scope.start - left.scope.start;
+      return right.eventStart - left.eventStart;
+    });
+    return candidates[0] || null;
+  };
+
+  const consts = {
+    resolve(reference) {
+      const binding = bindingAt(reference.name, reference);
+      if (
+        !binding ||
+        binding.declarationKind !== "const" ||
+        !binding.value ||
+        // A shadowing const exists before initialization: do not fall through
+        // to an outer binding across JavaScript's temporal dead zone.
+        binding.value.end > reference.start ||
+        resolving.has(binding.bindingId)
+      ) {
+        return null;
+      }
+      resolving.add(binding.bindingId);
+      try {
+        return staticString(binding.value, consts);
+      } finally {
+        resolving.delete(binding.bindingId);
+      }
+    },
+  };
   return consts;
+}
+
+/** Evaluate only boolean syntax whose result is independent of application state. */
+function staticBoolean(node) {
+  const value = node && unwrap(node);
+  if (!value) return null;
+  if (value.type === "Literal" && typeof value.value === "boolean") return value.value;
+  if (value.type === "UnaryExpression" && value.operator === "!") {
+    const argument = staticBoolean(value.argument);
+    return argument === null ? null : !argument;
+  }
+  if (value.type === "LogicalExpression") {
+    const left = staticBoolean(value.left);
+    const right = staticBoolean(value.right);
+    if (value.operator === "&&") {
+      if (left === false || right === false) return false;
+      if (left === true && right === true) return true;
+    }
+    if (value.operator === "||") {
+      if (left === true || right === true) return true;
+      if (left === false && right === false) return false;
+    }
+  }
+  return null;
+}
+
+/** Evaluate whether a bounded literal expression is nullish for `??`. */
+function staticNullish(node) {
+  const value = node && unwrap(node);
+  if (!value) return null;
+  if (value.type === "Literal") return value.value == null;
+  if (value.type === "UnaryExpression" && value.operator === "void") return true;
+  return null;
+}
+
+function contains(outer, inner) {
+  return Boolean(outer && outer.start <= inner.start && inner.end <= outer.end);
+}
+
+/**
+ * Compact execution conditions for a registration. Unknown branches are kept
+ * as predicates so a guard can prove a route only when the route necessarily
+ * traverses the same branch. Literal-dead registrations are discarded.
+ */
+function executionContext(node, ancestors) {
+  const context = { functions: [], predicates: [] };
+  const addPredicate = (id, branch, exclusive = false) => {
+    context.predicates.push({ id, branch, exclusive });
+  };
+  for (const ancestor of ancestors) {
+    if (FN_NODE.has(ancestor.type)) context.functions.push(ancestor.start);
+    if (ancestor.type === "IfStatement") {
+      const branch = contains(ancestor.consequent, node)
+        ? "consequent"
+        : contains(ancestor.alternate, node)
+          ? "alternate"
+          : null;
+      if (!branch) continue;
+      const condition = staticBoolean(ancestor.test);
+      if (
+        (condition === true && branch === "alternate") ||
+        (condition === false && branch === "consequent")
+      ) {
+        return { ...context, reachable: false };
+      }
+      if (condition === null) addPredicate(`if:${ancestor.start}`, branch, true);
+    } else if (ancestor.type === "ConditionalExpression") {
+      const branch = contains(ancestor.consequent, node)
+        ? "consequent"
+        : contains(ancestor.alternate, node)
+          ? "alternate"
+          : null;
+      if (!branch) continue;
+      const condition = staticBoolean(ancestor.test);
+      if (
+        (condition === true && branch === "alternate") ||
+        (condition === false && branch === "consequent")
+      ) {
+        return { ...context, reachable: false };
+      }
+      if (condition === null) addPredicate(`conditional:${ancestor.start}`, branch, true);
+    } else if (ancestor.type === "LogicalExpression" && contains(ancestor.right, node)) {
+      if (ancestor.operator === "??") {
+        const left = staticNullish(ancestor.left);
+        if (left === false) return { ...context, reachable: false };
+        if (left === null) addPredicate(`logical:${ancestor.start}`, "right:??");
+      } else {
+        const left = staticBoolean(ancestor.left);
+        if (
+          (ancestor.operator === "&&" && left === false) ||
+          (ancestor.operator === "||" && left === true)
+        ) {
+          return { ...context, reachable: false };
+        }
+        if (left === null) addPredicate(`logical:${ancestor.start}`, `right:${ancestor.operator}`);
+      }
+    } else if (ancestor.type === "WhileStatement" && contains(ancestor.body, node)) {
+      const condition = staticBoolean(ancestor.test);
+      if (condition === false) return { ...context, reachable: false };
+      // Even a literal-true loop body can be skipped at a registration site by
+      // an earlier break/continue/throw. A bounded AST pass cannot prove that
+      // absence, so loop-contained registrations remain conditional.
+      addPredicate(`while:${ancestor.start}`, "body");
+    } else if (ancestor.type === "DoWhileStatement" && contains(ancestor.body, node)) {
+      addPredicate(`do-while:${ancestor.start}`, "body");
+    } else if (ancestor.type === "ForStatement") {
+      const inBody = contains(ancestor.body, node);
+      const inUpdate = contains(ancestor.update, node);
+      if (!inBody && !inUpdate) continue;
+      const condition = ancestor.test == null ? true : staticBoolean(ancestor.test);
+      if (condition === false) return { ...context, reachable: false };
+      addPredicate(`for:${ancestor.start}`, inUpdate ? "update" : "body");
+    } else if (
+      (ancestor.type === "ForInStatement" || ancestor.type === "ForOfStatement") &&
+      contains(ancestor.body, node)
+    ) {
+      addPredicate(`iteration:${ancestor.start}`, "body");
+    } else if (ancestor.type === "SwitchCase" && contains(ancestor, node)) {
+      // Case selection and fall-through require a control-flow graph. Retain
+      // the registration as possible instead of treating every case as run.
+      addPredicate(`switch-case:${ancestor.start}`, "body");
+    } else if (ancestor.type === "TryStatement" && contains(ancestor.block, node)) {
+      // A preceding statement may transfer control to catch/finally before the
+      // registration (for example an unconditional throw).
+      addPredicate(`try:${ancestor.start}`, "body");
+    } else if (ancestor.type === "CatchClause" && contains(ancestor.body, node)) {
+      addPredicate(`catch:${ancestor.start}`, "body");
+    }
+  }
+  return { ...context, reachable: true };
 }
 
 /**
@@ -553,12 +783,25 @@ function refFromExpr(node, ctx) {
 
   const info = requireInfo(n, ctx.requireAliases);
   if (info)
-    return { t: "module", source: info.source, exportName: info.exportName, props: info.props };
+    return {
+      t: "module",
+      source: info.source,
+      exportName: info.exportName,
+      props: info.props,
+      importKind: info.importKind,
+    };
 
   if (n.type === "Identifier") {
     if (ctx.routers.has(n.name)) return { t: "local", name: n.name };
     const b = ctx.requires.get(n.name);
-    if (b) return { t: "module", source: b.source, exportName: b.exportName, props: b.props };
+    if (b)
+      return {
+        t: "module",
+        source: b.source,
+        exportName: b.exportName,
+        props: b.props,
+        importKind: b.importKind,
+      };
     return { t: "local", name: n.name };
   }
   if (n.type === "MemberExpression" && !n.computed && n.property.type === "Identifier") {
@@ -581,6 +824,7 @@ function refFromExpr(node, ctx) {
           source: b.source,
           exportName: b.exportName,
           props: b.props.concat(props),
+          importKind: b.importKind,
         };
       }
     }
@@ -923,12 +1167,14 @@ function pathsFrom(pathNode, consts) {
 /** Collect route registrations (`host.get('/x', ...)`) into `out.routes`. */
 function extractRoutes(program, code, ctx, out) {
   const collected = [];
-  walk(program, (node) => {
+  walk(program, (node, ancestors) => {
     if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
     const method = node.callee.property.name;
     if (!HTTP_METHODS.has(method)) return;
     const target = routeTarget(node, ctx);
     if (!target || !isLocalHost(target.host, ctx)) return;
+    const context = executionContext(node, ancestors);
+    if (!context.reachable) return;
     // `app.get('view engine')` — a lone string on a known app/router var is the
     // settings getter, not a route. Unresolved hosts keep flowing to the graph
     // so non-router calls (HTTP clients, caches) still get their diagnostic.
@@ -954,7 +1200,13 @@ function extractRoutes(program, code, ctx, out) {
         // and it matches the call-site line V8 reports at runtime, so hybrid
         // reconcile can pair routes by source.
         line: ctx.lineAt(node.callee.property.start),
+        // A call registers only after its callee and arguments are evaluated.
+        // Using the call end keeps nested side-effect registrations ahead of
+        // the outer route while retaining the verb-property line for source UI.
+        order: node.end,
+        context,
         chainStart: target.chainStart,
+        caseSensitive: ctx.routers.get(target.host)?.caseSensitive ?? null,
       };
       attachIo(route, handlerNode, ctx);
       attachValidatorSchemas(route, mwSource, ctx);
@@ -1024,12 +1276,23 @@ function isPathLike(node, consts) {
   return false;
 }
 
-/** Flatten `use()` layer args one level: `use('/x', [a, b])` → `a, b`. */
+/** A first `use()` argument that is syntactically guaranteed to be callable. */
+function isDefinitelyMiddleware(node, ctx) {
+  const value = unwrap(node);
+  if (!value) return false;
+  if (FN_TYPES.has(value.type)) return true;
+  if (value.type !== "Identifier") return false;
+  if (ctx.handlerIndex.has(value.name)) return true;
+  const binding = ctx.valueBindings.get(value.name);
+  return Boolean(binding && FN_TYPES.has(unwrap(binding).type));
+}
+
+/** Flatten nested `use()` layer arrays while preserving their source order. */
 function flattenLayers(args) {
   const flat = [];
   for (const arg of args) {
     const n = unwrap(arg);
-    if (n.type === "ArrayExpression") flat.push(...n.elements.filter(Boolean));
+    if (n.type === "ArrayExpression") flat.push(...flattenLayers(n.elements.filter(Boolean)));
     else flat.push(n);
   }
   return flat;
@@ -1053,12 +1316,24 @@ function looksLikeOpaqueRouteProvider(item) {
 
 /** Collect `host.use(...)` mounts and host-level middleware into `out`. */
 function extractMounts(program, code, ctx, out) {
-  walk(program, (node) => {
+  walk(program, (node, ancestors) => {
     if (node.type !== "CallExpression" || node.callee.type !== "MemberExpression") return;
     if (node.callee.property.name !== "use") return;
     const host = chainRootIdentifier(node.callee.object);
     if (!host || !isLocalHost(host, ctx)) return;
+    const context = executionContext(node, ancestors);
+    if (!context.reachable) return;
     const hasPath = node.arguments.length > 0 && isPathLike(node.arguments[0], ctx.consts);
+    const first = unwrap(node.arguments[0]);
+    const firstRef = first ? refFromExpr(first, ctx) : { t: "unknown" };
+    const definitelyLocalRouter =
+      firstRef.t === "local" && ctx.routers.get(firstRef.name)?.kind === "router";
+    const ambiguousLeadingPath =
+      !hasPath &&
+      node.arguments.length > 1 &&
+      first &&
+      !definitelyLocalRouter &&
+      !isDefinitelyMiddleware(first, ctx);
     // A path per mount: `null` = no path arg (parent prefix as-is); `"<dynamic>"`
     // = a path exists but couldn't be resolved (regex, computed) — the subtree
     // is marked partial instead of silently landing at the wrong prefix.
@@ -1071,9 +1346,9 @@ function extractMounts(program, code, ctx, out) {
       node: l,
       ref: refFromExpr(l, ctx),
       mw: middlewareFromArg(l, code),
+      order: l.start,
     }));
     const refs = tagged.filter((t) => isMountRef(t.node, t.ref, ctx));
-    const mws = tagged.filter((t) => !isMountRef(t.node, t.ref, ctx)).map((t) => t.mw);
     const opaqueLayers = tagged.filter((item) => {
       if (isMountRef(item.node, item.ref, ctx)) return false;
       const layer = unwrap(item.node);
@@ -1082,12 +1357,6 @@ function extractMounts(program, code, ctx, out) {
         looksLikeOpaqueRouteProvider(item)
       );
     });
-    const first = unwrap(node.arguments[0]);
-    const ambiguousLeadingPath =
-      !hasPath &&
-      node.arguments.length > 1 &&
-      first &&
-      (first.type === "Identifier" || first.type === "MemberExpression");
     if (opaqueLayers.length > 0 && ((refs.length === 0 && hasPath) || ambiguousLeadingPath)) {
       for (const candidatePath of hasPath ? mountPaths : [null]) {
         out.opaqueUses.push({
@@ -1101,6 +1370,8 @@ function extractMounts(program, code, ctx, out) {
                 : "partial",
           middlewares: opaqueLayers.map((item) => item.mw.name),
           line,
+          order: node.callee.property.start,
+          context,
         });
       }
     }
@@ -1108,23 +1379,71 @@ function extractMounts(program, code, ctx, out) {
       if (refs.length === 0) {
         // Path-scoped middleware keeps its scope so it can be applied only to
         // routes under that prefix, and its line so registration order holds.
-        const entries = mws.map((mw) => ({ mw, scope: mountPath, line }));
+        const entries = tagged
+          .filter((item) => !isMountRef(item.node, item.ref, ctx))
+          .map((item) => ({
+            mw: item.mw,
+            scope: mountPath,
+            line,
+            order: item.order,
+            context,
+            caseSensitive: ctx.routers.get(host)?.caseSensitive ?? null,
+            ...(ambiguousLeadingPath
+              ? {
+                  applicability: "possible",
+                  applicabilityReasons: ["ambiguous-use-argument"],
+                }
+              : {}),
+          }));
         out.globalMwByHost.set(host, (out.globalMwByHost.get(host) || []).concat(entries));
         continue;
       }
       // Each candidate is a sub-router *or* a locally-required middleware that
       // shares its shape; `buildGraph` decides once it sees what it resolves to.
       for (const ref of refs) {
+        const edgeMountPath = ambiguousLeadingPath && ref.node !== first ? "<dynamic>" : mountPath;
         out.edges.push({
           host,
-          mountPath,
-          partial: mountPath === "<dynamic>",
+          mountPath: edgeMountPath,
+          partial: edgeMountPath === "<dynamic>",
           targetRef: ref.ref,
-          fallbackMw: { mw: ref.mw, scope: mountPath, line },
-          edgeMw: mws.map((mw) => ({ mw, scope: null, line })),
+          fallbackMw: {
+            mw: ref.mw,
+            scope: edgeMountPath,
+            line,
+            order: ref.order,
+            context,
+            caseSensitive: ctx.routers.get(host)?.caseSensitive ?? null,
+            ...(ambiguousLeadingPath
+              ? {
+                  applicability: "possible",
+                  applicabilityReasons: ["ambiguous-use-argument"],
+                }
+              : {}),
+          },
+          edgeMw: [],
           line,
+          order: ref.order,
+          context,
         });
       }
+      const entries = tagged
+        .filter((item) => !isMountRef(item.node, item.ref, ctx))
+        .map((item) => ({
+          mw: item.mw,
+          scope: mountPath,
+          line,
+          order: item.order,
+          context,
+          caseSensitive: ctx.routers.get(host)?.caseSensitive ?? null,
+          ...(ambiguousLeadingPath
+            ? {
+                applicability: "possible",
+                applicabilityReasons: ["ambiguous-use-argument"],
+              }
+            : {}),
+        }));
+      out.globalMwByHost.set(host, (out.globalMwByHost.get(host) || []).concat(entries));
     }
   });
 }
@@ -1296,6 +1615,7 @@ function collectNamedExport(node, exportRefs) {
         source: node.source.value,
         exportName: spec.local.name,
         props: [],
+        importKind: "import",
       });
     else exportRefs.set(spec.exported.name, { t: "local", name: spec.local.name });
   }
@@ -1314,7 +1634,7 @@ function analyzeFile(code, filePath, onParseError) {
   if (!program) return null;
   const { requires, routers, declarations, routeBindings, requireAliases } =
     collectBindings(program);
-  const consts = collectStringConsts(program);
+  const consts = collectStringConsts(declarations);
   const valueBindings = collectValueBindings(program);
   const lineAt = lineCounter(code);
   const handlerIndex = collectHandlerIndex(program);

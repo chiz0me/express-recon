@@ -1,5 +1,7 @@
 "use strict";
 
+const { OPENAPI_METHODS: HTTP_METHODS } = require("../http-methods");
+
 const PLACEHOLDER = "AI-unrefined placeholder — refine via handler code review";
 const UNREFINED_NOTE =
   "Schemas and parameters combine explicit static validator/framework evidence with " +
@@ -7,7 +9,7 @@ const UNREFINED_NOTE =
 
 // router.all() answers every verb; expand it across the concrete methods so the
 // spec stays valid (OpenAPI has no "all" operation key).
-const ALL_VERBS = ["get", "post", "put", "patch", "delete", "head", "options", "trace"];
+const ALL_VERBS = HTTP_METHODS;
 const BODY_METHODS = new Set(["post", "put", "patch", "delete"]);
 const MAX_PATH_VARIANTS = 128;
 const MAX_OPTIONAL_GROUP_DEPTH = 32;
@@ -699,8 +701,19 @@ function build(report) {
   const paths = {};
   const duplicateOperations = [];
   const pathVariantTruncations = [];
+  const unsupportedOperations = [];
 
   for (const route of report.routes.slice().sort(compareRoutes)) {
+    if (route.method !== "ALL" && !ALL_VERBS.includes(route.method.toLowerCase())) {
+      unsupportedOperations.push({
+        applicationId: route.applicationId ?? null,
+        method: route.method,
+        path: route.path,
+        source: route.source || null,
+        reason: "not-representable-as-openapi-path-operation",
+      });
+      continue;
+    }
     const expanded = toOpenApiPathsDetailed(route.path);
     const variants = expanded.variants;
     if (expanded.truncated) {
@@ -781,6 +794,7 @@ function build(report) {
     structuredSchemaEvidence: report.routes.some((route) => Boolean(route.io?.schemas)),
     ...(duplicateOperations.length ? { duplicateOperations } : {}),
     ...(pathVariantTruncations.length ? { pathVariantTruncations } : {}),
+    ...(unsupportedOperations.length ? { unsupportedOperations } : {}),
   };
   return doc;
 }

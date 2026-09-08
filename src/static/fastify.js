@@ -10,18 +10,11 @@ const {
   staticValue,
 } = require("./schema-evidence");
 const { joinPath } = require("../walk");
+const { EXPRESS_METHODS } = require("../http-methods");
 
-const ROUTE_METHODS = new Map([
-  ["get", "GET"],
-  ["head", "HEAD"],
-  ["post", "POST"],
-  ["put", "PUT"],
-  ["delete", "DELETE"],
-  ["options", "OPTIONS"],
-  ["patch", "PATCH"],
-  ["trace", "TRACE"],
-  ["all", "ALL"],
-]);
+const ROUTE_METHODS = new Map(
+  EXPRESS_METHODS.map((method) => [method, method === "all" ? "ALL" : method.toUpperCase()]),
+);
 const REQUEST_HOOKS = new Set(["onRequest", "preParsing", "preValidation", "preHandler"]);
 const FN_TYPES = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const KNOWN_NO_ROUTE_PLUGINS = new Set([
@@ -330,6 +323,7 @@ function expressionRef(node, model, ctx) {
         source: binding.source,
         exportName: binding.exportName,
         props: binding.props || [],
+        importKind: binding.importKind,
       };
     }
     return { type: "unknown", label: value.name };
@@ -344,6 +338,7 @@ function expressionRef(node, model, ctx) {
           source: binding.source,
           exportName: binding.exportName,
           props: [...(binding.props || []), value.property.name],
+          importKind: binding.importKind,
         };
       }
     }
@@ -351,7 +346,14 @@ function expressionRef(node, model, ctx) {
   if (value.type === "CallExpression") {
     if (calleeName(value.callee) === "require") {
       const source = staticString(value.arguments[0]);
-      if (source) return { type: "module", source, exportName: "default", props: [] };
+      if (source)
+        return {
+          type: "module",
+          source,
+          exportName: "default",
+          props: [],
+          importKind: "require",
+        };
     }
     const callee = unwrapValue(value.callee);
     let wrapper = false;
@@ -385,7 +387,14 @@ function expressionRef(node, model, ctx) {
   }
   if (value.type === "ImportExpression") {
     const source = staticString(value.source, ctx.consts);
-    if (source) return { type: "module", source, exportName: "default", props: [] };
+    if (source)
+      return {
+        type: "module",
+        source,
+        exportName: "default",
+        props: [],
+        importKind: "require",
+      };
   }
   return { type: "unknown", label: calleeName(value) || "dynamic plugin" };
 }
@@ -434,6 +443,7 @@ function collectExports(program, model, ctx) {
             source: node.source.value,
             exportName: specifier.local.name,
             props: [],
+            importKind: "import",
           });
         } else {
           exports.set(specifier.exported.name, expressionRef(specifier.local, model, ctx));
@@ -750,7 +760,7 @@ function resolvePluginRef(fromFile, ref, models, resolve, seen = new Set()) {
     return plugin && ref.unencapsulated ? { ...plugin, encapsulated: false } : plugin;
   }
   if (ref.type !== "module") return null;
-  const target = resolve(fromFile, ref.source);
+  const target = resolve(fromFile, ref.source, ref.importKind);
   const targetModel = target && models.get(target);
   if (!targetModel) return null;
   const normalized = moduleExportRef(target, ref);
@@ -762,7 +772,13 @@ function resolvePluginRef(fromFile, ref, models, resolve, seen = new Set()) {
     for (const source of targetModel.exportAll) {
       const found = resolvePluginRef(
         target,
-        { type: "module", source, exportName: normalized.exportName, props: normalized.props },
+        {
+          type: "module",
+          source,
+          exportName: normalized.exportName,
+          props: normalized.props,
+          importKind: "import",
+        },
         models,
         resolve,
         seen,
@@ -887,8 +903,10 @@ function middlewareBefore(scope, line, inherited, context, stack) {
 }
 
 function emitRoutes(scope, prefix, inherited, partial, applicationId, context, stack) {
+  if (context.analysisBudget && !context.analysisBudget.graph()) return;
   context.assigned.add(scope.id);
   for (const route of scope.routes) {
+    if (context.analysisBudget && !context.analysisBudget.route()) break;
     const dynamic = route.path === null;
     const own = middlewareBefore(scope, route.line, inherited, context, stack);
     const emitted = {
@@ -908,6 +926,7 @@ function emitRoutes(scope, prefix, inherited, partial, applicationId, context, s
     }
   }
   for (const route of scope.opaqueRoutes) {
+    if (context.analysisBudget && !context.analysisBudget.graph()) break;
     for (const routePath of route.paths) {
       const dynamic = routePath === null;
       context.opaqueMounts.push({
@@ -920,6 +939,7 @@ function emitRoutes(scope, prefix, inherited, partial, applicationId, context, s
     }
   }
   for (const registration of scope.registrations) {
+    if (context.analysisBudget && !context.analysisBudget.graph()) break;
     const target = registrationTarget(scope, registration, context);
     if (!target) {
       if (knownNoRouteRegistration(registration.ref)) continue;
@@ -1014,6 +1034,7 @@ function buildFastifyRegistry(files, resolve, root, options = {}) {
         diagnostics,
         prefixWarnings: new Set(),
         routeSeen,
+        analysisBudget: options.analysisBudget,
       };
       emitRoutes(application, "", [], false, id, context, new Set([application.id]));
       const applicationMiddleware = middlewareBefore(
@@ -1071,6 +1092,7 @@ function buildFastifyRegistry(files, resolve, root, options = {}) {
           diagnostics,
           prefixWarnings: new Set(),
           routeSeen,
+          analysisBudget: options.analysisBudget,
         },
         new Set([plugin.id]),
       );
@@ -1088,7 +1110,33 @@ function buildFastifyRegistry(files, resolve, root, options = {}) {
       `${opaqueMounts.length} opaque Fastify registration(s) may add routes; route coverage is incomplete.`,
     );
   }
-  return { routes, applications, globalMiddleware, diagnostics, opaqueMounts, orphanRoutes };
+  const gaps = opaqueMounts.map((mount) => ({
+    adapter: "fastify",
+    applicationId: mount.applicationId,
+    reasonCode: "opaque-registration",
+    scope: mount.pathConfidence === "full" ? mount.path : null,
+    source: mount.source,
+    count: 1,
+  }));
+  for (const route of routes.slice(beforeOrphans)) {
+    gaps.push({
+      adapter: "fastify",
+      applicationId: null,
+      reasonCode: "unattached-plugin-route",
+      scope: null,
+      source: route.source,
+      count: 1,
+    });
+  }
+  return {
+    routes,
+    applications,
+    globalMiddleware,
+    diagnostics,
+    opaqueMounts,
+    gaps,
+    orphanRoutes,
+  };
 }
 
 module.exports = { analyzeFastify, buildFastifyRegistry };

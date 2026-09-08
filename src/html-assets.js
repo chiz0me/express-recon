@@ -94,12 +94,14 @@ code, .mono {
 }
 
 .brand__mark {
-  width: 18px;
-  height: 18px;
-  border: 5px solid var(--accent);
-  border-radius: 5px;
-  transform: rotate(45deg);
+  width: 32px;
+  height: 32px;
 }
+
+.reference-section { margin: 24px 0; }
+.reference-section > summary { cursor: pointer; padding: 18px; font-weight: 700; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+.status-group th { background: var(--panel-muted); padding: 12px 16px; text-align: left; }
+.evidence-json { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 400px; overflow: auto; }
 
 .header-meta { color: var(--muted); font-size: 13px; text-align: right; }
 
@@ -166,6 +168,8 @@ h3 { margin: 0; font-size: 16px; }
 .badge {
   display: inline-flex;
   align-items: center;
+  justify-self: start;
+  line-height: 1.25;
   min-height: 23px;
   padding: 2px 8px;
   border: 1px solid var(--border);
@@ -218,6 +222,10 @@ tr[hidden] { display: none; }
 .method { font-weight: 800; letter-spacing: 0.035em; }
 .subtle { color: var(--muted); font-size: 12px; }
 .stack { display: grid; gap: 5px; }
+.repository-status { width: 1%; white-space: nowrap; }
+.repository-framework { min-width: 150px; }
+.framework-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.framework-role { max-width: 260px; overflow-wrap: anywhere; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 12px; }
 .card { padding: 15px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-muted); }
@@ -312,26 +320,33 @@ const SCRIPT = `
 for (const controls of document.querySelectorAll("[data-filter-controls]")) {
   const table = document.getElementById(controls.dataset.filterControls);
   if (!table) continue;
-  const rows = [...table.querySelectorAll("tbody tr[data-search]")];
+  const rows = [...table.querySelectorAll("tbody tr[data-search]:not(.status-group)")];
   const search = controls.querySelector("[data-filter-search]");
   const status = controls.querySelector("[data-filter-status]");
+  const framework = controls.querySelector("[data-filter-framework]");
   const count = controls.querySelector("[data-result-count]");
 
   const update = () => {
     const query = (search?.value || "").trim().toLowerCase();
     const selected = status?.value || "";
+    const selectedFramework = framework?.value || "";
     let visible = 0;
     for (const row of rows) {
       const matchesQuery = !query || row.dataset.search.includes(query);
       const matchesStatus = !selected || row.dataset.status === selected;
-      row.hidden = !(matchesQuery && matchesStatus);
+      const matchesFramework = !selectedFramework || (row.dataset.frameworks || "").split(" ").includes(selectedFramework);
+      row.hidden = !(matchesQuery && matchesStatus && matchesFramework);
       if (!row.hidden) visible++;
     }
     if (count) count.textContent = visible + " of " + rows.length;
+    for (const group of table.querySelectorAll("tbody tr.status-group")) {
+      group.hidden = !rows.some((row) => !row.hidden && row.dataset.status === group.dataset.status);
+    }
   };
 
   search?.addEventListener("input", update);
   status?.addEventListener("change", update);
+  framework?.addEventListener("change", update);
   update();
 }
 `;

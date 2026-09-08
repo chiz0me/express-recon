@@ -373,9 +373,24 @@ npx --no-install express-recon render \
 
 With no paths, `render` looks only at the current directory, `.express-recon/`, and its immediate child directories. The default output is a sibling named `<input>-html`.
 
+Organization pages group **complete** and **incomplete** repositories in the main
+table. Other statuses are grouped in a collapsed reference table, with independent
+search, completion/status, and framework filters. Framework choices reflect the
+saved evidence; mixed-framework repositories match each included framework.
+
+Optional saved `gin-recon` outputs are supported by the renderer only—no Gin
+scanner or changes to the scan architecture are required. Point `--input` at a
+`fleet.json`, its directory, or a bundle containing that directory. When an
+organization output also contains a matching Gin fleet (directly or one directory
+below), its routes, per-module OpenAPI references, middleware suggestions, and
+producer statistics are included automatically. Original JSON evidence is linked
+for download. Existing Express scans and Gin scans retain separate detail pages.
+See the [render reference](docs/reference.md#render) for limits and trust boundaries.
+
 **Why the offline site is great**:
 
 - **100% Offline**: Embedded CSS and JavaScript. Open `index.html` directly in your browser (`file://`) without running a web server or needing an internet connection.
+- **Direct-file compatible**: Each page includes its viewing assets and branding, including Swagger UI on API pages. Keep the output folder together for links to other pages and evidence downloads.
 - **Packaged Swagger UI**: Easily browse and inspect API endpoint contracts without sending live network requests.
 - **Privacy & Security**: Built with a strict Content Security Policy (CSP). It disables external network calls, tracking, and remote analytics.
 
@@ -461,10 +476,14 @@ repositories or execute target code.
 ```
 
 Core tools include `discover_repository`, `inventory_routes`, `audit_routes`,
-`query_audit`, `finding_by_fingerprint`, `suggest_auth`, `openapi_spec`,
+`query_audit`, `explain_route`, `finding_by_fingerprint`, `suggest_auth`, `openapi_spec`,
 `reconcile_openapi`, token-bounded `refresh_openapi`/`query_refresh`,
 `review_middleware`, `import_middleware_review`, `validate_policies`, and
 `report_schema`.
+
+`query_audit` pages are byte-bounded and tied to a retained analysis snapshot,
+configuration, and filters. Pass the returned `snapshotId` to `explain_route`
+for the bounded registration and uncertainty evidence behind one route.
 
 Useful requests are precise about the evidence boundary:
 

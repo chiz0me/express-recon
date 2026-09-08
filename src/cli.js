@@ -30,6 +30,8 @@ const { loadConfig } = require("./config");
 const { loadReviewFile } = require("./review");
 const { defaultRenderOutput, detectRenderInput } = require("./html");
 const { defaultRefreshOutput, readRefreshDefaults, refreshDocumentation } = require("./refresh");
+const { acquireArtifactLock } = require("./artifact-transaction");
+const { createAnalysisSession } = require("./analysis-session");
 const {
   DEFAULT_MAX_REPOSITORIES,
   DEFAULT_REPOSITORY_ATTEMPTS,
@@ -1265,6 +1267,10 @@ function discoveryOptions(args, config) {
     ignoreFile: args.ignoreFile === undefined ? scan.ignoreFile : args.ignoreFile,
     maxFiles: scan.maxFiles,
     maxFileBytes: scan.maxFileBytes,
+    maxGraphExpansions: scan.maxGraphExpansions,
+    maxResolverHops: scan.maxResolverHops,
+    maxResultBytes: scan.maxResultBytes,
+    maxRoutes: scan.maxRoutes,
     maxTotalBytes: scan.maxTotalBytes,
     timeoutMs: scan.timeoutMs,
   };
@@ -1284,10 +1290,8 @@ function buildDocumentation(args) {
   const config = loadConfig(args.config);
   const scan = discoveryOptions(args, config);
   const command = Object.keys(config.openapi?.securityByTag || {}).length ? "audit" : "inventory";
-  const registry =
-    command === "audit"
-      ? audit({ mode: "static", src: root, ...scan }, config)
-      : inventory({ mode: "static", src: root, ...scan });
+  const session = createAnalysisSession(root, scan);
+  const registry = command === "audit" ? session.audit(config) : session.inventory();
   const report = buildReport(registry, {
     command,
     mode: "static",
@@ -1295,7 +1299,7 @@ function buildDocumentation(args) {
     sourceRoot: root,
     config,
   });
-  const discovery = discover(root, scan);
+  const discovery = session.discover();
   const result = reconcileDocumentation(report, {
     root,
     scan,
@@ -2014,7 +2018,7 @@ function persistOrganizationBaseline(snapshot, outDir) {
   }
 }
 
-function reusableOrganizationEntries(snapshot) {
+function reusableOrganizationEntries(snapshot, compatibilityVersion) {
   if (snapshot.report.coverage?.complete !== true) {
     throw new Error(
       "scan-org --update requires a complete existing inventory; use --resume for an incomplete run",
@@ -2025,6 +2029,14 @@ function reusableOrganizationEntries(snapshot) {
       entries: [],
       diagnostics: [
         `scanner version changed from ${snapshot.report.toolVersion || "unknown"} to ${pkg.version}; all selected repositories will be rescanned`,
+      ],
+    };
+  }
+  if (snapshot.report.evidenceCompatibilityVersion !== compatibilityVersion) {
+    return {
+      entries: [],
+      diagnostics: [
+        `saved evidence generation ${snapshot.report.evidenceCompatibilityVersion || "legacy"} predates the current proof semantics; all selected repositories will be rescanned`,
       ],
     };
   }
@@ -2367,7 +2379,9 @@ async function executeScanOrganization(args, dependencies, reporter) {
         : null;
   let baselineSnapshot = baselineInput ? loadOrganizationSnapshot(baselineInput) : null;
   const updateBaselineReport = args.update ? baselineSnapshot?.report : null;
-  const updateReusable = args.update ? reusableOrganizationEntries(baselineSnapshot) : null;
+  const updateReusable = args.update
+    ? reusableOrganizationEntries(baselineSnapshot, identity.compatibilityVersion)
+    : null;
   let baselineIsInternal =
     baselineSnapshot && path.resolve(baselineSnapshot.input) === path.resolve(internalBaseline);
   if (baselineSnapshot) {
@@ -2513,6 +2527,9 @@ async function executeScanOrganization(args, dependencies, reporter) {
       return artifacts;
     },
   });
+  // The CLI may be supplied a custom scanner implementation, but artifacts it
+  // writes still participate in this process's resume/update contract.
+  result.evidenceCompatibilityVersion = identity.compatibilityVersion;
   result.resume = {
     requested: args.resume === true,
     repositoriesReused: result.summary?.repositoriesResumed || 0,
@@ -2637,6 +2654,9 @@ async function runScanOrganization(args, dependencies = {}) {
       isTTY: dependencies.progressIsTTY,
       now: dependencies.progressNow,
     });
+  const organizationOutput = resolvePath(effectiveArgs.out);
+  fs.mkdirSync(path.dirname(organizationOutput), { recursive: true });
+  const releaseWriter = acquireArtifactLock(organizationOutput);
   try {
     return await executeScanOrganization(effectiveArgs, dependencies, reporter);
   } catch (value) {
@@ -2651,6 +2671,7 @@ async function runScanOrganization(args, dependencies = {}) {
     }
     throw err;
   } finally {
+    releaseWriter();
     reporter.close?.();
   }
 }

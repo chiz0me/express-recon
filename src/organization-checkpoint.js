@@ -10,9 +10,9 @@ const CHECKPOINT_FILENAME = "organization-checkpoint.json";
 const CHECKPOINT_KIND = "github-organization-scan-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = "1.0";
 // Bump this whenever previously completed repository evidence is no longer safe
-// to reuse. Add only audited pre-generation releases to the legacy allowlist.
-const CHECKPOINT_COMPATIBILITY_VERSION = "3";
-const LEGACY_COMPATIBLE_TOOL_VERSIONS = new Set(["0.6.0", "0.7.0", "0.7.1", "0.7.2"]);
+// to reuse. Generation 4 invalidates evidence produced before conservative
+// Express scope/control-flow and structured-wrapper proof semantics.
+const CHECKPOINT_COMPATIBILITY_VERSION = "4";
 const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
 function canonical(value, seen = new Set()) {
@@ -79,18 +79,6 @@ function checkpointFingerprint(scope, compatibilityVersion = CHECKPOINT_COMPATIB
       canonical({
         checkpointSchemaVersion: CHECKPOINT_SCHEMA_VERSION,
         checkpointCompatibilityVersion: compatibilityVersion,
-        ...scope,
-      }),
-    ),
-  );
-}
-
-function legacyCheckpointFingerprint(scope, toolVersion) {
-  return sha256(
-    JSON.stringify(
-      canonical({
-        checkpointSchemaVersion: CHECKPOINT_SCHEMA_VERSION,
-        toolVersion,
         ...scope,
       }),
     ),
@@ -308,14 +296,17 @@ function validateCheckpointShape(value, organization, identity) {
       `Organization checkpoint belongs to ${value.organization}, not ${organization}`,
     );
   }
-  const current =
-    value.compatibilityVersion === CHECKPOINT_COMPATIBILITY_VERSION &&
-    value.fingerprint === identity.fingerprint;
-  const legacy =
-    value.compatibilityVersion === undefined &&
-    LEGACY_COMPATIBLE_TOOL_VERSIONS.has(value.toolVersion) &&
-    value.fingerprint === legacyCheckpointFingerprint(identity.scope, value.toolVersion);
-  if (!current && !legacy) {
+  if (value.compatibilityVersion !== CHECKPOINT_COMPATIBILITY_VERSION) {
+    const previousGeneration =
+      value.compatibilityVersion === undefined ||
+      (/^\d+$/.test(value.compatibilityVersion) &&
+        Number(value.compatibilityVersion) < Number(CHECKPOINT_COMPATIBILITY_VERSION));
+    if (previousGeneration) return { obsolete: true };
+    throw new Error(
+      "Organization checkpoint does not match this checkpoint compatibility version, configuration, scan scope, or repository limit",
+    );
+  }
+  if (value.fingerprint !== identity.fingerprint) {
     throw new Error(
       "Organization checkpoint does not match this checkpoint compatibility version, configuration, scan scope, or repository limit",
     );
@@ -323,7 +314,7 @@ function validateCheckpointShape(value, organization, identity) {
   if (!Array.isArray(value.completed)) {
     throw new Error("Organization checkpoint completed must be an array");
   }
-  return { legacy };
+  return { obsolete: false };
 }
 
 function resumableEntries(checkpoint, outDir) {
@@ -399,30 +390,21 @@ function resumableEntries(checkpoint, outDir) {
 function loadCheckpoint(file, organization, identity, outDir) {
   const source = readCheckpointFile(file);
   const compatibility = validateCheckpointShape(source, organization, identity);
-  const unsafeLegacyEntries = compatibility.legacy
-    ? source.completed.filter((entry) => entry.status !== "express")
-    : [];
-  const checkpoint = compatibility.legacy
-    ? {
-        ...source,
-        toolVersion: pkg.version,
-        compatibilityVersion: identity.compatibilityVersion,
-        fingerprint: identity.fingerprint,
-        scope: identity.scope,
-        // A legacy positive Express result remains useful. A legacy negative
-        // predates the Fastify/NestJS adapters and must be scanned again.
-        completed: source.completed.filter((entry) => entry.status === "express"),
-      }
-    : source;
-  const resume = resumableEntries(checkpoint, outDir);
-  if (unsafeLegacyEntries.length) {
-    resume.diagnostics.unshift(
-      `${unsafeLegacyEntries.length} legacy non-Express checkpoint entr${unsafeLegacyEntries.length === 1 ? "y was" : "ies were"} invalidated so newly supported frameworks can be discovered`,
-    );
+  if (compatibility.obsolete) {
+    return {
+      checkpoint: initialCheckpoint(organization, identity),
+      migratedFromToolVersion: null,
+      entries: [],
+      diagnostics: [
+        `checkpoint evidence generation ${source.compatibilityVersion || "legacy"} predates the current proof semantics; all repositories will be rescanned`,
+      ],
+    };
   }
+  const checkpoint = source;
+  const resume = resumableEntries(checkpoint, outDir);
   return {
     checkpoint,
-    migratedFromToolVersion: compatibility.legacy ? source.toolVersion : null,
+    migratedFromToolVersion: null,
     ...resume,
   };
 }

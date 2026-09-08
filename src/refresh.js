@@ -1,5 +1,7 @@
 "use strict";
 
+const { OPENAPI_METHODS: HTTP_METHOD_LIST } = require("./http-methods");
+
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -8,6 +10,11 @@ const pkg = require("../package.json");
 const { compareReports } = require("./compare");
 const { describeRenderableSpecification } = require("./docs");
 const { renderHtmlSite } = require("./html");
+const {
+  artifactGeneration,
+  replaceArtifactDirectory,
+  withArtifactLock,
+} = require("./artifact-transaction");
 const { compareOpenApiDocuments } = require("./openapi-compare");
 const { validateOpenApiDocument } = require("./openapi-validation");
 
@@ -31,7 +38,7 @@ const MAX_FINGERPRINT_SOURCES = 500;
 const MAX_SCHEMA_DEPENDENCIES = 5_000;
 const MAX_SCOPE_PATTERNS = 100;
 const MAX_OWNED_FILES = 100_000;
-const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
+const HTTP_METHODS = new Set(HTTP_METHOD_LIST);
 const ENRICHABLE_OPERATION_FIELDS = [
   "summary",
   "description",
@@ -1162,12 +1169,24 @@ function scopedRouteReport(report, applicationId) {
     };
   }
   if (output.routeGraph) {
+    const opaqueMounts = (output.routeGraph.opaqueMounts || []).filter(
+      (mount) => mount.applicationId === null || mount.applicationId === applicationId,
+    );
+    const gaps = (output.routeGraph.gaps || []).filter(
+      (gap) => gap.applicationId === null || gap.applicationId === applicationId,
+    );
+    const orphanRoutes = output.routes.filter((route) => route.applicationId === null).length;
+    const partialRoutes = output.routes.filter(
+      (route) => route.pathConfidence === "partial",
+    ).length;
     output.routeGraph = {
       ...output.routeGraph,
-      orphanRoutes: applicationId === null ? output.routeGraph.orphanRoutes : 0,
-      opaqueMounts: (output.routeGraph.opaqueMounts || []).filter(
-        (mount) => mount.applicationId === null || mount.applicationId === applicationId,
-      ),
+      complete:
+        orphanRoutes === 0 && partialRoutes === 0 && opaqueMounts.length === 0 && gaps.length === 0,
+      orphanRoutes,
+      partialRoutes,
+      opaqueMounts,
+      gaps,
     };
   }
   return output;
@@ -1201,23 +1220,6 @@ function assertCompatibleState(existing, report, documentationReport, options) {
   compareReports(existing.routes, report);
 }
 
-function replaceOutput(staging, output) {
-  if (!fs.existsSync(output)) {
-    fs.renameSync(staging, output);
-    return;
-  }
-  const backup = fs.mkdtempSync(path.join(path.dirname(output), ".express-recon-refresh-backup-"));
-  fs.rmdirSync(backup);
-  fs.renameSync(output, backup);
-  try {
-    fs.renameSync(staging, output);
-  } catch (error) {
-    fs.renameSync(backup, output);
-    throw error;
-  }
-  fs.rmSync(backup, { recursive: true, force: true });
-}
-
 function integrityFor(directory, references) {
   return Object.fromEntries(
     references.map((reference) => [
@@ -1248,13 +1250,14 @@ function refreshResult(output, refreshReport, rendered) {
  * remains authoritative; accepted AI fields live in a fingerprinted overlay
  * and are applied only while the operation and its source evidence still match.
  */
-function refreshDocumentation(options) {
+function refreshDocumentationUnlocked(options, recovery) {
   const invocation = normalizedInvocation({
     ...options.invocation,
     render: options.render !== false,
   });
   const state = inspectExistingState(options.root, options.output, options);
   const existing = loadExistingArtifacts(state, options);
+  const expectedGeneration = artifactGeneration(state.output);
   const applicationId = options.documentation.report.applicationId ?? null;
   const currentRoutes = scopedRouteReport(options.routes, applicationId);
   assertCompatibleState(existing, currentRoutes, options.documentation.report, options);
@@ -1312,7 +1315,9 @@ function refreshDocumentation(options) {
     },
   };
 
-  const staging = fs.mkdtempSync(path.join(path.dirname(state.output), ".express-recon-refresh-"));
+  const staging = fs.mkdtempSync(
+    path.join(path.dirname(state.output), `.${path.basename(state.output)}.express-recon-staging-`),
+  );
   let moved = false;
   try {
     writeJson(path.join(staging, ROUTES_FILE), routes);
@@ -1361,12 +1366,32 @@ function refreshDocumentation(options) {
       integrity: integrityFor(staging, integrityFiles),
     };
     writeJson(path.join(staging, REFRESH_MANIFEST), manifest);
-    replaceOutput(staging, state.output);
+    replaceArtifactDirectory({
+      staging,
+      output: state.output,
+      expectedGeneration,
+      hooks: options.transactionHooks,
+    });
     moved = true;
-    return refreshResult(state.output, refreshReport, options.render !== false);
+    return {
+      ...refreshResult(state.output, refreshReport, options.render !== false),
+      ...(recovery ? { recovery } : {}),
+    };
   } finally {
     if (!moved) fs.rmSync(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Maintain one recoverable, writer-locked OpenAPI refresh workspace.
+ * Refuses concurrent/intervening edits and returns the durable artifact paths.
+ */
+function refreshDocumentation(options) {
+  normalizedInvocation({ ...options.invocation, render: options.render !== false });
+  const location = validateOutputLocation(options.root, options.output);
+  return withArtifactLock(location.output, (recovery) =>
+    refreshDocumentationUnlocked({ ...options, output: location.output }, recovery),
+  );
 }
 
 function defaultRefreshOutput(root) {

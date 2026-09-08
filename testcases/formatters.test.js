@@ -80,6 +80,8 @@ function report() {
         authImprovements: 0,
         newFindings: 1,
         resolvedFindings: 0,
+        unverifiedRemovedRoutes: 1,
+        unverifiedResolvedFindings: 1,
       },
       addedRoutes: [],
       removedRoutes: [],
@@ -98,6 +100,23 @@ function report() {
       newFindings: [finding],
       resolvedFindings: [],
     },
+    routeGraph: {
+      complete: false,
+      orphanRoutes: 0,
+      partialRoutes: 1,
+      registrarRoutes: 0,
+      opaqueMounts: [],
+      gaps: [
+        {
+          adapter: "nestjs",
+          applicationId: null,
+          reasonCode: "unresolved-module-reference",
+          scope: null,
+          source: SOURCE,
+          count: 1,
+        },
+      ],
+    },
   };
 }
 
@@ -112,6 +131,9 @@ test("markdown exposes severity, fingerprint, locations, and baseline deltas", (
   assert.match(output, /I\/O schema evidence/);
   assert.match(output, /high · zod · 1 conflict/);
   assert.match(output, /Static I\/O schema conflicts/);
+  assert.match(output, /Unresolved route-graph obligations/);
+  assert.match(output, /unresolved-module-reference/);
+  assert.match(output, /unverified removals: \*\*1\*\*/);
 });
 
 test("pretty output summarizes auth and delta state without mutating routes", () => {
@@ -121,6 +143,7 @@ test("pretty output summarizes auth and delta state without mutating routes", ()
   assert.match(output, /audit · static · 1 routes/);
   assert.match(output, /public: 1/);
   assert.match(output, /regressions: 1/);
+  assert.match(output, /route graph: incomplete/);
   assert.match(output, /GET/);
   assert.match(output, /\/accounts/);
   assert.deepEqual(input.routes, before);

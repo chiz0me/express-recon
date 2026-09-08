@@ -3,7 +3,6 @@
 const path = require("node:path");
 const { Worker } = require("node:worker_threads");
 const { organizationCheckpointIdentity } = require("./organization-checkpoint");
-const { scanRepository } = require("./repository");
 const {
   COMPLETE_REPOSITORY_STATUSES,
   FRAMEWORK_NAMES,
@@ -12,6 +11,7 @@ const {
   statusForFrameworks,
 } = require("./frameworks");
 const pkg = require("../package.json");
+const { scanLimits } = require("./static/scan");
 
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -191,6 +191,44 @@ function repositorySelected(repository, include, exclude) {
   return included && !excluded;
 }
 
+async function boundedResponseText(response, maximum) {
+  if (!response.body) {
+    const text = await response.text();
+    if (Buffer.byteLength(text) > maximum) throw new Error("response-byte-limit");
+    return text;
+  }
+  const chunks = [];
+  let bytes = 0;
+  const append = (value) => {
+    const chunk = Buffer.from(value);
+    bytes += chunk.length;
+    if (bytes > maximum) throw new Error("response-byte-limit");
+    chunks.push(chunk);
+  };
+  if (typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        append(value);
+      }
+    } catch (error) {
+      if (error.message === "response-byte-limit") await reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock?.();
+    }
+  } else if (response.body[Symbol.asyncIterator]) {
+    for await (const chunk of response.body) append(chunk);
+  } else {
+    const text = await response.text();
+    if (Buffer.byteLength(text) > maximum) throw new Error("response-byte-limit");
+    return text;
+  }
+  return Buffer.concat(chunks, bytes).toString("utf8");
+}
+
 async function readApiPage(fetchImpl, organization, page, token, timeoutMs) {
   const url = new URL(`/orgs/${encodeURIComponent(organization)}/repos`, GITHUB_API);
   url.searchParams.set("type", "all");
@@ -219,8 +257,11 @@ async function readApiPage(fetchImpl, organization, page, token, timeoutMs) {
   if (Number.isFinite(declaredLength) && declaredLength > MAX_API_RESPONSE_BYTES) {
     throw new Error("GitHub repository response exceeded the 16 MiB page limit");
   }
-  const text = await response.text();
-  if (Buffer.byteLength(text) > MAX_API_RESPONSE_BYTES) {
+  let text;
+  try {
+    text = await boundedResponseText(response, MAX_API_RESPONSE_BYTES);
+  } catch (error) {
+    if (error.message !== "response-byte-limit") throw error;
     throw new Error("GitHub repository response exceeded the 16 MiB page limit");
   }
   if (!response.ok) {
@@ -565,11 +606,19 @@ function scanInWorker(source, options, onProgress) {
     const worker = new Worker(path.join(__dirname, "organization-worker.js"), {
       workerData: { source, options },
       env: environment,
+      resourceLimits: { maxOldGenerationSizeMb: 512, stackSizeMb: 8 },
     });
     let settled = false;
+    const configuredScan = { ...options.config?.scan, ...options.scan };
+    const watchdogMs = scanLimits(configuredScan).timeoutMs + 5_000;
+    const watchdog = setTimeout(() => {
+      finish(new Error(`Organization scan worker exceeded its ${watchdogMs}ms watchdog`));
+    }, watchdogMs);
+    watchdog.unref?.();
     const finish = (err, result) => {
       if (settled) return;
       settled = true;
+      clearTimeout(watchdog);
       worker
         .terminate()
         .catch(() => {})
@@ -909,8 +958,7 @@ async function scanOrganization(organization, opts = {}) {
     if (opts.scanRepositoryImpl) {
       return opts.scanRepositoryImpl(source, { ...options, onProgress });
     }
-    if (concurrency > 1) return scanInWorker(source, options, onProgress);
-    return scanRepository(source, { ...options, onProgress });
+    return scanInWorker(source, options, onProgress);
   };
   let retries = 0;
   await runPool(pending, concurrency, async (entry) => {
@@ -1064,6 +1112,7 @@ async function scanOrganization(organization, opts = {}) {
     schemaVersion: "1.0",
     tool: "express-recon",
     toolVersion: pkg.version,
+    evidenceCompatibilityVersion: identity.compatibilityVersion,
     kind: "github-organization-inventory",
     organization: {
       login: listing.organization,

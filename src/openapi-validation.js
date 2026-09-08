@@ -1,5 +1,7 @@
 "use strict";
 
+const { OPENAPI_METHODS: HTTP_METHODS } = require("./http-methods");
+
 const AjvDraft4 = require("ajv-draft-04");
 const Ajv2020 = require("ajv/dist/2020");
 const addFormats = require("ajv-formats");
@@ -72,7 +74,7 @@ function formatError(error) {
   return `${location} ${safeText(error.message || error.keyword)}${detail}`;
 }
 
-const HTTP_VERBS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"];
+const HTTP_VERBS = HTTP_METHODS;
 
 function resolveLocalPointer(document, reference) {
   if (!document || typeof document !== "object" || !reference.startsWith("#/")) return undefined;

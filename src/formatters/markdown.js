@@ -209,7 +209,7 @@ function deltaSections(delta) {
   const sections = [
     "## Baseline delta",
     "",
-    `Routes added: **${s.addedRoutes}**, removed: **${s.removedRoutes}**; auth regressions: **${s.authRegressions}**, improvements: **${s.authImprovements}**; new findings: **${s.newFindings}**, resolved: **${s.resolvedFindings}**`,
+    `Routes added: **${s.addedRoutes}**, removed: **${s.removedRoutes}**, unverified removals: **${s.unverifiedRemovedRoutes || 0}**; auth regressions: **${s.authRegressions}**, improvements: **${s.authImprovements}**; new findings: **${s.newFindings}**, resolved: **${s.resolvedFindings}**, unverified resolutions: **${s.unverifiedResolvedFindings || 0}**`,
     "",
   ];
   if (delta.authRegressions.length) {
@@ -241,12 +241,36 @@ function deltaSections(delta) {
   return sections;
 }
 
+function routeGraphSections(routeGraph) {
+  if (!routeGraph || routeGraph.complete !== false) return [];
+  const gaps = routeGraph.gaps || [];
+  const sections = [
+    "## Unresolved route-graph obligations",
+    "",
+    `Orphan routes: **${routeGraph.orphanRoutes || 0}**, partial routes: **${routeGraph.partialRoutes || 0}**, opaque mounts: **${routeGraph.opaqueMounts?.length || 0}**, structured gaps: **${gaps.length}**`,
+    "",
+  ];
+  if (gaps.length) {
+    sections.push(
+      gaps
+        .map(
+          (gap) =>
+            `- **${gap.adapter}** · \`${gap.reasonCode}\` · app: \`${gap.applicationId || "unknown"}\` · scope: \`${gap.scope || "all/unknown"}\` · ${sourceLabel(gap.source)} · count ${gap.count}`,
+        )
+        .join("\n"),
+      "",
+    );
+  }
+  return sections;
+}
+
 function format(report) {
   const audit = report.command === "audit";
   const sections = [`# HTTP route ${audit ? "audit" : "inventory"}`, ""];
   if (audit) sections.push(...auditSections(report));
   else sections.push(`Total routes: **${report.routes.length}**`, "");
   if (report.delta) sections.push(...deltaSections(report.delta));
+  sections.push(...routeGraphSections(report.routeGraph));
   sections.push(...schemaConflictSection(report.routes));
   sections.push(
     "## Global middleware",

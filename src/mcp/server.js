@@ -2,6 +2,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { z } = require("zod");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
@@ -25,10 +26,17 @@ const { defaultRefreshOutput, readRefreshDefaults } = require("../refresh");
 const { pathPattern, todayUtc } = require("../policies");
 const { loadPackageInfo } = require("../static/resolve");
 const pkg = require("../../package.json");
+const { createAnalysisSession } = require("../analysis-session");
+const { REPORT_METHODS } = require("../http-methods");
 
 const MAX_REFRESH_QUERY_ITEM_BYTES = 16 * 1024;
 const MAX_REFRESH_QUERY_PAGE_BYTES = 128 * 1024;
 const MAX_REFRESH_QUERY_NODES = 250;
+const MAX_AUDIT_SNAPSHOTS = 8;
+const MAX_AUDIT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const MAX_AUDIT_SNAPSHOT_STORE_BYTES = 128 * 1024 * 1024;
+const MAX_AUDIT_QUERY_ITEM_BYTES = 16 * 1024;
+const MAX_AUDIT_QUERY_PAGE_BYTES = 128 * 1024;
 const stringList = z.array(z.string());
 const matchInput = z.object({
   applicationIds: stringList.optional(),
@@ -182,6 +190,10 @@ const scanInput = {
     .describe("Also scan hidden directories; .git and generated/vendor directories stay excluded"),
   maxFiles: z.number().int().optional().describe("Maximum source files to analyze"),
   maxFileBytes: z.number().int().optional().describe("Maximum bytes in one source file"),
+  maxGraphExpansions: z.number().int().optional().describe("Maximum post-parse graph expansions"),
+  maxResolverHops: z.number().int().optional().describe("Maximum local module resolver hops"),
+  maxResultBytes: z.number().int().optional().describe("Maximum serialized route evidence bytes"),
+  maxRoutes: z.number().int().optional().describe("Maximum emitted route registrations"),
   maxTotalBytes: z.number().int().optional().describe("Maximum total analyzed source bytes"),
   timeoutMs: z.number().int().optional().describe("Static scan deadline in milliseconds"),
 };
@@ -194,6 +206,10 @@ function scanOptions({
   ignoreFile,
   maxFiles,
   maxFileBytes,
+  maxGraphExpansions,
+  maxResolverHops,
+  maxResultBytes,
+  maxRoutes,
   maxTotalBytes,
   timeoutMs,
 }) {
@@ -205,6 +221,10 @@ function scanOptions({
     ignoreFile,
     maxFiles,
     maxFileBytes,
+    maxGraphExpansions,
+    maxResolverHops,
+    maxResultBytes,
+    maxRoutes,
     maxTotalBytes,
     timeoutMs,
   };
@@ -299,13 +319,14 @@ function refreshOpenApi(args) {
   const output = args.output ? resolveWithinDir(root, args.output) : defaultRefreshOutput(root);
   const { defaults, effective } = inheritedRefreshArgs(root, output, args);
   const options = scanOptions(effective);
-  const report = buildReport(inventory({ mode: "static", src: root, ...options }), {
+  const session = createAnalysisSession(root, options);
+  const report = buildReport(session.inventory(), {
     command: "inventory",
     mode: "static",
     target: loadPackageInfo(root),
     sourceRoot: root,
   });
-  const discovery = discover(root, options);
+  const discovery = session.discover();
   const documentation = reconcileDocumentation(report, {
     root,
     scan: options,
@@ -594,21 +615,146 @@ function staticAudit(args) {
     acceptedPublic: args.acceptedPublic || [],
     policies: args.policies || [],
   };
-  const registry = audit(
-    {
-      mode: "static",
-      src: resolved,
-      ...scanOptions(args),
-    },
-    config,
-  );
-  return buildReport(registry, {
+  const session = createAnalysisSession(resolved, scanOptions(args));
+  const target = loadPackageInfo(resolved);
+  const report = buildReport(session.audit(config), {
     command: "audit",
     mode: "static",
-    target: loadPackageInfo(resolved),
+    target,
     sourceRoot: resolved,
     config,
   });
+  session.assertCurrent();
+  const configIdentity = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(canonicalValue({ config, target })))
+    .digest("hex")
+    .slice(0, 16);
+  return { report, snapshotId: `${session.snapshotId}_${configIdentity}` };
+}
+
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalValue(value[key])]),
+  );
+}
+
+function auditQueryIdentity(args) {
+  const value = Object.fromEntries(
+    Object.entries(args).filter(([key]) => !["cursor", "limit"].includes(key)),
+  );
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(canonicalValue(value)))
+    .digest("hex");
+}
+
+function createAuditSnapshotStore() {
+  const snapshots = new Map();
+  let retainedBytes = 0;
+  return {
+    get(id) {
+      return snapshots.get(id) || null;
+    },
+    put(snapshot) {
+      const bytes = Buffer.byteLength(JSON.stringify(snapshot.report));
+      if (bytes > MAX_AUDIT_SNAPSHOT_BYTES) {
+        throw new Error(
+          `Audit snapshot exceeds ${MAX_AUDIT_SNAPSHOT_BYTES} bytes; lower scan.maxResultBytes or narrow the scan scope`,
+        );
+      }
+      const previous = snapshots.get(snapshot.id);
+      if (previous) {
+        if (JSON.stringify(previous.report) !== JSON.stringify(snapshot.report)) {
+          throw new Error(
+            `Audit snapshot identity collision for ${snapshot.id}; refusing to replace retained evidence`,
+          );
+        }
+        return;
+      }
+      snapshots.set(snapshot.id, { ...snapshot, bytes });
+      retainedBytes += bytes;
+      while (
+        snapshots.size > MAX_AUDIT_SNAPSHOTS ||
+        retainedBytes > MAX_AUDIT_SNAPSHOT_STORE_BYTES
+      ) {
+        const oldest = snapshots.keys().next().value;
+        retainedBytes -= snapshots.get(oldest).bytes;
+        snapshots.delete(oldest);
+      }
+    },
+  };
+}
+
+function encodeAuditCursor(kind, offset, snapshotId, queryIdentity) {
+  return Buffer.from(
+    JSON.stringify({ version: 2, kind, offset, snapshotId, queryIdentity }),
+  ).toString("base64url");
+}
+
+function decodeAuditCursor(cursor, kind, queryIdentity) {
+  let value;
+  try {
+    value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Invalid audit pagination cursor");
+  }
+  if (
+    value.version !== 2 ||
+    value.kind !== kind ||
+    value.queryIdentity !== queryIdentity ||
+    typeof value.snapshotId !== "string" ||
+    !Number.isInteger(value.offset) ||
+    value.offset < 0
+  ) {
+    throw new Error("Audit pagination cursor does not match this query and configuration");
+  }
+  return value;
+}
+
+function auditQueryOutline(item) {
+  return {
+    ...(item.id ? { id: boundedRefreshText(item.id, 100) } : {}),
+    applicationId: item.applicationId == null ? null : boundedRefreshText(item.applicationId, 500),
+    ...(item.method ? { method: boundedRefreshText(item.method, 40) } : {}),
+    ...(item.path ? { path: boundedRefreshText(item.path, 2_000) } : {}),
+    ...(item.authStatus ? { authStatus: boundedRefreshText(item.authStatus, 40) } : {}),
+    ...(item.severity ? { severity: boundedRefreshText(item.severity, 40) } : {}),
+    source: boundedRefreshValue(item.source || null, { nodes: 0, truncated: false }),
+    itemBytes: Buffer.byteLength(JSON.stringify(item)),
+    queryTruncated: true,
+  };
+}
+
+function compactAuditItem(item) {
+  const state = { nodes: 0, truncated: false };
+  const compact = boundedRefreshValue(item, state);
+  if (Buffer.byteLength(JSON.stringify(compact)) > MAX_AUDIT_QUERY_ITEM_BYTES) {
+    return auditQueryOutline(item);
+  }
+  return state.truncated ? { ...compact, queryTruncated: true } : compact;
+}
+
+function compactAuditPage(items) {
+  const output = [];
+  let bytes = 2;
+  let truncated = false;
+  for (const item of items) {
+    const compact = compactAuditItem(item);
+    const size = Buffer.byteLength(JSON.stringify(compact)) + (output.length ? 1 : 0);
+    if (bytes + size > MAX_AUDIT_QUERY_PAGE_BYTES) {
+      truncated = true;
+      break;
+    }
+    bytes += size;
+    output.push(compact);
+    truncated ||= compact.queryTruncated === true;
+  }
+  return { items: output, truncated, bytes };
 }
 
 function encodeCursor(kind, offset) {
@@ -638,15 +784,26 @@ function matchesPath(value, patterns) {
   return !patterns?.length || patterns.some((pattern) => pathPattern(pattern).test(value || ""));
 }
 
-function queryItems(report, args) {
+function queryItems(report, args, snapshotId, queryIdentity, offset = 0) {
   if (args.kind === "summary") {
+    const state = { nodes: 0, truncated: false };
+    const value = boundedRefreshValue(
+      {
+        summary: report.summary,
+        target: report.target || null,
+        diagnostics: (report.diagnostics || []).slice(0, 100),
+        scanCoverage: report.scanCoverage || null,
+        routeGraph: report.routeGraph || null,
+        policyExceptions: report.policyExceptions || [],
+      },
+      state,
+    );
     return {
       kind: "summary",
-      summary: report.summary,
-      target: report.target || null,
-      diagnostics: report.diagnostics || [],
-      scanCoverage: report.scanCoverage || null,
-      policyExceptions: report.policyExceptions || [],
+      snapshotId,
+      ...value,
+      responseBytes: Buffer.byteLength(JSON.stringify(value)),
+      responseTruncated: state.truncated,
     };
   }
   const source = args.kind === "routes" ? report.routes : report.findings;
@@ -673,16 +830,68 @@ function queryItems(report, args) {
     }
     return true;
   });
-  const offset = decodeCursor(args.cursor, args.kind);
   const limit = args.limit || 50;
-  const items = filtered.slice(offset, offset + limit);
-  const nextOffset = offset + items.length;
+  const selected = filtered.slice(offset, offset + limit);
+  const page = compactAuditPage(selected);
+  const nextOffset = offset + page.items.length;
   return {
     kind: args.kind,
+    snapshotId,
     summary: report.summary,
     total: filtered.length,
-    items,
-    nextCursor: nextOffset < filtered.length ? encodeCursor(args.kind, nextOffset) : null,
+    items: page.items,
+    responseBytes: page.bytes,
+    responseTruncated: page.truncated,
+    nextCursor:
+      nextOffset < filtered.length
+        ? encodeAuditCursor(args.kind, nextOffset, snapshotId, queryIdentity)
+        : null,
+  };
+}
+
+function queryAudit(store, args) {
+  const queryIdentity = auditQueryIdentity(args);
+  let snapshot;
+  let offset = 0;
+  if (args.cursor) {
+    const cursor = decodeAuditCursor(args.cursor, args.kind, queryIdentity);
+    snapshot = store.get(cursor.snapshotId);
+    if (!snapshot) {
+      throw new Error("Audit snapshot is no longer retained; restart the query without a cursor");
+    }
+    offset = cursor.offset;
+  } else {
+    const result = staticAudit(args);
+    snapshot = { id: result.snapshotId, report: result.report };
+    store.put(snapshot);
+  }
+  return queryItems(snapshot.report, args, snapshot.id, queryIdentity, offset);
+}
+
+function explainRoute(store, args) {
+  const snapshot = store.get(args.snapshotId);
+  if (!snapshot) throw new Error("Audit snapshot is not retained; run query_audit first");
+  const registrations = snapshot.report.routes.filter(
+    (route) =>
+      route.applicationId === (args.applicationId ?? null) &&
+      route.method === args.method &&
+      route.path === args.path,
+  );
+  if (!registrations.length)
+    throw new Error(`${args.method} ${args.path} was not found in snapshot`);
+  const gaps = (snapshot.report.routeGraph?.gaps || []).filter(
+    (gap) => gap.applicationId === null || gap.applicationId === (args.applicationId ?? null),
+  );
+  const registrationPage = compactAuditPage(registrations);
+  const gapPage = compactAuditPage(gaps);
+  return {
+    kind: "route-explanation",
+    snapshotId: snapshot.id,
+    operation: `${args.method} ${args.path}`,
+    registrations: registrationPage.items,
+    unresolvedObligations: gapPage.items,
+    responseBytes: registrationPage.bytes + gapPage.bytes,
+    responseTruncated: registrationPage.truncated || gapPage.truncated,
   };
 }
 
@@ -695,7 +904,7 @@ const auditConfigInput = {
   ...scanInput,
 };
 
-function registerTools(server) {
+function registerTools(server, auditSnapshots) {
   server.registerTool(
     "discover_repository",
     {
@@ -909,14 +1118,15 @@ function registerTools(server) {
       try {
         const resolved = resolveDir(args.dir);
         const options = scanOptions(args);
-        const registry = inventory({ mode: "static", src: resolved, ...options });
+        const session = createAnalysisSession(resolved, options);
+        const registry = session.inventory();
         const report = buildReport(registry, {
           command: "inventory",
           mode: "static",
           target: loadPackageInfo(resolved),
           sourceRoot: resolved,
         });
-        const discovery = discover(resolved, options);
+        const discovery = session.discover();
         return jsonResult(
           reconcileDocumentation(report, {
             root: resolved,
@@ -1082,21 +1292,41 @@ function registerTools(server) {
         applicationIds: stringList.optional().describe("Stable application IDs to include"),
         limit: z.number().int().min(1).max(500).optional(),
         cursor: z.string().optional(),
-        methods: z
-          .array(
-            z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "ALL"]),
-          )
-          .optional(),
+        methods: z.array(z.enum(REPORT_METHODS)).optional(),
         paths: stringList.optional().describe("Route path globs"),
         authStatuses: z.array(z.enum(["proven", "public", "unknown"])).optional(),
         findingIds: stringList.optional(),
         policyIds: stringList.optional(),
         severities: z.array(z.enum(["high", "medium", "low"])).optional(),
       },
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (args) => {
       try {
-        return jsonResult(queryItems(staticAudit(args), args));
+        return jsonResult(queryAudit(auditSnapshots, args));
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "explain_route",
+    {
+      title: "Explain route evidence from an audit snapshot",
+      description:
+        "Return bounded registration, middleware, authentication, source, and unresolved-obligation evidence for one route in a retained query_audit snapshot.",
+      inputSchema: {
+        snapshotId: z.string(),
+        applicationId: z.string().nullable().optional(),
+        method: z.enum(REPORT_METHODS),
+        path: z.string(),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async (args) => {
+      try {
+        return jsonResult(explainRoute(auditSnapshots, args));
       } catch (err) {
         return errorResult(err);
       }
@@ -1116,7 +1346,7 @@ function registerTools(server) {
     },
     async (args) => {
       try {
-        const report = staticAudit(args);
+        const report = staticAudit(args).report;
         const finding = report.findings.find((item) => item.fingerprint === args.fingerprint);
         if (!finding) return errorResult(new Error(`Finding ${args.fingerprint} was not found`));
         const route = finding.method
@@ -1178,7 +1408,7 @@ function registerTools(server) {
 
 function createServer() {
   const server = new McpServer({ name: "express-recon", version: pkg.version });
-  registerTools(server);
+  registerTools(server, createAuditSnapshotStore());
   return server;
 }
 

@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
+const { createHash } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 
 const {
@@ -231,6 +232,23 @@ test("HTML renderer escapes untrusted report content and creates an offline rout
     const payload = `<img src=x onerror="alert(1)"><script>alert(2)</script>`;
     const report = routeReport({
       target: { name: payload },
+      routeGraph: {
+        complete: false,
+        orphanRoutes: 0,
+        partialRoutes: 1,
+        registrarRoutes: 0,
+        opaqueMounts: [],
+        gaps: [
+          {
+            adapter: "nestjs",
+            applicationId: "nestjs:src/main.ts#app",
+            reasonCode: "unresolved-module-reference",
+            scope: "/api",
+            source: { file: "src/main.ts", line: 4 },
+            count: 1,
+          },
+        ],
+      },
       routes: [
         {
           ...routeReport().routes[0],
@@ -272,6 +290,8 @@ test("HTML renderer escapes untrusted report content and creates an offline rout
     assert.match(html, /assets\/report\.css/);
     assert.match(html, /data-filter-search/);
     assert.match(html, /Incomplete scan coverage/);
+    assert.match(html, /Route graph obligations/);
+    assert.match(html, /unresolved-module-reference/);
     assert.match(html, /I\/O schema evidence/);
     assert.match(html, /high · zod · 1 conflict/);
     assert.match(html, /Typed I\/O routes/);
@@ -280,6 +300,82 @@ test("HTML renderer escapes untrusted report content and creates an offline rout
     assert.doesNotMatch(html, /<script>alert/);
     assert.ok(fs.existsSync(path.join(root, "site", "assets", "report.js")));
     assert.ok(fs.existsSync(path.join(root, "site", "assets", "report.css")));
+  });
+});
+
+function assertSelfContainedPage(html) {
+  const policy = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)[1];
+  const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1],
+  );
+  const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)].map((match) => match[1]);
+  assert.ok(scripts.length > 0);
+  assert.ok(styles.length > 0);
+  for (const [type, sources] of [
+    ["script", scripts],
+    ["style", styles],
+  ]) {
+    const directive = policy
+      .split(";")
+      .map((part) => part.trim())
+      .find((part) => part.startsWith(`${type}-src `));
+    for (const source of sources) {
+      const digest = createHash("sha256").update(source).digest("base64");
+      assert.ok(directive.includes(`'sha256-${digest}'`), `${type} block must match its CSP hash`);
+      assert.doesNotMatch(source, /\r|<!--/);
+      if (type === "script") assert.doesNotThrow(() => new vm.Script(source));
+    }
+  }
+  assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval|'self'|https?:|file:/);
+  assert.match(policy, /img-src data:/);
+  assert.match(policy, /connect-src 'none'/);
+  // Exclude inert vendor strings before inspecting actual page resource tags.
+  const markup = html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/g, "");
+  assert.doesNotMatch(markup, /<(script|link)\b[^>]*(?:src="|rel="stylesheet")/);
+  const images = [...markup.matchAll(/<(?:img|link)\b[^>]*(?:src|href)="([^"]+)"/g)];
+  assert.ok(images.length > 0);
+  for (const image of images) {
+    assert.ok(image[1].startsWith("data:image/svg+xml;base64,"));
+    const svg = Buffer.from(image[1].split(",")[1], "base64").toString("utf8");
+    assert.match(svg, /<svg/);
+    for (const match of svg.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+      assert.ok(policy.includes(createHash("sha256").update(match[1]).digest("base64")));
+    }
+  }
+  return scripts;
+}
+
+test("local HTML embeds assets and hash-authorizes them without sibling file access", () => {
+  temporary("html-embedded-assets", (root) => {
+    const reportFile = path.join(root, "routes.json");
+    const apiFile = path.join(root, "openapi.json");
+    const output = path.join(root, "site");
+    writeJson(reportFile, routeReport());
+    writeJson(
+      apiFile,
+      openApiDocument({ "x-untrusted": "<!--<ScRiPt></sCrIpT><style>bad</style>" }),
+    );
+    const routePage = renderHtmlSite(reportFile, output);
+    const routeHtml = fs.readFileSync(routePage.output, "utf8");
+    const [script] = assertSelfContainedPage(routeHtml);
+    vm.runInNewContext(script, { document: { querySelectorAll: () => [] } });
+    assert.ok(routeHtml.indexOf("<script data-asset=") > routeHtml.indexOf("</main>"));
+    const apiPage = renderHtmlSite(apiFile, output);
+    const apiHtml = fs.readFileSync(apiPage.output, "utf8");
+    const scripts = assertSelfContainedPage(apiHtml);
+    assert.equal(scripts.length, 2);
+    assert.ok(apiHtml.indexOf("<script data-asset=") > apiHtml.indexOf('id="swagger-ui"'));
+    let config;
+    vm.runInNewContext(scripts[1], {
+      window: {},
+      SwaggerUIBundle: (value) => {
+        config = value;
+      },
+    });
+    assert.equal(config.spec["x-untrusted"], "<!--<ScRiPt></sCrIpT><style>bad</style>");
+    assert.equal(config.validatorUrl, null);
+    assert.equal(config.tryItOutEnabled, false);
+    assert.doesNotMatch(apiHtml, /sourceMappingURL=swagger-ui\.css\.map/);
   });
 });
 
@@ -316,6 +412,8 @@ test("OpenAPI JSON renders with packaged Swagger UI and offline-safe defaults", 
       "assets/swagger-ui-NOTICE.txt",
       "assets/openapi.css",
       "assets/openapi-config.js",
+      "assets/logo.svg",
+      "assets/favicon.svg",
     ]);
     assert.match(html, /assets\/swagger-ui\.css/);
     assert.match(html, /assets\/openapi\.css/);
@@ -325,7 +423,8 @@ test("OpenAPI JSON renders with packaged Swagger UI and offline-safe defaults", 
     assert.match(html, /name="color-scheme" content="light"/);
     assert.match(html, /Payments &lt;\/script&gt;&lt;script&gt;/);
     assert.doesNotMatch(html, /<script>alert/);
-    assert.doesNotMatch(html, /https?:\/\//);
+    // Vendor code contains URL literals, but no page resource fetches them.
+    assert.doesNotMatch(html, /<(?:script|link|img)\b[^>]*(?:src|href)="https?:\/\//);
     assert.match(config, /const spec = JSON\.parse\("\{\\"openapi\\":\\"3\.1\.0\\"/);
     assert.match(config, /\\u003c\/script\\u003e\\u003cscript\\u003e/);
     assert.doesNotMatch(config, /<\/script>/i);
@@ -730,7 +829,7 @@ test("organization rendering writes per-repository pages and contains unsafe art
   });
 });
 
-test("organization folders render supported-framework OpenAPI artifacts with one shared bundle", () => {
+test("organization folders embed supported-framework API viewers and retain one auxiliary bundle", () => {
   temporary("html-organization-openapi", (root) => {
     const scanFile = path.join(root, "repositories", "api", "repo-scan.json");
     const specificationFile = path.join(root, "repositories", "api", "openapi.json");
@@ -812,7 +911,7 @@ test("organization folders render supported-framework OpenAPI artifacts with one
     assert.match(detail, /\.\.\/openapi\/api\.html/);
     assert.match(reference, /\.\.\/assets\/swagger-ui\.css/);
     assert.match(reference, /\.\.\/assets\/openapi\.css/);
-    assert.match(reference, /src="api\.js"/);
+    assert.match(reference, /data-asset="api\.js"/);
     assert.match(config, /Organization API/);
     assert.doesNotMatch(config, /Embedded fallback/);
     assert.doesNotMatch(overview, /openapi\/frontend\.html/);
@@ -1391,6 +1490,29 @@ test("rerendering switches cleanly between report and OpenAPI asset sets", () =>
     assert.equal(fs.existsSync(path.join(output, "assets", "openapi.css")), false);
     assert.equal(fs.existsSync(path.join(output, "assets", "openapi-config.js")), false);
     assert.equal(fs.readFileSync(path.join(output, "keep.txt"), "utf8"), "unowned and preserved");
+  });
+});
+
+test("a failed staged render replacement preserves the prior site", () => {
+  temporary("html-render-rollback", (root) => {
+    const reportFile = path.join(root, "routes.json");
+    const output = path.join(root, "site");
+    writeJson(reportFile, routeReport());
+    renderHtmlSite(reportFile, output);
+    const before = fs.readFileSync(path.join(output, "index.html"), "utf8");
+
+    assert.throws(
+      () =>
+        renderHtmlSite(reportFile, output, {
+          transactionHooks: {
+            afterOldMoved() {
+              throw new Error("injected render replacement failure");
+            },
+          },
+        }),
+      /injected render replacement failure/,
+    );
+    assert.equal(fs.readFileSync(path.join(output, "index.html"), "utf8"), before);
   });
 });
 

@@ -78,3 +78,69 @@ jobs:
       - name: Install Express ${{ matrix.express }} compatibility target
         run: npm install --ignore-scripts --no-save --package-lock=false express@${{ matrix.express }}
       - run: node --test testcases/walk.test.js testcases/sandbox.test.js testcases/boot-cli.test.js
+      - run: node scripts/framework-corpus.cjs express
+
+  fastify-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        fastify: ["4.29.1", "5.12.3"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+      - name: Install Fastify ${{ matrix.fastify }} compatibility target
+        run: npm install --ignore-scripts --no-save --package-lock=false fastify@${{ matrix.fastify }}
+      - run: node scripts/framework-corpus.cjs fastify
+
+  nest-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        nest: ["10.4.22", "11.2.3"]
+        platform: ["express", "fastify"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+      - name: Install NestJS ${{ matrix.nest }} compatibility targets
+        run: >-
+          npm install --ignore-scripts --no-save --package-lock=false
+          @nestjs/common@${{ matrix.nest }} @nestjs/core@${{ matrix.nest }}
+          @nestjs/platform-express@${{ matrix.nest }} @nestjs/platform-fastify@${{ matrix.nest }}
+          reflect-metadata@0.2.2 rxjs@7.8.2
+      - run: NEST_PLATFORM=${{ matrix.platform }} node scripts/framework-corpus.cjs nest
+
+  macos-cleanup-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+      - run: node --test testcases/repository.test.js testcases/artifact-transaction.test.js

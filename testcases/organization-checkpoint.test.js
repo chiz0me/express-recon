@@ -17,7 +17,6 @@ const {
   organizationCheckpointIdentity,
   withCompleted,
 } = require("../src/organization-checkpoint");
-const pkg = require("../package.json");
 
 function canonical(value) {
   if (value === null || typeof value !== "object") return value;
@@ -211,7 +210,7 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
   }
 });
 
-test("compatible legacy checkpoints are integrity-checked and upgraded", () => {
+test("pre-generation and generation-3 checkpoints are rejected after proof changes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-checkpoint-legacy-"));
   const currentIdentity = identity();
   const file = checkpointPath(root);
@@ -243,22 +242,18 @@ test("compatible legacy checkpoints are integrity-checked and upgraded", () => {
     legacy.fingerprint = legacyFingerprint(legacy.toolVersion, legacy.scope);
     atomicWriteJson(file, legacy);
 
-    const loaded = loadCheckpoint(file, "acme", currentIdentity, root);
-    assert.equal(loaded.migratedFromToolVersion, "0.7.1");
-    assert.equal(loaded.checkpoint.toolVersion, pkg.version);
-    assert.equal(loaded.checkpoint.compatibilityVersion, CHECKPOINT_COMPATIBILITY_VERSION);
-    assert.equal(loaded.checkpoint.fingerprint, currentIdentity.fingerprint);
-    assert.equal(loaded.entries.length, 1);
-    assert.equal(loaded.checkpoint.completed.length, 1);
-    assert.match(loaded.diagnostics[0], /newly supported frameworks/);
+    const preGeneration = loadCheckpoint(file, "acme", currentIdentity, root);
+    assert.equal(preGeneration.entries.length, 0);
+    assert.equal(preGeneration.checkpoint.completed.length, 0);
+    assert.match(preGeneration.diagnostics[0], /all repositories will be rescanned/);
 
-    legacy.toolVersion = "0.5.0";
-    legacy.fingerprint = legacyFingerprint(legacy.toolVersion, legacy.scope);
-    atomicWriteJson(file, legacy);
-    assert.throws(
-      () => loadCheckpoint(file, "acme", currentIdentity, root),
-      /checkpoint compatibility version/,
-    );
+    const generation3 = initialCheckpoint("acme", currentIdentity);
+    generation3.compatibilityVersion = "3";
+    atomicWriteJson(file, generation3);
+    const oldGeneration = loadCheckpoint(file, "acme", currentIdentity, root);
+    assert.equal(oldGeneration.entries.length, 0);
+    assert.equal(oldGeneration.checkpoint.compatibilityVersion, CHECKPOINT_COMPATIBILITY_VERSION);
+    assert.match(oldGeneration.diagnostics[0], /generation 3/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

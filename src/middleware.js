@@ -10,6 +10,12 @@
  * @property {string} raw  Best-effort source snippet for the audit trail.
  * @property {"middleware"|"hook"|"guard"|"interceptor"|"pipe"|"filter"} [stage]
  *   Framework lifecycle role when the source API makes it explicit.
+ * @property {"possible"} [applicability] Present when the middleware may apply
+ *   to the route but cannot be proven to execute for every matching request.
+ * @property {string[]} [applicabilityReasons] Stable reasons why applicability
+ *   could not be proven, such as path-pattern or execution-context.
+ * @property {{name:string,wrappers:string[]}[]} [innerPaths] Names referenced
+ *   inside a wrapper call, retaining every intervening wrapper.
  */
 
 const ANONYMOUS = "<anonymous>";
@@ -28,6 +34,10 @@ function descriptor(fields) {
     raw: fields.raw || name,
   };
   if (fields.stage) value.stage = fields.stage;
+  if (fields.applicability) value.applicability = fields.applicability;
+  if (fields.applicabilityReasons) value.applicabilityReasons = fields.applicabilityReasons;
+  if (fields.inner) value.inner = fields.inner;
+  if (fields.innerPaths) value.innerPaths = fields.innerPaths;
   return value;
 }
 

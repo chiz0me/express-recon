@@ -164,6 +164,41 @@ test("expands router.all() across concrete verbs, flagged as ALL", () => {
   }
 });
 
+test("emits an explicitly registered TRACE operation", () => {
+  const value = report();
+  value.routes = [
+    {
+      ...structuredClone(value.routes[0]),
+      method: "TRACE",
+      path: "/trace",
+    },
+  ];
+  const doc = formatters.openapi.build(value);
+  assert.equal(doc.paths["/trace"].trace["x-express-recon"].method, "TRACE");
+});
+
+test("OpenAPI output discloses inventory verbs it cannot represent", () => {
+  const value = report();
+  value.routes = [
+    {
+      ...structuredClone(value.routes[0]),
+      applicationId: null,
+      method: "CONNECT",
+      path: "/tunnel",
+      source: { file: "app.js", line: 10 },
+    },
+  ];
+  const doc = formatters.openapi.build(value);
+  assert.equal(doc.paths["/tunnel"], undefined);
+  assert.deepEqual(doc["x-express-recon"].unsupportedOperations[0], {
+    applicationId: null,
+    method: "CONNECT",
+    path: "/tunnel",
+    source: { file: "app.js", line: 10 },
+    reason: "not-representable-as-openapi-path-operation",
+  });
+});
+
 test("duplicate operations are reported instead of disappearing silently", () => {
   const value = report();
   const existing = value.routes.find((item) => item.method === "GET" && item.path === "/items");

@@ -46,9 +46,13 @@ function audit(opts, config) {
     const staticInventory = scan(requireSrc(opts), scanOptions(opts));
     const staticReg = classify(staticInventory, cfg);
     const runtimeReg = classify(hybridRuntimeInventory(opts, staticInventory), cfg);
-    return evaluatePolicies(reconcile(staticReg, runtimeReg), cfg.policies);
+    return evaluatePolicies(reconcile(staticReg, runtimeReg), cfg.policies, {
+      authWrappers: cfg.authWrappers,
+    });
   }
-  return evaluatePolicies(classify(inventory(opts), cfg), cfg.policies);
+  return evaluatePolicies(classify(inventory(opts), cfg), cfg.policies, {
+    authWrappers: cfg.authWrappers,
+  });
 }
 
 function scanOptions(opts) {
@@ -59,6 +63,10 @@ function scanOptions(opts) {
     ignoreFile: opts.ignoreFile,
     maxFiles: opts.maxFiles,
     maxFileBytes: opts.maxFileBytes,
+    maxGraphExpansions: opts.maxGraphExpansions,
+    maxResolverHops: opts.maxResolverHops,
+    maxResultBytes: opts.maxResultBytes,
+    maxRoutes: opts.maxRoutes,
     maxTotalBytes: opts.maxTotalBytes,
     timeoutMs: opts.timeoutMs,
     includeHidden: opts.includeHidden,

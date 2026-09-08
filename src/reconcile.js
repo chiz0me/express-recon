@@ -133,9 +133,20 @@ function observation(route) {
 
 function observationConflicts(staticRoute, runtimeRoute) {
   const conflicts = [];
-  const staticNames = (staticRoute.middlewares || []).map((middleware) => middleware.name);
-  const runtimeNames = (runtimeRoute.middlewares || []).map((middleware) => middleware.name);
-  if (JSON.stringify(staticNames) !== JSON.stringify(runtimeNames)) {
+  const middlewareEvidence = (middlewares) =>
+    (middlewares || []).map((middleware) => ({
+      name: middleware.name,
+      kind: middleware.kind,
+      stage: middleware.stage || null,
+      applicability: middleware.applicability || null,
+      applicabilityReasons: middleware.applicabilityReasons || [],
+      inner: middleware.inner || [],
+      innerPaths: middleware.innerPaths || [],
+    }));
+  if (
+    JSON.stringify(middlewareEvidence(staticRoute.middlewares)) !==
+    JSON.stringify(middlewareEvidence(runtimeRoute.middlewares))
+  ) {
     conflicts.push("middleware-identity");
   }
   if (

@@ -370,6 +370,7 @@ function parameterTypeReference(parameter, context) {
         source: binding.source,
         exportName: binding.exportName,
         props: binding.props || [],
+        importKind: binding.importKind,
       }
     : { type: "local", name };
 }

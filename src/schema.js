@@ -13,14 +13,43 @@ const descriptor = {
       enum: ["middleware", "hook", "guard", "interceptor", "pipe", "filter"],
       description: "Framework lifecycle role when statically identifiable",
     },
+    applicability: {
+      const: "possible",
+      description:
+        "The middleware may apply, but available path/control-flow evidence cannot prove it always executes for this route",
+    },
+    applicabilityReasons: {
+      type: "array",
+      minItems: 1,
+      uniqueItems: true,
+      items: { type: "string" },
+      description: "Stable reasons why middleware applicability could not be proven",
+    },
     inner: {
       type: "array",
       items: { type: "string" },
       description:
-        "Names referenced inside a wrapper call; auth proof requires the outer call in authWrappers",
+        "Flat display/search projection of names referenced inside a wrapper call; not sufficient for nested auth proof",
+    },
+    innerPaths: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string" },
+          wrappers: { type: "array", items: { type: "string" } },
+        },
+        required: ["name", "wrappers"],
+      },
+      description: "Nested names and every intervening wrapper, for sound wrapper auth proof",
     },
   },
   required: ["name", "kind", "raw"],
+  dependentRequired: {
+    applicability: ["applicabilityReasons"],
+    applicabilityReasons: ["applicability"],
+  },
 };
 
 const source = {
@@ -419,6 +448,8 @@ const REPORT_SCHEMA = {
             authImprovements: { type: "integer" },
             newFindings: { type: "integer" },
             resolvedFindings: { type: "integer" },
+            unverifiedRemovedRoutes: { type: "integer" },
+            unverifiedResolvedFindings: { type: "integer" },
           },
           required: [
             "addedRoutes",
@@ -475,6 +506,8 @@ const REPORT_SCHEMA = {
           description: "Historical finding objects; older baselines may predate current fields",
           items: { type: "object" },
         },
+        unverifiedRemovedRoutes: { type: "array", items: { type: "object" } },
+        unverifiedResolvedFindings: { type: "array", items: { type: "object" } },
       },
       required: [
         "baseline",
@@ -517,6 +550,53 @@ const REPORT_SCHEMA = {
               source,
             },
             required: ["applicationId", "path", "pathConfidence", "middlewares", "source"],
+          },
+        },
+        gaps: {
+          type: "array",
+          description:
+            "Structured obligations that prevent the adapter from proving route-graph completeness",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              adapter: { enum: ["express", "fastify", "nestjs"] },
+              applicationId: { type: ["string", "null"] },
+              reasonCode: { type: "string" },
+              scope: { type: ["string", "null"] },
+              source,
+              count: { type: "integer", minimum: 1 },
+            },
+            required: ["adapter", "applicationId", "reasonCode", "scope", "source", "count"],
+          },
+        },
+        resolutionTraces: {
+          type: "array",
+          maxItems: 128,
+          description: "Bounded first-party module resolution failures and heuristic resolutions",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              from: { type: "string" },
+              specifier: { type: "string" },
+              importKind: { enum: ["import", "require"] },
+              outcome: { enum: ["resolved", "unresolved"] },
+              strategy: { type: "string" },
+              heuristic: { type: "boolean" },
+              target: { type: ["string", "null"] },
+              reason: { type: ["string", "null"] },
+            },
+            required: [
+              "from",
+              "specifier",
+              "importKind",
+              "outcome",
+              "strategy",
+              "heuristic",
+              "target",
+              "reason",
+            ],
           },
         },
       },

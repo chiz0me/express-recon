@@ -1,14 +1,17 @@
 "use strict";
 
+const { OPENAPI_METHODS: HTTP_METHOD_LIST } = require("./http-methods");
+
 const fs = require("node:fs");
 const path = require("node:path");
+const { absenceEvidence } = require("./absence");
 const YAML = require("yaml");
 const { build: buildOpenApi } = require("./formatters/openapi");
 const { discover } = require("./discover");
 const { scanLimits } = require("./static/scan");
 const { MODULE_EXTENSIONS, loadStaticDocumentModule } = require("./static/document-module");
 
-const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
+const HTTP_METHODS = new Set(HTTP_METHOD_LIST);
 
 function relative(root, file) {
   const value = path.relative(root, file).split(path.sep).join("/");
@@ -594,27 +597,18 @@ function routeGraphUncertainty(report, selection) {
       mount.applicationId === null ||
       mount.applicationId === selection.id,
   );
+  const gaps = (report.routeGraph?.gaps || []).filter(
+    (gap) =>
+      selection.id === "all" || gap.applicationId === null || gap.applicationId === selection.id,
+  );
   return {
-    incomplete: orphanRoutes > 0 || partialRoutes > 0 || opaqueMounts.length > 0,
+    incomplete: orphanRoutes > 0 || partialRoutes > 0 || opaqueMounts.length > 0 || gaps.length > 0,
     orphanRoutes,
     partialRoutes,
     registrarRoutes: report.routeGraph?.registrarRoutes || 0,
     opaqueMounts,
+    gaps,
   };
-}
-
-function operationPath(operation) {
-  const separator = operation.indexOf(" ");
-  return separator < 0 ? operation : operation.slice(separator + 1);
-}
-
-function underOpaqueMount(operation, mount) {
-  if (mount.pathConfidence !== "full" || !mount.path) return true;
-  const documentedPath = operationPath(operation);
-  const wildcard = mount.path.indexOf("*");
-  const rawPrefix = wildcard < 0 ? mount.path : mount.path.slice(0, wildcard);
-  const prefix = rawPrefix.length > 1 ? rawPrefix.replace(/\/$/, "") : rawPrefix;
-  return prefix === "/" || documentedPath === prefix || documentedPath.startsWith(`${prefix}/`);
 }
 
 /**
@@ -715,11 +709,13 @@ function reconcileDocumentation(report, opts = {}) {
   const incompleteInventory = report.scanCoverage?.complete === false || graph.incomplete;
   const incompleteDocumentationDiscovery =
     discovery.complete === false || discovery.discoveryCoverage?.complete === false;
-  const unverifiedDocsOnlyOperations = docsOnlyOperations.filter(
-    (operation) =>
-      graph.orphanRoutes > 0 ||
-      graph.opaqueMounts.some((mount) => underOpaqueMount(operation, mount)),
-  );
+  const unverifiedDocsOnlyOperations = docsOnlyOperations.filter((operation) => {
+    const separator = operation.indexOf(" ");
+    return !absenceEvidence(report, {
+      applicationId: selection.id === "all" ? undefined : selection.id,
+      path: separator < 0 ? operation : operation.slice(separator + 1),
+    }).verified;
+  });
   const unverifiedDocsOnly = new Set(unverifiedDocsOnlyOperations);
   const verifiedDocsOnlyOperations = docsOnlyOperations.filter(
     (operation) => !unverifiedDocsOnly.has(operation),
@@ -774,6 +770,7 @@ function reconcileDocumentation(report, opts = {}) {
       partialRoutes: graph.partialRoutes,
       registrarRoutes: graph.registrarRoutes,
       opaqueMounts: graph.opaqueMounts,
+      gaps: graph.gaps,
     },
     diagnostics: [...new Set([...(discovery.diagnostics || []), ...(report.diagnostics || [])])],
   };

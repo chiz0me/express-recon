@@ -2,6 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const express = require("express");
 
 const { audit, inventory, instrument } = require("../src/index");
@@ -36,6 +37,17 @@ function makeApp() {
 
 function byKey(routes) {
   return Object.fromEntries(routes.map((r) => [`${r.method} ${r.path}`, r]));
+}
+
+function dispatch(app, url) {
+  return new Promise((resolve, reject) => {
+    const req = new EventEmitter();
+    Object.assign(req, { method: "GET", url, headers: {}, connection: {} });
+    const res = new EventEmitter();
+    res.setHeader = () => {};
+    res.end = (body) => resolve(String(body || ""));
+    app.handle(req, res, (error) => (error ? reject(error) : resolve("unhandled")));
+  });
 }
 
 test("walks an Express app and emits one entry per (method,path)", () => {
@@ -186,6 +198,26 @@ test("runtime routes carry pathConfidence", () => {
   for (const r of routes) assert.equal(r.pathConfidence, "full");
 });
 
+test("runtime inventory retains explicit TRACE registrations", () => {
+  instrument(express);
+  const app = express();
+  app.trace("/trace", (_req, res) => res.end("ok"));
+  const route = inventory({ mode: "runtime", app }).routes[0];
+  assert.equal(route.method, "TRACE");
+  assert.equal(route.path, "/trace");
+  assert.ok(route.source.file.endsWith("walk.test.js"));
+});
+
+test("runtime inventory retains extension verbs such as CONNECT", () => {
+  const app = express();
+  instrument(express);
+  app.connect("/tunnel", (_req, res) => res.end("ok"));
+  const route = inventory({ mode: "runtime", app }).routes.find(
+    (item) => item.method === "CONNECT",
+  );
+  assert.equal(route.path, "/tunnel");
+});
+
 test("a path-scoped guard proves only routes under its prefix (instrumented)", () => {
   instrument(express);
   const app = express();
@@ -198,6 +230,101 @@ test("a path-scoped guard proves only routes under its prefix (instrumented)", (
   const keyed = byKey(auditApp(app, CFG).routes);
   assert.equal(keyed["GET /admin/panel"].authStatus, "proven");
   assert.equal(keyed["GET /outside"].authStatus, "public");
+});
+
+test("mixed router case-sensitivity stays uncertain and matches actual dispatch", async () => {
+  instrument(express);
+  const app = express();
+  app.set("case sensitive routing", true);
+  const router = express.Router({ caseSensitive: false });
+  function requireAuth(_req, res) {
+    res.end("blocked");
+  }
+  app.use("/admin", requireAuth);
+  router.get("/admin", (_req, res) => res.end("public"));
+  app.use(router);
+
+  const route = byKey(auditApp(app, CFG).routes)["GET /admin"];
+  assert.equal(route.authStatus, "unknown");
+  assert.deepEqual(route.middlewares[0].applicabilityReasons, ["case-sensitivity"]);
+  assert.equal(await dispatch(app, "/ADMIN"), "public");
+
+  const reverse = express();
+  reverse.set("case sensitive routing", false);
+  const sensitive = express.Router({ caseSensitive: true });
+  reverse.use("/admin", requireAuth);
+  sensitive.get("/admin", (_req, res) => res.end("public"));
+  reverse.use(sensitive);
+  assert.equal(byKey(auditApp(reverse, CFG).routes)["GET /admin"].authStatus, "proven");
+  assert.equal(await dispatch(reverse, "/admin"), "blocked");
+  assert.equal(await dispatch(reverse, "/ADMIN"), "blocked");
+});
+
+test("chained runtime middleware retains dispatch order", async () => {
+  instrument(express);
+  const app = express();
+  const seen = [];
+  function first(_req, _res, next) {
+    seen.push("first");
+    next();
+  }
+  function second(_req, _res, next) {
+    seen.push("second");
+    next();
+  }
+  app.use(first).use(second);
+  app.get("/ordered", (_req, res) => res.end("ok"));
+  assert.deepEqual(
+    byKey(auditApp(app, CFG).routes)["GET /ordered"].middlewares.map((item) => item.name),
+    ["first", "second"],
+  );
+  assert.equal(await dispatch(app, "/ordered"), "ok");
+  assert.deepEqual(seen, ["first", "second"]);
+});
+
+test("wildcard scope evidence agrees with actual Express dispatch", async () => {
+  instrument(express);
+  const app = express();
+  function requireAuth(_req, res) {
+    res.end("blocked");
+  }
+  app.use("/admin/*rest", requireAuth);
+  app.get("/public", (_req, res) => res.end("public"));
+  app.get("/admin/item", (_req, res) => res.end("admin"));
+
+  const keyed = byKey(auditApp(app, CFG).routes);
+  assert.equal(keyed["GET /public"].authStatus, "public");
+  assert.equal(keyed["GET /admin/item"].authStatus, "unknown");
+  assert.equal(await dispatch(app, "/public"), "public");
+  assert.equal(await dispatch(app, "/admin/item"), "blocked");
+});
+
+test("trailing-slash middleware scope agrees with actual Express dispatch", async () => {
+  instrument(express);
+  const app = express();
+  function requireAuth(_req, res) {
+    res.end("blocked");
+  }
+  app.use("/docs/", requireAuth);
+  app.get("/docs/index.html", (_req, res) => res.end("public"));
+
+  const route = byKey(auditApp(app, CFG).routes)["GET /docs/index.html"];
+  assert.equal(route.authStatus, "proven");
+  assert.equal(await dispatch(app, "/docs/index.html"), "blocked");
+});
+
+test("middleware after a mounted router does not guard that router", async () => {
+  instrument(express);
+  const app = express();
+  const router = express.Router();
+  function requireAuth(_req, res) {
+    res.end("blocked");
+  }
+  router.get("/public", (_req, res) => res.end("public"));
+  app.use("/api", router, requireAuth);
+
+  assert.equal(byKey(auditApp(app, CFG).routes)["GET /api/public"].authStatus, "public");
+  assert.equal(await dispatch(app, "/api/public"), "public");
 });
 
 /** 1-based line number of the caller, for asserting captured sources. */

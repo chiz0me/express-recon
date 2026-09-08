@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const { fingerprintFinding } = require("./findings");
+const { absenceEvidence } = require("./absence");
 
 const AUTH_RISK = { proven: 0, unknown: 1, public: 2 };
 
@@ -39,6 +40,16 @@ function routeMap(routes, applicationScoped) {
     if (!existing || risk > existingRisk) map.set(key, route);
   }
   return map;
+}
+
+function routeGroups(routes, applicationScoped) {
+  const groups = new Map();
+  for (const route of routes) {
+    const key = routeKey(route, applicationScoped);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(route);
+  }
+  return groups;
 }
 
 function routeSummary(route) {
@@ -101,7 +112,13 @@ function routeContract(route) {
       name: middleware.name || null,
       kind: middleware.kind || null,
       stage: middleware.stage || null,
+      applicability: middleware.applicability || null,
+      applicabilityReasons: sortedStrings(middleware.applicabilityReasons),
       inner: sortedStrings(middleware.inner),
+      innerPaths: (middleware.innerPaths || []).map((reference) => ({
+        name: reference.name,
+        wrappers: [...reference.wrappers],
+      })),
     })),
     tags: sortedStrings(route.tags),
     roles: sortedStrings(route.roles),
@@ -119,7 +136,10 @@ function contractDigest(contract) {
       name: entry.name,
       kind: entry.kind,
       stage: entry.stage,
+      applicability: entry.applicability,
+      applicabilityReasons: entry.applicabilityReasons,
       inner: entry.inner,
+      innerPaths: entry.innerPaths,
     })),
     tags: contract.tags,
     roles: contract.roles,
@@ -149,6 +169,28 @@ function changedRoute(previous, current) {
     afterFingerprint: semanticHash(after),
     before: contractDigest(before),
     after: contractDigest(after),
+  };
+}
+
+function changedRouteGroup(previousRoutes, currentRoutes) {
+  if (previousRoutes.length === 1 && currentRoutes.length === 1) {
+    return changedRoute(previousRoutes[0], currentRoutes[0]);
+  }
+  const contracts = (routes) =>
+    routes
+      .map((route) => routeContract(route))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const before = contracts(previousRoutes);
+  const after = contracts(currentRoutes);
+  if (JSON.stringify(before) === JSON.stringify(after)) return null;
+  const representative = routeMap(currentRoutes, false).values().next().value || currentRoutes[0];
+  return {
+    ...routeSummary(representative),
+    changedFields: ["registrations"],
+    beforeFingerprint: semanticHash(before),
+    afterFingerprint: semanticHash(after),
+    before: { registrations: before.map(contractDigest) },
+    after: { registrations: after.map(contractDigest) },
   };
 }
 
@@ -228,6 +270,8 @@ function authenticationCause(previous, current) {
 function compareRoutes(baseline, current, applicationScoped) {
   const before = routeMap(baseline.routes, applicationScoped);
   const after = routeMap(current.routes, applicationScoped);
+  const beforeGroups = routeGroups(baseline.routes, applicationScoped);
+  const afterGroups = routeGroups(current.routes, applicationScoped);
   const addedRoutes = [];
   const removedRoutes = [];
   const authRegressions = [];
@@ -240,7 +284,7 @@ function compareRoutes(baseline, current, applicationScoped) {
       addedRoutes.push(routeSummary(route));
       continue;
     }
-    const contractChange = changedRoute(previous, route);
+    const contractChange = changedRouteGroup(beforeGroups.get(key), afterGroups.get(key));
     if (contractChange) changedRoutes.push(contractChange);
     const fromRisk = AUTH_RISK[previous.authStatus];
     const toRisk = AUTH_RISK[route.authStatus];
@@ -324,6 +368,20 @@ function compareReports(baseline, current) {
   const applicationScoped = supportsApplicationIdentity(baseline);
   const routes = compareRoutes(baseline, current, applicationScoped);
   const findings = compareFindings(baseline, current, applicationScoped);
+  const unverifiedRemovedRoutes = [];
+  routes.removedRoutes = routes.removedRoutes.filter((route) => {
+    const evidence = absenceEvidence(current, route);
+    if (evidence.verified) return true;
+    unverifiedRemovedRoutes.push({ ...route, absenceEvidence: evidence });
+    return false;
+  });
+  const unverifiedResolvedFindings = [];
+  findings.resolvedFindings = findings.resolvedFindings.filter((finding) => {
+    const evidence = absenceEvidence(current, finding);
+    if (evidence.verified) return true;
+    unverifiedResolvedFindings.push({ ...finding, absenceEvidence: evidence });
+    return false;
+  });
   return {
     baseline: {
       schemaVersion: baseline.schemaVersion || null,
@@ -337,9 +395,13 @@ function compareReports(baseline, current) {
       authImprovements: routes.authImprovements.length,
       newFindings: findings.newFindings.length,
       resolvedFindings: findings.resolvedFindings.length,
+      unverifiedRemovedRoutes: unverifiedRemovedRoutes.length,
+      unverifiedResolvedFindings: unverifiedResolvedFindings.length,
     },
     ...routes,
     ...findings,
+    unverifiedRemovedRoutes,
+    unverifiedResolvedFindings,
   };
 }
 

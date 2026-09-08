@@ -130,6 +130,8 @@ test("the npm package exposes only the intended runtime and agent surfaces", () 
     "skills",
     "LICENSE",
     "README.md",
+    "assets/logo/mark.svg",
+    "assets/favicon.svg",
     "src/cli.js",
     "src/mcp/server.js",
   ]);
@@ -184,7 +186,7 @@ test("render path defaults and organization API pages are documented", () => {
     assert.match(document, /OpenAPI/);
   }
   assert.match(agentGuide, /Agents should still\s+pass `--input` explicitly/);
-  assert.match(agentGuide, /one shared local\s+bundle/);
+  assert.match(agentGuide, /Swagger UI embedded into each page/);
 });
 
 test("organization scans document their durable default output", () => {

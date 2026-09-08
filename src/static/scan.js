@@ -7,7 +7,15 @@ const { analyzeFile } = require("./analyze-file");
 const { STATIC_FRAMEWORK_ADAPTERS } = require("./adapters");
 const { extractIoHints } = require("./io-hints");
 const { createScopedResolver, EXTENSIONS } = require("./resolve");
-const { joinPath, scopedTo } = require("../walk");
+const { joinPath } = require("../walk");
+const {
+  DEFINITE,
+  NONE,
+  POSSIBLE,
+  combineApplicability,
+  scopeEvidence,
+  withApplicability,
+} = require("../express-scope");
 
 const SOURCE_EXT = new Set(EXTENSIONS);
 const SKIP_DIRS = new Set([
@@ -36,6 +44,11 @@ const DEFAULT_MAX_FILES = 50_000;
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_RESOLVER_HOPS = 250_000;
+const DEFAULT_MAX_GRAPH_EXPANSIONS = 500_000;
+const DEFAULT_MAX_ROUTES = 100_000;
+const DEFAULT_MAX_RESULT_BYTES = 64 * 1024 * 1024;
+const ANALYSIS_STATE = Symbol("express-recon.analysis-state");
 
 function boundedInteger(value, label, fallback, minimum, maximum) {
   if (value === undefined) return fallback;
@@ -63,6 +76,52 @@ function scanLimits(opts = {}) {
       5 * 1024 * 1024 * 1024,
     ),
     timeoutMs: boundedInteger(opts.timeoutMs, "scan.timeoutMs", DEFAULT_TIMEOUT_MS, 100, 600_000),
+    maxResolverHops: boundedInteger(
+      opts.maxResolverHops,
+      "scan.maxResolverHops",
+      DEFAULT_MAX_RESOLVER_HOPS,
+      100,
+      10_000_000,
+    ),
+    maxGraphExpansions: boundedInteger(
+      opts.maxGraphExpansions,
+      "scan.maxGraphExpansions",
+      DEFAULT_MAX_GRAPH_EXPANSIONS,
+      100,
+      10_000_000,
+    ),
+    maxRoutes: boundedInteger(opts.maxRoutes, "scan.maxRoutes", DEFAULT_MAX_ROUTES, 1, 1_000_000),
+    maxResultBytes: boundedInteger(
+      opts.maxResultBytes,
+      "scan.maxResultBytes",
+      DEFAULT_MAX_RESULT_BYTES,
+      1024,
+      1024 * 1024 * 1024,
+    ),
+  };
+}
+
+function createAnalysisBudget(limits, started) {
+  const counts = { resolverHops: 0, graphExpansions: 0, routes: 0 };
+  const reasons = new Set();
+  const charge = (kind, maximum, amount = 1) => {
+    if (Date.now() - started > limits.timeoutMs) {
+      reasons.add("timeout");
+      return false;
+    }
+    if (counts[kind] + amount > maximum) {
+      reasons.add(kind);
+      return false;
+    }
+    counts[kind] += amount;
+    return true;
+  };
+  return {
+    counts,
+    reasons,
+    resolver: () => charge("resolverHops", limits.maxResolverHops),
+    graph: () => charge("graphExpansions", limits.maxGraphExpansions),
+    route: () => charge("routes", limits.maxRoutes),
   };
 }
 
@@ -322,7 +381,7 @@ function resolveExport(file, exportName, props, byPath, resolve, seen) {
     if (found) return found;
   }
   for (const source of file.reExportAll) {
-    const target = resolve(file.filePath, source);
+    const target = resolve(file.filePath, source, "import");
     const tf = target && byPath.get(target);
     const found = tf && resolveExport(tf, exportName, props, byPath, resolve, seen);
     if (found) return found;
@@ -345,7 +404,7 @@ function resolveRefValue(file, ref, props, byPath, resolve, seen) {
       return next ? resolveRefValue(file, next, props.slice(1), byPath, resolve, seen) : null;
     }
     case "module": {
-      const target = resolve(file.filePath, ref.source);
+      const target = resolve(file.filePath, ref.source, ref.importKind);
       const tf = target && byPath.get(target);
       if (!tf) return null;
       return resolveExport(tf, ref.exportName, ref.props.concat(props), byPath, resolve, seen);
@@ -355,30 +414,87 @@ function resolveRefValue(file, ref, props, byPath, resolve, seen) {
   }
 }
 
-/** Map an export ref (+ pending property path) to a same-file handler function. */
-function refToFn(tf, ref, props) {
-  if (!ref) return null;
-  if (ref.t === "factory") return refToFn(tf, ref.ret, props);
-  if (ref.t === "local") return props.length === 0 ? tf.handlerIndex.get(ref.name) || null : null;
-  if (ref.t === "object")
-    return props.length === 0 ? null : refToFn(tf, ref.props.get(props[0]), props.slice(1));
-  // ref.t === "module" would be a second cross-file hop — capped at one.
+function resolveHandlerRef(file, ref, props, byPath, resolve, seen, depth) {
+  if (!ref || depth >= 12) return null;
+  if (ref.t === "factory")
+    return resolveHandlerRef(file, ref.ret, props, byPath, resolve, seen, depth);
+  if (ref.t === "local") {
+    if (props.length) return null;
+    const fn = file.handlerIndex.get(ref.name);
+    return fn ? { file, fn } : null;
+  }
+  if (ref.t === "object") {
+    if (!props.length) return null;
+    return resolveHandlerRef(
+      file,
+      ref.props.get(props[0]),
+      props.slice(1),
+      byPath,
+      resolve,
+      seen,
+      depth,
+    );
+  }
+  if (ref.t === "module") {
+    const target = resolve(file.filePath, ref.source, ref.importKind);
+    const targetFile = target && byPath.get(target);
+    return targetFile
+      ? resolveExportedHandler(
+          targetFile,
+          ref.exportName,
+          [...(ref.props || []), ...props],
+          byPath,
+          resolve,
+          seen,
+          depth + 1,
+        )
+      : null;
+  }
   return null;
 }
 
-/** Resolve an exported name (honoring the CommonJS default-object form) to a fn node. */
-function exportedFnNode(tf, exportName, props) {
-  const direct = refToFn(tf, tf.exportRefs.get(exportName), props);
+function resolveExportedHandler(file, exportName, props, byPath, resolve, seen, depth = 0) {
+  if (depth >= 12) return null;
+  const key = `${file.filePath}#handler:${exportName}#${props.join(".")}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+  const direct = resolveHandlerRef(
+    file,
+    file.exportRefs.get(exportName),
+    props,
+    byPath,
+    resolve,
+    seen,
+    depth,
+  );
   if (direct) return direct;
-  if (exportName !== "default" && tf.exportRefs.has("default"))
-    return refToFn(tf, tf.exportRefs.get("default"), [exportName, ...props]);
+  if (exportName !== "default" && file.exportRefs.has("default")) {
+    const fromDefault = resolveHandlerRef(
+      file,
+      file.exportRefs.get("default"),
+      [exportName, ...props],
+      byPath,
+      resolve,
+      seen,
+      depth,
+    );
+    if (fromDefault) return fromDefault;
+  }
+  for (const source of file.reExportAll) {
+    const target = resolve(file.filePath, source, "import");
+    const targetFile = target && byPath.get(target);
+    const found =
+      targetFile &&
+      resolveExportedHandler(targetFile, exportName, props, byPath, resolve, seen, depth + 1);
+    if (found) return found;
+  }
   return null;
 }
 
 /**
- * One-hop cross-file handler resolution: for routes whose handler is a
+ * Bounded cross-file handler resolution: for routes whose handler is a
  * first-party imported controller (`.get('/x', controllers.getUser)`), follow
- * the import to the target file, mine the controller's I/O hints, and fold them
+ * local re-export chains to the target function, mine its I/O hints, and fold them
  * back onto `route.io`. Degrades silently for external/unresolved handlers. Runs
  * before `buildGraph` so the mutated `io` propagates through its `{...route}` copy.
  */
@@ -388,26 +504,32 @@ function resolveImportedHandlers(files, resolve) {
     for (const route of [...file.routes, ...file.registrarRoutes]) {
       const ref = route.__handlerRef;
       if (ref && route.io && !route.io.handlerResolved) {
-        const target = resolve(file.filePath, ref.source);
+        const target = resolve(file.filePath, ref.source, ref.importKind);
         const tf = target && byPath.get(target);
-        const fn = tf && exportedFnNode(tf, ref.exportName, ref.props);
-        if (fn) {
+        const resolved =
+          tf &&
+          resolveExportedHandler(tf, ref.exportName, ref.props, byPath, resolve, new Set(), 0);
+        if (resolved) {
+          const { file: handlerFile, fn } = resolved;
           const hints = extractIoHints(fn, {
-            file: tf.filePath,
-            lineAt: tf.lineAt,
-            bindings: tf.valueBindings,
-            consts: tf.consts,
-            requires: tf.requires,
-            typeResolver: tf.typeResolver,
-            functionType: tf.handlerTypes.get(fn.start),
-            jsdoc: tf.handlerJSDoc.get(fn.start),
+            file: handlerFile.filePath,
+            lineAt: handlerFile.lineAt,
+            bindings: handlerFile.valueBindings,
+            consts: handlerFile.consts,
+            requires: handlerFile.requires,
+            typeResolver: handlerFile.typeResolver,
+            functionType: handlerFile.handlerTypes.get(fn.start),
+            jsdoc: handlerFile.handlerJSDoc.get(fn.start),
           });
           route.io.request = hints.request;
           route.io.responses = hints.responses;
           route.io.statusCodes = hints.statusCodes;
           if (hints.schemas) route.io.schemas = hints.schemas;
           route.io.handlerResolved = true;
-          route.io.handlerSource = { file: tf.filePath, line: tf.lineAt(fn.start) };
+          route.io.handlerSource = {
+            file: handlerFile.filePath,
+            line: handlerFile.lineAt(fn.start),
+          };
         }
       }
       delete route.__handlerRef;
@@ -437,7 +559,7 @@ function registrarFromRefValue(file, ref, props, byPath, resolve, seen) {
     );
   }
   if (ref.t === "module") {
-    const target = resolve(file.filePath, ref.source);
+    const target = resolve(file.filePath, ref.source, ref.importKind);
     const targetFile = target && byPath.get(target);
     if (!targetFile) return null;
     return resolveRegistrarExport(
@@ -470,7 +592,7 @@ function resolveRegistrarExport(file, exportName, props, byPath, resolve, seen =
     if (found) return found;
   }
   for (const source of file.reExportAll) {
-    const target = resolve(file.filePath, source);
+    const target = resolve(file.filePath, source, "import");
     const targetFile = target && byPath.get(target);
     const found =
       targetFile && resolveRegistrarExport(targetFile, exportName, props, byPath, resolve, seen);
@@ -480,7 +602,7 @@ function resolveRegistrarExport(file, exportName, props, byPath, resolve, seen =
 }
 
 /** Build the cross-file router graph from analyzed file models. */
-function buildGraph(files, resolve) {
+function buildGraph(files, resolve, budget) {
   const byPath = new Map(files.map((f) => [f.filePath, f]));
   const nodes = new Map();
   const stats = {
@@ -504,11 +626,12 @@ function buildGraph(files, resolve) {
         file: file.filePath,
         var: name,
         line: file.lineAt(router.start),
+        caseSensitive: router.caseSensitive,
       });
     }
     const b = file.requires.get(name);
     if (b) {
-      const target = resolve(file.filePath, b.source);
+      const target = resolve(file.filePath, b.source, b.importKind);
       const tf = target && byPath.get(target);
       const found = tf && resolveExport(tf, b.exportName, b.props, byPath, resolve, new Set());
       if (found && found.kind === "router") return ensure(`${found.file}#${found.var}`, "router");
@@ -521,7 +644,7 @@ function buildGraph(files, resolve) {
   const resolveRef = (file, ref) => {
     if (ref.t === "local") return resolveLocal(file, ref.name);
     if (ref.t === "module") {
-      const target = resolve(file.filePath, ref.source);
+      const target = resolve(file.filePath, ref.source, ref.importKind);
       const tf = target && byPath.get(target);
       const found = tf && resolveExport(tf, ref.exportName, ref.props, byPath, resolve, new Set());
       if (found && found.kind === "router") return ensure(`${found.file}#${found.var}`, "router");
@@ -541,17 +664,21 @@ function buildGraph(files, resolve) {
 
   for (const file of files) {
     for (const route of file.routes) {
+      if (!budget.graph()) break;
       const node = resolveLocal(file, route.host);
       if (isRouteHost(node)) node.routes.push({ ...route, file: file.filePath });
       else stats.dropped++;
     }
     for (const [host, mws] of file.globalMwByHost) {
+      if (!budget.graph()) break;
       resolveLocal(file, host).globalMw.push(...mws.map((e) => ({ ...e, file: file.filePath })));
     }
     for (const use of file.opaqueUses || []) {
+      if (!budget.graph()) break;
       resolveLocal(file, use.host).opaqueUses.push({ ...use, file: file.filePath });
     }
     for (const edge of file.edges) {
+      if (!budget.graph()) break;
       const target = resolveRef(file, edge.targetRef);
       const hostNode = resolveLocal(file, edge.host);
       if (isRouteHost(target)) {
@@ -561,6 +688,8 @@ function buildGraph(files, resolve) {
           targetId: target.id,
           edgeMw: edge.edgeMw.map((e) => ({ ...e, file: file.filePath })),
           line: edge.line,
+          order: edge.order,
+          context: edge.context,
           file: file.filePath,
         });
       } else {
@@ -594,24 +723,86 @@ function buildGraph(files, resolve) {
   return { nodes, stats };
 }
 
-/**
- * Does a `use()`-attached middleware apply to a route/edge registered on the
- * same host? Express only runs middleware over registrations that come after
- * it, so within one file the `use()` line must not exceed the target's line.
- * Cross-file attachments (a router `use()`d from another module) keep the
- * conservative include-always behavior.
- */
-function appliesInOrder(entry, item) {
-  if (entry.file == null || entry.line == null || item.file == null || item.line == null)
-    return true;
-  if (entry.file !== item.file) return true;
-  return entry.line <= item.line;
+function predicateKey(predicate) {
+  return `${predicate.id}:${predicate.branch}`;
 }
 
-function emitRoute(route, prefix, accMw, partial, out) {
+function contextRelation(item, entry) {
+  if (!entry.context || !item.context) return DEFINITE;
+  const functions = new Set(item.context.functions || []);
+  const predicates = new Set((item.context.predicates || []).map(predicateKey));
+  const itemById = new Map((item.context.predicates || []).map((value) => [value.id, value]));
+  for (const predicate of entry.context.predicates || []) {
+    const other = itemById.get(predicate.id);
+    if (predicate.exclusive && other && other.branch !== predicate.branch) return NONE;
+  }
+  const implied =
+    (entry.context.functions || []).every((value) => functions.has(value)) &&
+    (entry.context.predicates || []).every((value) => predicates.has(predicateKey(value)));
+  return implied ? DEFINITE : POSSIBLE;
+}
+
+function registrationApplicability(entry, item) {
+  if (entry.file == null || entry.line == null || item.file == null || item.line == null)
+    return { applicability: DEFINITE, reasons: [] };
+  if (entry.file !== item.file) {
+    return { applicability: POSSIBLE, reasons: ["cross-file-order"] };
+  }
+  const entryOrder = entry.order ?? entry.line;
+  const itemOrder = item.order ?? item.line;
+  if (entryOrder > itemOrder) return { applicability: NONE, reasons: [] };
+  const relation = contextRelation(item, entry);
+  return {
+    applicability: relation,
+    reasons: relation === POSSIBLE ? ["execution-context"] : [],
+  };
+}
+
+function beforeItem(entries, item) {
+  const output = [];
+  for (const entry of entries) {
+    const current = registrationApplicability(entry, item);
+    if (current.applicability === NONE) continue;
+    output.push({
+      ...entry,
+      applicability: combineApplicability(entry.applicability || DEFINITE, current.applicability),
+      applicabilityReasons: [
+        ...new Set([...(entry.applicabilityReasons || []), ...current.reasons]),
+      ],
+    });
+  }
+  // AST traversal is pre-order, so chained calls are discovered outside-in.
+  // Registration follows JavaScript evaluation order instead.
+  return output.sort((left, right) => {
+    const leftOrder = left.order ?? left.line ?? 0;
+    const rightOrder = right.order ?? right.line ?? 0;
+    return leftOrder - rightOrder;
+  });
+}
+
+function emitRoute(route, prefix, accMw, partial, out, budget) {
+  if (budget && !budget.route()) return false;
   const dynamic = route.path === null;
   const full = dynamic ? joinPath(prefix, "<dynamic>") : joinPath(prefix, route.path);
-  const chain = accMw.filter((e) => scopedTo(full, e.scopeAbs)).map((e) => e.mw);
+  const chain = [];
+  for (const entry of accMw) {
+    const scoped = scopeEvidence(full, entry.scopeAbs, {
+      scopeCaseSensitive: entry.caseSensitive,
+      routeCaseSensitive: route.caseSensitive,
+    });
+    const applicability = combineApplicability(
+      entry.applicability || DEFINITE,
+      scoped.applicability,
+    );
+    if (applicability !== NONE) {
+      chain.push(
+        withApplicability(entry.mw, applicability, [
+          ...(entry.applicabilityReasons || []),
+          ...scoped.reasons,
+        ]),
+      );
+    }
+  }
   out.push({
     framework: "express",
     method: route.method,
@@ -621,19 +812,18 @@ function emitRoute(route, prefix, accMw, partial, out) {
     pathConfidence: partial || dynamic ? "partial" : "full",
     ...(route.io ? { io: route.io } : {}),
   });
+  return true;
 }
 
 /** Absolute guard scope of a `use(path, mw)` entry attached under `prefix`. */
 function absScope(prefix, scope) {
   if (scope == null || scope === "" || scope === "/") return null;
-  // Wildcard patterns (`*`, `/api/*`) are not literal prefixes; treat them as
-  // host-wide rather than dropping the guard from every chain.
-  if (scope.includes("*")) return null;
   return joinPath(prefix, scope);
 }
 
 /** Depth-first walk of the router graph from a root, emitting fully-pathed routes. */
 function traverse(nodes, nodeId, prefix, inherited, partial, stack, ctx) {
+  if (ctx.budget && !ctx.budget.graph()) return;
   const node = nodes.get(nodeId);
   if (!node) return;
   ctx.visited.add(nodeId);
@@ -650,15 +840,20 @@ function traverse(nodes, nodeId, prefix, inherited, partial, stack, ctx) {
     });
   }
   for (const route of node.routes) {
-    const accMw = inherited.concat(own.filter((e) => appliesInOrder(e, route)));
-    emitRoute(route, prefix, accMw, partial, ctx.out);
+    const accMw = inherited.concat(beforeItem(own, route));
+    emitRoute(route, prefix, accMw, partial, ctx.out, ctx.budget);
   }
   for (const edge of node.edges) {
     if (stack.has(edge.targetId)) continue;
     const childPrefix = edge.mountPath === null ? prefix : joinPath(prefix, edge.mountPath);
-    const forChild = inherited
-      .concat(own.filter((e) => appliesInOrder(e, edge)))
-      .concat(edge.edgeMw.map((e) => ({ ...e, scopeAbs: null })));
+    const forChild = inherited.concat(beforeItem(own, edge)).concat(
+      edge.edgeMw.map((e) => ({
+        ...e,
+        scopeAbs: null,
+        applicability: DEFINITE,
+        applicabilityReasons: [],
+      })),
+    );
     const nextStack = new Set(stack).add(edge.targetId);
     traverse(nodes, edge.targetId, childPrefix, forChild, partial || edge.partial, nextStack, ctx);
   }
@@ -722,6 +917,7 @@ function scan(rootDir, opts = {}) {
   const diagnostics = [];
   const limits = scanLimits(opts);
   const started = Date.now();
+  const analysisBudget = createAnalysisBudget(limits, started);
   let failed = 0;
   let skipped = 0;
   let limited = false;
@@ -756,6 +952,7 @@ function scan(rootDir, opts = {}) {
   });
   const files = [];
   let totalBytes = 0;
+  const sourceManifest = [];
   for (let index = 0; index < filePaths.length; index++) {
     const file = filePaths[index];
     if (Date.now() - started > limits.timeoutMs) {
@@ -765,8 +962,10 @@ function scan(rootDir, opts = {}) {
       break;
     }
     let size;
+    let stat;
     try {
-      size = fs.statSync(file).size;
+      stat = fs.statSync(file);
+      size = stat.size;
     } catch (err) {
       failed++;
       diagnostics.push(`scan: could not stat source file ${file}: ${err.message}`);
@@ -797,6 +996,14 @@ function scan(rootDir, opts = {}) {
       diagnostics.push(`scan: could not read source file ${file}: ${err.message}`);
       continue;
     }
+    sourceManifest.push({
+      file,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+      ino: stat.ino,
+      sha256: crypto.createHash("sha256").update(code).digest("hex"),
+    });
     const model = analyzeFile(code, file, (message) => {
       diagnostics.push(`scan: could not parse ${file}: ${message}`);
     });
@@ -813,13 +1020,16 @@ function scan(rootDir, opts = {}) {
     complete: failed === 0 && !limited,
     scope,
   };
-  const resolve = createScopedResolver(root, filePaths);
+  const scopedResolve = createScopedResolver(root, filePaths);
+  const resolve = (fromFile, source, importKind) =>
+    analysisBudget.resolver() ? scopedResolve(fromFile, source, importKind) : null;
   resolveImportedHandlers(files, resolve);
-  const { nodes, stats } = buildGraph(files, resolve);
+  const { nodes, stats } = buildGraph(files, resolve, analysisBudget);
   const frameworkRegistries = STATIC_FRAMEWORK_ADAPTERS.map((adapter) => ({
     adapter,
     registry: adapter.build(files, resolve, root, {
       claimedExpressRegistrarSites: stats.attachedRegistrarSites,
+      analysisBudget,
     }),
   }));
   const claimedFrameworkSites = new Set(
@@ -837,7 +1047,7 @@ function scan(rootDir, opts = {}) {
     if (node.kind !== "app") continue;
     appNodes++;
     const id = applicationId(root, node);
-    const appCtx = { out: [], visited: ctx.visited, opaqueUses: [] };
+    const appCtx = { out: [], visited: ctx.visited, opaqueUses: [], budget: analysisBudget };
     traverse(nodes, node.id, "", [], false, new Set([node.id]), appCtx);
     for (const route of appCtx.out) route.applicationId = id;
     ctx.out.push(...appCtx.out);
@@ -861,10 +1071,9 @@ function scan(rootDir, opts = {}) {
   for (const node of nodes.values()) {
     if (ctx.visited.has(node.id) || node.routes.length === 0 || node.kind !== "router") continue;
     for (const route of node.routes) {
-      const accMw = node.globalMw
-        .filter((e) => appliesInOrder(e, route))
-        .map((e) => ({ ...e, scopeAbs: null }));
-      emitRoute(route, "", accMw, true, ctx.out);
+      const accMw = node.globalMw.map((e) => ({ ...e, scopeAbs: absScope("<dynamic>", e.scope) }));
+      const applicable = beforeItem(accMw, route);
+      emitRoute(route, "", applicable, true, ctx.out, analysisBudget);
     }
   }
   const orphan = ctx.out.length - reachable;
@@ -878,7 +1087,7 @@ function scan(rootDir, opts = {}) {
       if (claimedFrameworkSites.has(`${file.filePath}\0${route.line || 0}\0${route.method}`)) {
         continue;
       }
-      emitRoute({ ...route, file: file.filePath }, "", [], true, ctx.out);
+      emitRoute({ ...route, file: file.filePath }, "", [], true, ctx.out, analysisBudget);
       const key = `'${route.host}' in ${file.filePath}`;
       registrarHosts.set(key, (registrarHosts.get(key) || 0) + 1);
     }
@@ -886,7 +1095,7 @@ function scan(rootDir, opts = {}) {
   const out = ctx.out;
 
   const seen = new Set();
-  const routes = out.filter((r) => !seen.has(dedupeKey(r)) && seen.add(dedupeKey(r)));
+  let routes = out.filter((r) => !seen.has(dedupeKey(r)) && seen.add(dedupeKey(r)));
   for (const route of routes) {
     if (route.applicationId === undefined) route.applicationId = null;
   }
@@ -913,11 +1122,13 @@ function scan(rootDir, opts = {}) {
     opaqueSeen.add(key);
     return true;
   });
+  const gaps = [];
   for (const { registry } of frameworkRegistries) {
     routes.push(...registry.routes);
     applications.push(...registry.applications);
     globalMiddleware.push(...registry.globalMiddleware);
     diagnostics.push(...registry.diagnostics);
+    gaps.push(...(registry.gaps || []));
     for (const mount of registry.opaqueMounts || []) {
       const key = `${mount.applicationId || ""}\0${mount.path || ""}\0${mount.source.file}:${mount.source.line}`;
       if (!opaqueSeen.has(key)) {
@@ -943,16 +1154,117 @@ function scan(rootDir, opts = {}) {
     );
   }
   const registrarRoutes = [...registrarHosts.values()].reduce((total, count) => total + count, 0);
+  let serializedRouteBytes = 0;
+  routes = routes.filter((route) => {
+    const bytes = Buffer.byteLength(JSON.stringify(route));
+    if (serializedRouteBytes + bytes > limits.maxResultBytes) {
+      analysisBudget.reasons.add("resultBytes");
+      return false;
+    }
+    serializedRouteBytes += bytes;
+    return true;
+  });
+  for (const application of applications) {
+    application.routeCount = routes.filter(
+      (route) => route.applicationId === application.id,
+    ).length;
+  }
+  if (analysisBudget.reasons.size) {
+    limited = true;
+    scanCoverage.limited = true;
+    scanCoverage.complete = false;
+    const reasons = [...analysisBudget.reasons].sort();
+    diagnostics.push(`scan: post-parse analysis budget exhausted (${reasons.join(", ")})`);
+    gaps.push({
+      adapter: "express",
+      applicationId: null,
+      reasonCode: "analysis-budget-exhausted",
+      scope: null,
+      source: null,
+      count: 1,
+    });
+  }
   const orphanRoutes = routes.filter((route) => route.applicationId === null).length;
   const partialRoutes = routes.filter((route) => route.pathConfidence === "partial").length;
+  for (const mount of opaqueMounts) {
+    if (
+      gaps.some(
+        (gap) =>
+          gap.source?.file === mount.source?.file &&
+          gap.source?.line === mount.source?.line &&
+          gap.applicationId === mount.applicationId,
+      )
+    ) {
+      continue;
+    }
+    gaps.push({
+      adapter: "express",
+      applicationId: mount.applicationId,
+      reasonCode: "opaque-registration",
+      scope: mount.pathConfidence === "full" ? mount.path : null,
+      source: mount.source,
+      count: 1,
+    });
+  }
+  for (const route of routes) {
+    if (route.applicationId !== null && route.pathConfidence !== "partial") continue;
+    if (
+      gaps.some(
+        (gap) =>
+          gap.source?.file === route.source?.file &&
+          gap.source?.line === route.source?.line &&
+          gap.applicationId === route.applicationId,
+      )
+    ) {
+      continue;
+    }
+    gaps.push({
+      adapter: route.framework || "express",
+      applicationId: route.applicationId,
+      reasonCode: route.applicationId === null ? "unattached-route" : "partial-route-registration",
+      scope: null,
+      source: route.source,
+      count: 1,
+    });
+  }
   const routeGraph = {
-    complete: orphanRoutes === 0 && partialRoutes === 0 && opaqueMounts.length === 0,
+    complete:
+      orphanRoutes === 0 && partialRoutes === 0 && opaqueMounts.length === 0 && gaps.length === 0,
     orphanRoutes,
     partialRoutes,
     registrarRoutes,
     opaqueMounts,
+    gaps,
+    resolutionTraces: scopedResolve.traces,
   };
-  return { routes, globalMiddleware, applications, diagnostics, scanCoverage, routeGraph };
+  const result = {
+    routes,
+    globalMiddleware,
+    applications,
+    diagnostics,
+    scanCoverage,
+    routeGraph,
+  };
+  Object.defineProperty(result, ANALYSIS_STATE, {
+    value: Object.freeze({
+      sourceManifest: Object.freeze(sourceManifest.map((entry) => Object.freeze(entry))),
+      resolutionManifest: scopedResolve.dependencyManifest(),
+      scanScopeFingerprint: scope.fingerprint,
+      sourceFiles: Object.freeze([...filePaths]),
+      parsedModels: files,
+      resolver: resolve,
+      metrics: Object.freeze({ parsedFiles: files.length, sourceReads: sourceManifest.length }),
+    }),
+    enumerable: false,
+  });
+  return result;
 }
 
-module.exports = { scan, scanLimits, createScanScope, listSourceFiles, buildGraph };
+module.exports = {
+  scan,
+  scanLimits,
+  createScanScope,
+  listSourceFiles,
+  buildGraph,
+  ANALYSIS_STATE,
+};

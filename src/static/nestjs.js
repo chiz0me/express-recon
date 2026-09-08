@@ -239,6 +239,7 @@ function expressionRef(node, model, ctx) {
         source: binding.source,
         exportName: binding.exportName,
         props: binding.props || [],
+        importKind: binding.importKind,
       };
     }
     return { type: "unknown", label: value.name };
@@ -253,6 +254,7 @@ function expressionRef(node, model, ctx) {
           source: binding.source,
           exportName: binding.exportName,
           props: [...(binding.props || []), value.property.name],
+          importKind: binding.importKind,
         };
       }
     }
@@ -405,6 +407,22 @@ function returnedExpression(fn) {
   );
 }
 
+function methodValueBindings(fn, inherited) {
+  const bindings = new Map(inherited || []);
+  for (const parameter of fn?.params || []) {
+    if (parameter.type === "Identifier") bindings.delete(parameter.name);
+  }
+  for (const statement of fn?.body?.body || []) {
+    if (statement.type !== "VariableDeclaration" || statement.kind !== "const") continue;
+    for (const declaration of statement.declarations || []) {
+      if (declaration.id.type === "Identifier" && declaration.init) {
+        bindings.set(declaration.id.name, declaration.init);
+      }
+    }
+  }
+  return bindings;
+}
+
 function nestIo(method, httpMethod, ctx, className, model) {
   const fn = method.value;
   const native = nativeHandlerIo(fn, ctx);
@@ -434,7 +452,7 @@ function nestIo(method, httpMethod, ctx, className, model) {
   const returned = returnedExpression(fn);
   if (returned) {
     const schema = schemaFromExpression(returned, {
-      bindings: ctx.valueBindings,
+      bindings: methodValueBindings(fn, ctx.valueBindings),
       consts: ctx.consts,
     });
     if (Object.keys(schema).length) {
@@ -880,6 +898,7 @@ function collectExports(program, model, ctx) {
                 source: node.source.value,
                 exportName: specifier.local.name,
                 props: [],
+                importKind: "import",
               }
             : expressionRef(specifier.local, model, ctx),
         );
@@ -1011,7 +1030,7 @@ function resolveClass(fromFile, ref, models, resolve, seen = new Set()) {
   const current = models.get(fromFile);
   if (ref.type === "local") return current?.classes.get(ref.name) || null;
   if (ref.type !== "module") return null;
-  const target = resolve(fromFile, ref.source);
+  const target = resolve(fromFile, ref.source, ref.importKind);
   const model = target && models.get(target);
   if (!model) return null;
   const normalized = normalizedModuleRef(ref);
@@ -1023,7 +1042,13 @@ function resolveClass(fromFile, ref, models, resolve, seen = new Set()) {
     for (const source of model.exportAll) {
       const value = resolveClass(
         target,
-        { type: "module", source, exportName: normalized.exportName, props: normalized.props },
+        {
+          type: "module",
+          source,
+          exportName: normalized.exportName,
+          props: normalized.props,
+          importKind: "import",
+        },
         models,
         resolve,
         seen,
@@ -1040,6 +1065,7 @@ function resolveClass(fromFile, ref, models, resolve, seen = new Set()) {
 }
 
 function traverseModules(rootModule, models, resolve, state, stack = new Set()) {
+  if (state.analysisBudget && !state.analysisBudget.graph()) return;
   if (!rootModule || rootModule.kind !== "module" || stack.has(rootModule.id)) return;
   stack.add(rootModule.id);
   state.modules.set(rootModule.id, rootModule);
@@ -1234,10 +1260,12 @@ function emitController(controller, options, output) {
     middlewareForRoute,
     models,
     resolve,
+    analysisBudget,
   } = options;
   const normalizedRoot = rootPrefix ? joinPath("", rootPrefix) : "";
   for (const controllerPath of controller.paths) {
     for (const route of controller.routes) {
+      if (analysisBudget && !analysisBudget.route()) return;
       const dynamic = controllerPath === null || route.path === null;
       const pathValue = joinPath(
         joinPath(joinPath(normalizedRoot, modulePrefix), controllerPath ?? "<dynamic>"),
@@ -1274,12 +1302,13 @@ function nestApplicationId(root, application) {
 }
 
 /** Build a framework-neutral route registry from the repository's NestJS models. */
-function buildNestjsRegistry(files, resolve, root) {
+function buildNestjsRegistry(files, resolve, root, options = {}) {
   const models = new Map(files.map((file) => [file.filePath, file.frameworks.nestjs]));
   const routes = [];
   const applications = [];
   const globalMiddleware = [];
   const diagnostics = files.flatMap((file) => file.frameworks.nestjs.diagnostics);
+  const gaps = [];
   const assigned = new Set();
   let unresolved = 0;
   for (const model of models.values()) {
@@ -1290,6 +1319,7 @@ function buildNestjsRegistry(files, resolve, root) {
         controllers: new Map(),
         globalMiddleware: [...application.globalMiddleware],
         unresolved: 0,
+        analysisBudget: options.analysisBudget,
       };
       if (rootModule?.kind === "module") traverseModules(rootModule, models, resolve, state);
       else state.unresolved++;
@@ -1316,6 +1346,7 @@ function buildNestjsRegistry(files, resolve, root) {
                 middlewareForNestRoute(state, controller, controllerPath, route, models, resolve),
               models,
               resolve,
+              analysisBudget: options.analysisBudget,
               partial:
                 application.prefixPartial ||
                 application.versioning ||
@@ -1336,6 +1367,16 @@ function buildNestjsRegistry(files, resolve, root) {
         globalMiddleware: state.globalMiddleware,
       });
       globalMiddleware.push(...state.globalMiddleware);
+      if (state.unresolved > 0) {
+        gaps.push({
+          adapter: "nestjs",
+          applicationId: id,
+          reasonCode: "unresolved-module-reference",
+          scope: application.prefixPartial ? null : joinPath("", application.prefix) || "/",
+          source: { file: application.file, line: application.line },
+          count: state.unresolved,
+        });
+      }
       unresolved += state.unresolved;
     }
   }
@@ -1354,11 +1395,22 @@ function buildNestjsRegistry(files, resolve, root) {
           middlewareForRoute: () => [],
           models,
           resolve,
+          analysisBudget: options.analysisBudget,
           partial: true,
         },
         routes,
       );
       orphanRoutes += routes.length - before;
+      if (routes.length > before) {
+        gaps.push({
+          adapter: "nestjs",
+          applicationId: null,
+          reasonCode: "unattached-controller",
+          scope: null,
+          source: { file: controller.file, line: controller.line },
+          count: routes.length - before,
+        });
+      }
     }
   }
   if (orphanRoutes) {
@@ -1371,7 +1423,7 @@ function buildNestjsRegistry(files, resolve, root) {
       `${unresolved} NestJS module or routing reference(s) could not be resolved statically; affected paths are partial-confidence.`,
     );
   }
-  return { routes, applications, globalMiddleware, diagnostics, orphanRoutes };
+  return { routes, applications, globalMiddleware, diagnostics, gaps, orphanRoutes };
 }
 
 module.exports = { analyzeNestjs, buildNestjsRegistry };

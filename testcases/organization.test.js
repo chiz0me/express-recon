@@ -605,6 +605,32 @@ test("GitHub organization enumeration follows pagination and sends versioned aut
   assert.doesNotMatch(JSON.stringify(result), /token-for-test/);
 });
 
+test("GitHub enumeration stops streaming response bodies at the byte limit", async () => {
+  let textBuffered = false;
+  const body = {
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.alloc(8 * 1024 * 1024, 0x20);
+      yield Buffer.alloc(8 * 1024 * 1024 + 1, 0x20);
+    },
+  };
+  await assert.rejects(
+    listOrganizationRepositories("acme", {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body,
+        async text() {
+          textBuffered = true;
+          return "[]";
+        },
+      }),
+    }),
+    /16 MiB page limit/,
+  );
+  assert.equal(textBuffered, false);
+});
+
 test("organization scans isolate failures, classify incomplete negatives, and honor concurrency", async () => {
   const repositories = [
     repository("active-express"),
@@ -935,9 +961,8 @@ test("scan-org --update reuses durable unchanged artifacts and creates a delta",
     assert.equal(scans, 1);
     assert.equal(await run(true), 0);
     assert.equal(scans, 1);
-    const inventory = JSON.parse(
-      fs.readFileSync(path.join(output, "organization-inventory.json"), "utf8"),
-    );
+    const inventoryFile = path.join(output, "organization-inventory.json");
+    const inventory = JSON.parse(fs.readFileSync(inventoryFile, "utf8"));
     assert.equal(inventory.update.requested, true);
     assert.equal(inventory.update.repositoriesReused, 1);
     assert.equal(inventory.delta.summary.repositoriesChanged, 0);
@@ -945,9 +970,17 @@ test("scan-org --update reuses durable unchanged artifacts and creates a delta",
     assert.equal(fs.existsSync(path.join(output, "comparison-baseline")), false);
     assert.equal(fs.existsSync(path.join(output, "organization-checkpoint.json")), false);
 
-    fs.appendFileSync(path.join(output, "repositories", "api", "repo-scan.json"), "corrupt");
+    inventory.evidenceCompatibilityVersion = "3";
+    fs.writeFileSync(inventoryFile, JSON.stringify(inventory, null, 2) + "\n");
     assert.equal(await run(true), 0);
     assert.equal(scans, 2);
+    const refreshed = JSON.parse(fs.readFileSync(inventoryFile, "utf8"));
+    assert.equal(refreshed.evidenceCompatibilityVersion, "4");
+    assert.equal(refreshed.update.repositoriesReused, 0);
+
+    fs.appendFileSync(path.join(output, "repositories", "api", "repo-scan.json"), "corrupt");
+    assert.equal(await run(true), 0);
+    assert.equal(scans, 3);
 
     visible = [];
     assert.equal(await run(true), 0);
@@ -1538,6 +1571,27 @@ test("scan-org resumes valid artifacts, retries damaged work, and rejects scope 
     );
     const checkpoint = path.join(output, "organization-checkpoint.json");
     assert.ok(fs.existsSync(checkpoint));
+
+    const currentCheckpoint = fs.readFileSync(checkpoint, "utf8");
+    const obsoleteCheckpoint = JSON.parse(currentCheckpoint);
+    obsoleteCheckpoint.compatibilityVersion = "3";
+    fs.writeFileSync(checkpoint, JSON.stringify(obsoleteCheckpoint, null, 2) + "\n");
+    let obsoleteResumeEntries;
+    await assert.rejects(
+      runScanOrganization(
+        { ...args, resume: true },
+        {
+          environment: {},
+          async scanOrganization(_organization, options) {
+            obsoleteResumeEntries = options.resumeEntries;
+            throw new Error("stop after obsolete checkpoint check");
+          },
+        },
+      ),
+      /stop after obsolete checkpoint check/,
+    );
+    assert.deepEqual(obsoleteResumeEntries, []);
+    fs.writeFileSync(checkpoint, currentCheckpoint);
 
     let resumedScannerCalls = 0;
     await assert.rejects(

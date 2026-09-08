@@ -112,13 +112,28 @@ function authStatusFor(middlewares, authMiddleware, validated = false, authWrapp
     matched.push({ name, ...grant });
   };
   for (const mw of middlewares) {
-    applyGrant(mw.name);
+    const possible = mw.applicability === "possible";
     const inner = mw.inner || [];
-    if (transparentWrappers.has(mw.name)) {
-      // Only configured pass-through wrappers may prove an inner guard. An
-      // arbitrary call could conditionally disable or merely reference it.
-      for (const name of inner) applyGrant(name);
+    const innerPaths = Array.isArray(mw.innerPaths) ? mw.innerPaths : null;
+    if (possible) {
+      // Possible scope/control-flow overlap is useful review evidence, but it
+      // cannot prove that a recognized guard runs for every request.
+      if (grantFor(mw.name) || inner.some((name) => grantFor(name)) || isOpaque(mw)) opaque = true;
+      continue;
+    }
+    applyGrant(mw.name);
+    if (transparentWrappers.has(mw.name) && innerPaths) {
+      for (const reference of innerPaths) {
+        if (reference.wrappers.every((name) => transparentWrappers.has(name))) {
+          applyGrant(reference.name);
+        } else if (grantFor(reference.name)) {
+          opaque = true;
+        }
+      }
     } else if (inner.some((name) => grantFor(name))) {
+      // Legacy flat descriptors lose the wrapper nesting that distinguishes
+      // `safe(auth)` from `safe(factory(auth))`. Keep the name as review
+      // evidence, but never promote it to guaranteed execution.
       opaque = true;
     }
     if (isOpaque(mw)) opaque = true;

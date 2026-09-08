@@ -1,10 +1,12 @@
 "use strict";
 
+const { EXPRESS_METHODS } = require("../http-methods");
+
 const MOUNT_KEY = "__routeRegistryMountPath";
 const SOURCE_KEY = "__routeRegistrySource";
 const PATCHED = Symbol.for("express-recon.instrumented");
 
-const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options", "all"];
+const HTTP_METHODS = EXPRESS_METHODS;
 
 /**
  * Tag every layer added by a `use()` call with its original mount-path string.

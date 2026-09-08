@@ -368,7 +368,8 @@ block before its result is returned. At concurrency `N`, at most `N` bounded
 snapshots are active in normal operation. Each full result is written immediately
 under `repositories/<name>/` in the selected/default output and released; the
 aggregate `organization-inventory.json` contains compact evidence, summaries,
-statuses, coverage, and relative artifact paths. Detailed scans are never
+statuses, coverage, an `evidenceCompatibilityVersion`, and relative artifact
+paths. Detailed scans are never
 collected into one CLI stdout payload.
 
 #### Baseline change reports
@@ -487,18 +488,18 @@ observation for that resumed run even if its default branch advanced.
 
 The checkpoint fingerprint binds the checkpoint compatibility generation,
 organization, `--max-repos`, archived/fork filters, configuration, and effective
-scan scope. Explicitly compatible releases can resume older checkpoints after
-validating both the legacy fingerprint and every artifact digest; the checkpoint
-is then upgraded atomically. On migration to framework-aware scans, positive
-legacy Express entries remain reusable but legacy negative entries are removed
-from the checkpoint and scanned again. A scanner change that invalidates prior
-evidence increments the compatibility generation and rejects the checkpoint
-instead of mixing incompatible results. `--concurrency` and the current token are
-deliberately not fingerprinted: concurrency does not change evidence, and every
-resume is still restricted to repositories visible during its fresh API
-enumeration. Run with `--update` to discover current upstream changes while
-reusing unchanged results, or `--overwrite` to scan every current default branch
-and to change the repository cap/scope in an existing output directory.
+scan scope. A scanner change that invalidates prior evidence increments the
+compatibility generation. Older-generation and pre-generation checkpoints stay
+readable but contribute no reusable repository entries, so resume rescans them;
+a future or scope-mismatched checkpoint is rejected. Completed organization
+inventories carry the same `evidenceCompatibilityVersion`, and `--update`
+rescans all selected repositories when that generation is absent or stale.
+`--concurrency` and the current token are deliberately not fingerprinted:
+concurrency does not change evidence, and every resume is still restricted to
+repositories visible during its fresh API enumeration. Run with `--update` to
+discover current upstream changes while reusing compatible unchanged results,
+or `--overwrite` to scan every current default branch and to change the
+repository cap/scope in an existing output directory.
 
 The checkpoint remains after an interrupted or aggregate-incomplete run. It is
 deleted only after a complete `organization-inventory.json` is successfully
@@ -637,7 +638,7 @@ non-regular auto-detected inputs are rejected. Pass `--input` to select a direct
 Swagger 2 JSON/YAML path, or any directory containing one.
 
 Within a selected directory, detection prefers the organization aggregate, then
-a repository scan, then a route report, followed by `openapi.json`,
+a Gin `fleet.json`, a repository scan, then a route report, followed by `openapi.json`,
 `openapi.yaml`, `openapi.yml`, `swagger.json`, `swagger.yaml`, and `swagger.yml`.
 Without `--out`, a directory input renders to the sibling `<input>-html`; a
 direct conventional filename renders from its parent to `<parent>-html`; any
@@ -647,6 +648,46 @@ Conventional files from one input folder share the same derived site; use
 `--out` to retain multiple views at once.
 `render` never scans source, acquires a repository, executes target code,
 contacts the network, or invokes a model.
+
+Optional Gin output support is confined to rendering. A saved `gin-recon`
+`fleet.json` can be rendered directly, from its output directory, or from a bundle
+whose immediate child contains the fleet. With an organization inventory, a fleet
+in the same selected folder or an immediate child is included only when its
+producer and organization match. No repository names are hard-coded. Missing
+companions leave existing behavior unchanged; malformed, mismatched, or ambiguous
+optional companions are skipped with a warning. Explicit malformed or ambiguous
+fleet inputs fail clearly. The importer does not read `.clones`, run Go tooling,
+load configuration/checkpoint files, or copy the other tool's HTML.
+
+The main organization table contains complete and incomplete supported scan
+entries, grouped by status and then repository name. Other statuses (including
+failed, inconclusive, not-express, and not-go-module) are grouped in a separate
+reference table, collapsed by default. Each table has independent search,
+completion/status and framework filters, and result counts. These filters combine
+with one another. Framework choices come from saved metadata; a mixed-framework
+repository matches each of its frameworks and the multi-framework option.
+Inventory statistics, imported Gin statistics, and scope remain visible above the
+repository tables; they are not hidden inside the collapsed reference section.
+Completion/status and framework have separate columns with content-sized badges;
+mixed-framework labels wrap without stretching the status badge across the cell.
+
+Gin module route reports are normalized only for display. Duplicate module report
+references are counted once, and missing/invalid route reports make that imported
+scan incomplete. Per-module OpenAPI documents use the same offline Swagger viewer.
+Middleware candidates are browsable as unconfirmed suggestions; public/unknown/
+proven totals remain explicitly labelled as producer results. No configured auth
+middleware is prominently flagged. Recognized source JSON files are retained under
+`data/gin-<number>.json` with download links and tracked in the render manifest.
+Do not share these files outside the audience authorized to access the original
+reports: they retain original repository metadata and evidence.
+
+When both scanners report the same repository, the main table lists it once and
+links separate scanner reports. Route totals count both tools' observations, not
+unique endpoints; they are not a cross-scanner security verdict. Baselines compare
+only the original Express inventory. Referenced Gin artifacts must stay inside
+their fleet folder after real-path resolution and are limited to 32 MiB per file,
+256 MiB total, 20,000 targets, and 500 modules per target. Imported files are
+optional evidence, not inputs to discovery, auditing, policies, or reconciliation.
 
 Optional `--baseline` accepts a prior organization report or output directory
 and computes the same bounded delta while rendering, so two existing scans can
@@ -659,14 +700,15 @@ The output contains:
 - `repositories/<name>.html` for confirmed supported repositories and
   inconclusive scans with an available detailed artifact; definite unsupported,
   skipped, empty, and failed entries remain index-only;
-- local `assets/report.css` and `assets/report.js` with no CDN dependency;
+- embedded report CSS/JavaScript and data-URI branding, with auxiliary
+  `assets/report.css` and `assets/report.js` retained for compatibility;
 - for a standalone OpenAPI 3 or Swagger 2 input, the packaged Swagger UI CSS/bundle, a
   local high-contrast light-canvas override, its license notices, and a safely
   serialized local configuration asset instead of report assets;
 - for a repository or organization input, `openapi/<name>.html` plus a local
   configuration script for each retained OpenAPI 3 or Swagger 2 specification
-  attached to a confirmed supported entry; those pages share one packaged
-  Swagger UI bundle, while unsupported entries never produce API pages;
+  attached to a confirmed supported entry; each page embeds the packaged
+  Swagger UI bundle and specification, while unsupported entries never produce API pages;
 - `organization-delta.json` plus overview metrics and per-repository route
   changes when the organization input contains baseline evidence; and
 - `render-manifest.json`, recording the source kind, generated pages, and
@@ -681,8 +723,13 @@ manifest path fails closed instead of overwriting or deleting unknown content.
 Organization artifact references are resolved inside the input directory and
 real-path checked so traversal and escaping symlinks are not followed. Report
 values are treated as untrusted text and HTML-escaped. Generated pages use a
-restrictive content security policy and do not fetch JSON at viewing time, so a
-site copied into a CI artifact remains usable through `file://`. Missing, unsafe,
+restrictive content security policy and do not fetch JSON at viewing time. CSS,
+JavaScript, logo, and favicon are embedded directly into each page, so Chrome/Brave
+do not need to load sibling files from opaque `file://` origins. SHA-256 hashes
+authorize only the generated style/script blocks; arbitrary inline execution,
+external styles/scripts, and network connections remain blocked. API pages are
+larger because each includes Swagger UI. Keep the site directory together for
+navigation between repository/API pages and original JSON downloads. Missing, unsafe,
 or damaged per-repository artifacts produce an aggregate warning rather than
 hiding the remaining organization evidence. Root input errors exit `1`.
 
@@ -880,7 +927,7 @@ validated level fail closed.
 | Auth grant           | `authMiddleware.<name>.tag`, `authMiddleware.<name>.tags`, `authMiddleware.<name>.roles`, `authMiddleware.<name>.scopes`                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Accepted-public item | `acceptedPublic[].applicationId`, `acceptedPublic[].method`, `acceptedPublic[].path`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | OpenAPI              | `openapi.securityByTag`, `openapi.securitySchemes`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Scan                 | `scan.exclude`, `scan.ignoreFile`, `scan.include`, `scan.includeHidden`, `scan.maxFileBytes`, `scan.maxFiles`, `scan.maxTotalBytes`, `scan.timeoutMs`                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Scan                 | `scan.exclude`, `scan.ignoreFile`, `scan.include`, `scan.includeHidden`, `scan.maxFileBytes`, `scan.maxFiles`, `scan.maxGraphExpansions`, `scan.maxResolverHops`, `scan.maxResultBytes`, `scan.maxRoutes`, `scan.maxTotalBytes`, `scan.timeoutMs`                                                                                                                                                                                                                                                                                                                                                  |
 | Runtime boot         | `boot.env`, `boot.inheritEnv`, `boot.maxOutputBytes`, `boot.sandbox`, `boot.settleMs`, `boot.stubModules`, `boot.timeoutMs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Policy               | `policies[].id`, `policies[].description`, `policies[].severity`, `policies[].match`, `policies[].require`, `policies[].exceptions`, `policies[].message`, `policies[].recommendation`                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Policy selector      | `policies[].match.applicationIds`, `policies[].match.methods`, `policies[].match.paths`, `policies[].match.excludePaths`, `policies[].match.authStatuses`, `policies[].match.tags`, `policies[].match.roles`, `policies[].match.scopes`                                                                                                                                                                                                                                                                                                                                                            |
@@ -910,8 +957,10 @@ A string is shorthand for one auth tag. Structured grants may contain `tag`,
 `authenticated` tag.
 
 An inner name such as `requireAuth` inside `asyncHandler(requireAuth)` proves
-auth only when `asyncHandler` is explicitly listed in `authWrappers`. Otherwise
-the route is `unknown`, not `proven`.
+auth only when `asyncHandler` is explicitly listed in `authWrappers`. Every
+wrapper in a nested expression must be listed: allowing `safe` does not make
+`safe(maybe(requireAuth))` proven unless `maybe` is also reviewed as transparent.
+Otherwise the route is `unknown`, not `proven`.
 
 ### Accepted-public baseline
 
@@ -929,8 +978,12 @@ acceptedPublic:
 Accepted routes remain `authStatus: public` and gain `accepted: true`; their
 `public-route` finding and `--fail-on public` match are suppressed. An entry
 that no longer matches a public route emits a `stale-baseline` finding.
-Accepted-public and policy method selectors support `GET`, `POST`, `PUT`,
-`PATCH`, `DELETE`, `HEAD`, `OPTIONS`, `TRACE`, and `ALL`.
+Accepted-public and policy method selectors support the OpenAPI verbs (`GET`,
+`POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`, and `TRACE`), `ALL`, and
+the explicit extension/WebDAV methods recognized by Node and Express, such as
+`CONNECT`, `PROPFIND`, and `PURGE`. Non-OpenAPI registrations remain inventory
+evidence and are disclosed under `x-express-recon.unsupportedOperations` rather
+than silently dropped from generated OpenAPI.
 
 ### OpenAPI security mapping
 
@@ -1008,10 +1061,18 @@ scan:
   maxFiles: 50000
   maxFileBytes: 5242880
   maxTotalBytes: 262144000
+  maxResolverHops: 250000
+  maxGraphExpansions: 500000
+  maxRoutes: 100000
+  maxResultBytes: 67108864
   timeoutMs: 120000
 ```
 
-Defaults are 50,000 files, 5 MiB per file, 250 MiB total source, and 120 seconds.
+Defaults are 50,000 files, 5 MiB per file, 250 MiB total source, 250,000 local
+resolver hops, 500,000 post-parse graph expansions, 100,000 emitted route
+registrations, 64 MiB of serialized route evidence, and 120 seconds. Exhausting
+any post-parse budget preserves bounded partial evidence, sets coverage and the
+route graph incomplete, and adds an `analysis-budget-exhausted` gap.
 CLI `--include`/`--exclude` values are repeatable and are combined with config.
 `--no-ignore-file` overrides both the default and a configured ignore file.
 An explicit `--ignore-file` may be absolute (useful for one trusted CI policy
@@ -1117,6 +1178,20 @@ Important fields:
 - `routes[].pathConfidence`: `full` or `partial`.
 - `routes[].middlewares[].stage`: optional lifecycle role (`middleware`, `hook`,
   `guard`, `interceptor`, `pipe`, or `filter`) when the source API proves it.
+- `routes[].middlewares[].applicability`: `possible` when path or control-flow
+  evidence cannot prove that the middleware always executes for the route. The
+  field is omitted for definite middleware. Possible middleware is retained for
+  review but cannot prove authentication or satisfy positive middleware policy
+  requirements.
+- `routes[].middlewares[].applicabilityReasons`: stable explanations such as
+  `path-pattern`, `unknown-mount`, `case-sensitivity`, `execution-context`, or
+  `cross-file-order` whenever applicability is `possible`;
+  `ambiguous-use-argument` identifies a leading `.use()` value that might be a
+  path rather than middleware, and `unknown-route` identifies an unresolved
+  route pattern.
+- `routes[].middlewares[].innerPaths`: names referenced in a wrapper expression
+  together with every intervening wrapper. `inner` remains the flat display and
+  search projection.
 - `routes[].authStatus`, tags, roles, scopes, and `authEvidence`: audit only.
 - `routes[].presence` and `observations`: hybrid evidence (`both`,
   `static-only`, `runtime-only`) without discarding either scanner's view.
@@ -1127,7 +1202,10 @@ Important fields:
   paths are represented as `<external>/<basename>` rather than leaked.
 - `routeGraph`: whether every emitted route was assigned to an app and resolved
   to a full path, plus `orphanRoutes`, `partialRoutes`, `registrarRoutes`, and
-  evidence for possible opaque route-provider mounts. A false `complete` value
+  evidence for possible opaque route-provider mounts. `gaps` retains structured
+  per-adapter unresolved obligations even when no route was emitted, while
+  bounded `resolutionTraces` explains unresolved first-party imports and
+  heuristic source-tree/base-URL resolutions. A false `complete` value
   prevents documentation-only operations from being asserted stale without
   further evidence and matches `--fail-on incomplete`.
 - `summary`, `findings`, normalized `policies`, and applied
@@ -1255,7 +1333,8 @@ registration, registrar functions, computed paths/scopes, unresolved dependency
 injection, bare-package routers/plugins, Nest host/version routing and global
 prefix exclusions, and unsupported resolution chains. A dynamic Nest middleware
 scope becomes opaque `unknown` middleware so it cannot falsely prove a route
-public or authenticated. `tsconfig extends` chains are not followed. Express
+public or authenticated. JSONC `tsconfig extends` chains are followed inside
+the scan root with cycle and depth bounds. Express
 regex/computed guard scopes are conservatively treated as host-wide rather than
 used to prove a route public. Standalone Fastify plugin routes without a local
 root are retained as partial evidence when the function uses a conventional

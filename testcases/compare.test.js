@@ -45,6 +45,30 @@ test("compareReports detects route changes and auth regressions", () => {
   assert.match(delta.authRegressions[0].explanation, /configuration|middleware/i);
 });
 
+test("incomplete current evidence does not claim removals or resolved findings", () => {
+  const removed = route("GET", "/possibly-still-present", "public");
+  const finding = {
+    id: "public-route",
+    method: "GET",
+    path: "/possibly-still-present",
+    severity: "high",
+    message: "Public route",
+    source: removed.source,
+  };
+  const baseline = report([removed], [finding]);
+  const current = {
+    ...report([], []),
+    scanCoverage: { complete: false },
+    routeGraph: { complete: true, orphanRoutes: 0, partialRoutes: 0, opaqueMounts: [], gaps: [] },
+  };
+  const delta = compareReports(baseline, current);
+  assert.equal(delta.summary.removedRoutes, 0);
+  assert.equal(delta.summary.resolvedFindings, 0);
+  assert.equal(delta.summary.unverifiedRemovedRoutes, 1);
+  assert.equal(delta.summary.unverifiedResolvedFindings, 1);
+  assert.deepEqual(delta.unverifiedRemovedRoutes[0].absenceEvidence.reasons, ["scan-incomplete"]);
+});
+
 test("compareReports reports semantic contract changes without source-line noise", () => {
   const before = route("POST", "/things", "public", 1);
   before.io = {
@@ -100,6 +124,26 @@ test("compareReports reports semantic contract changes without source-line noise
     compareReports(report([schemaBefore]), report([schemaAfter])).summary.changedRoutes,
     1,
   );
+});
+
+test("duplicate route alternatives are compared as semantic multisets", () => {
+  const first = route("GET", "/duplicate", "public");
+  first.io = { request: { query: ["first"] } };
+  const second = route("GET", "/duplicate", "public", 2);
+  second.io = { request: { query: ["second"] } };
+  const changedSecond = structuredClone(second);
+  changedSecond.io.request.query = ["changed"];
+
+  const delta = compareReports(report([first, second]), report([first, changedSecond]));
+  assert.equal(delta.summary.addedRoutes, 0);
+  assert.equal(delta.summary.removedRoutes, 0);
+  assert.equal(delta.summary.changedRoutes, 1);
+  assert.deepEqual(delta.changedRoutes[0].changedFields, ["registrations"]);
+  assert.equal(delta.changedRoutes[0].before.registrations.length, 2);
+  assert.equal(delta.changedRoutes[0].after.registrations.length, 2);
+
+  const reordered = compareReports(report([first, second]), report([second, first]));
+  assert.equal(reordered.summary.changedRoutes, 0);
 });
 
 test("schema 2 comparisons keep identical routes in separate applications independent", () => {

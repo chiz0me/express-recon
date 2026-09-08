@@ -467,6 +467,60 @@ test("handler-local schema bindings stay isolated by lexical function", () =>
     },
   ));
 
+test("handler parameters shadow module schema values instead of leaking their shape", () =>
+  temporaryRepository(
+    {
+      "app.js": `
+        const express = require("express");
+        const app = express();
+        const result = { leaked: true };
+        app.get("/shadow", (_req, res, result) => res.json(result));
+        app.get("/local", (_req, res) => {
+          const result = { local: true };
+          res.json(result);
+        });
+      `,
+    },
+    (root) => {
+      const routes = reportFor(root).routes;
+      const shadow = routes.find((route) => route.path === "/shadow");
+      const local = routes.find((route) => route.path === "/local");
+      assert.equal(
+        (shadow.io?.schemas?.responses || []).some(
+          (response) => response.contract.schema.properties?.leaked,
+        ),
+        false,
+      );
+      assert.equal(local.io.schemas.responses[0].contract.schema.properties.local.type, "boolean");
+    },
+  ));
+
+test("handler schema evidence follows bounded local re-export chains", () =>
+  temporaryRepository(
+    {
+      "app.js": `
+        import express from "express";
+        import { getUser } from "./barrel-a.js";
+        const app = express();
+        app.get("/users", getUser);
+      `,
+      "barrel-a.js": 'export { getUser } from "./barrel-b.js";',
+      "barrel-b.js": 'export { getUser } from "./handler.js";',
+      "handler.js": `
+        export function getUser(req, res) {
+          res.json({ id: req.query.id, active: true });
+        }
+      `,
+    },
+    (root) => {
+      const route = reportFor(root).routes.find((item) => item.path === "/users");
+      assert.equal(route.io.handlerResolved, true);
+      assert.deepEqual(route.io.request.query, ["id"]);
+      const response = route.io.schemas.responses.find((item) => item.status === 200);
+      assert.equal(response.contract.schema.properties.active.type, "boolean");
+    },
+  ));
+
 test("Fastify route schemas outrank handler reads and expose drift", () =>
   temporaryRepository(
     {

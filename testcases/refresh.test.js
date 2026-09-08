@@ -91,6 +91,8 @@ test("refresh uses durable defaults, computes deltas, and renders automatically"
       authImprovements: 0,
       newFindings: 0,
       resolvedFindings: 0,
+      unverifiedRemovedRoutes: 0,
+      unverifiedResolvedFindings: 0,
     });
     const unreviewedGate = runRefresh(root, ["--fail-on", "enrichment-unreviewed"], 2);
     assert.match(unreviewedGate.stderr, /matched --fail-on enrichment-unreviewed/);

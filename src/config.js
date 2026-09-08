@@ -7,6 +7,7 @@ const { validateAuthMiddleware, validateAuthWrappers } = require("./classify");
 const { normalizePolicies } = require("./policies");
 const { runtimeLimits } = require("./runtime/execute");
 const { scanLimits } = require("./static/scan");
+const { REPORT_METHODS } = require("./http-methods");
 
 const CONFIG_KEYS = new Set([
   "acceptedPublic",
@@ -24,22 +25,16 @@ const SCAN_KEYS = new Set([
   "includeHidden",
   "maxFileBytes",
   "maxFiles",
+  "maxGraphExpansions",
+  "maxResolverHops",
+  "maxResultBytes",
+  "maxRoutes",
   "maxTotalBytes",
   "timeoutMs",
 ]);
 const OPENAPI_KEYS = new Set(["securityByTag", "securitySchemes"]);
 const ACCEPTED_PUBLIC_KEYS = new Set(["applicationId", "method", "path"]);
-const ROUTE_METHODS = new Set([
-  "GET",
-  "POST",
-  "PUT",
-  "PATCH",
-  "DELETE",
-  "HEAD",
-  "OPTIONS",
-  "TRACE",
-  "ALL",
-]);
+const ROUTE_METHODS = new Set(REPORT_METHODS);
 
 function plainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -58,10 +53,10 @@ function stringArray(value, label) {
 
 function acceptedPublicKey(entry, index) {
   if (typeof entry === "string") {
-    if (
-      entry !== entry.trim() ||
-      !/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|ALL) \/[^\r\n]*$/.test(entry)
-    ) {
+    const separator = entry.indexOf(" ");
+    const method = separator < 0 ? "" : entry.slice(0, separator);
+    const routePath = separator < 0 ? "" : entry.slice(separator + 1);
+    if (entry !== entry.trim() || !ROUTE_METHODS.has(method) || !/^\/[^\r\n]*$/.test(routePath)) {
       throw new Error(
         `acceptedPublic entry "${entry}" must use the form "METHOD /path" with an uppercase method`,
       );

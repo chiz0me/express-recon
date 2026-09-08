@@ -698,6 +698,40 @@ test("NestJS resolves default-exported modules through NodeNext JavaScript speci
     },
   ));
 
+test("unresolved NestJS roots expose structured gaps even when no routes are emitted", () =>
+  temporaryRepository(
+    {
+      "main.ts": `
+        import { NestFactory } from "@nestjs/core";
+        import { MissingModule } from "./missing.module";
+        async function bootstrap() {
+          const app = await NestFactory.create(MissingModule);
+          app.setGlobalPrefix("api");
+        }
+        bootstrap();
+      `,
+    },
+    (root) => {
+      const registry = inventory({ mode: "static", src: root });
+      assert.equal(registry.routes.length, 0);
+      assert.equal(registry.scanCoverage.complete, true);
+      assert.equal(registry.routeGraph.complete, false);
+      assert.deepEqual(registry.routeGraph.gaps, [
+        {
+          adapter: "nestjs",
+          applicationId: "nestjs:main.ts#app",
+          reasonCode: "unresolved-module-reference",
+          scope: "/api",
+          source: { file: path.join(root, "main.ts"), line: 5 },
+          count: 1,
+        },
+      ]);
+      validateReport(
+        buildReport(registry, { command: "inventory", mode: "static", sourceRoot: root }),
+      );
+    },
+  ));
+
 test("NestJS resolves local workspace packages and static dynamic-module metadata", () =>
   temporaryRepository(
     {

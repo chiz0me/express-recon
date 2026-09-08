@@ -151,6 +151,26 @@ test("generated audit and inventory reports satisfy the published JSON Schema", 
   assert.equal(validate(exceptionReport), true, JSON.stringify(validate.errors));
 });
 
+test("schema 2.0 remains compatible with reports written before additive uncertainty fields", () => {
+  const ajv = new Ajv2020({ allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile(REPORT_SCHEMA);
+  const before = buildReport(audit({ mode: "static", src: FIXTURE }, CONFIG), {
+    command: "audit",
+    mode: "static",
+  });
+  const current = structuredClone(before);
+  current.delta = compareReports(before, current);
+
+  delete current.routeGraph.gaps;
+  delete current.delta.summary.unverifiedRemovedRoutes;
+  delete current.delta.summary.unverifiedResolvedFindings;
+  delete current.delta.unverifiedRemovedRoutes;
+  delete current.delta.unverifiedResolvedFindings;
+
+  assert.equal(validate(current), true, JSON.stringify(validate.errors));
+});
+
 test("schema rejects missing audit fields, inventory judgments, and unknown report fields", () => {
   const ajv = new Ajv2020({ allErrors: true });
   addFormats(ajv);
@@ -172,4 +192,14 @@ test("schema rejects missing audit fields, inventory judgments, and unknown repo
   delete inventoryReport.findings;
   inventoryReport.unexpected = true;
   assert.equal(validate(inventoryReport), false);
+
+  const possibleReport = buildReport(audit({ mode: "static", src: FIXTURE }, CONFIG), {
+    command: "audit",
+    mode: "static",
+  });
+  const middleware = possibleReport.routes.find((route) => route.middlewares.length).middlewares[0];
+  middleware.applicability = "possible";
+  assert.equal(validate(possibleReport), false);
+  middleware.applicabilityReasons = ["path-pattern"];
+  assert.equal(validate(possibleReport), true, JSON.stringify(validate.errors));
 });

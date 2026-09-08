@@ -34,6 +34,7 @@ test("exposes the harness tools", async () => {
   assert.deepEqual(names, [
     "audit_routes",
     "discover_repository",
+    "explain_route",
     "finding_by_fingerprint",
     "import_middleware_review",
     "inventory_routes",
@@ -445,6 +446,7 @@ test("query_audit returns compact summaries and cursor-paginated findings", asyn
   );
   assert.equal(first.items.length, 2);
   assert.ok(first.nextCursor);
+  assert.match(first.snapshotId, /^analysis_[a-f0-9]{24}_[a-f0-9]{16}$/);
   const second = parse(
     await client.callTool({
       name: "query_audit",
@@ -457,8 +459,115 @@ test("query_audit returns compact summaries and cursor-paginated findings", asyn
     }),
   );
   assert.ok(second.items.length > 0);
+  assert.equal(second.snapshotId, first.snapshotId);
   assert.notEqual(second.items[0].fingerprint, first.items[0].fingerprint);
   await client.close();
+});
+
+test("query_audit cursors retain a stable bounded snapshot and bind filters", async () => {
+  const client = await connect();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-mcp-snapshot-"));
+  try {
+    const largePath = `/${"a".repeat(40_000)}`;
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      [
+        'const app = require("express")();',
+        `app.get(${JSON.stringify(largePath)}, handler);`,
+        'app.get("/two", handler);',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const first = parse(
+      await client.callTool({
+        name: "query_audit",
+        arguments: { dir: root, kind: "routes", limit: 1 },
+      }),
+    );
+    assert.equal(first.items.length, 1);
+    assert.equal(first.items[0].queryTruncated, true);
+    assert.ok(first.responseBytes < 128 * 1024);
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      'const app = require("express")(); app.get("/changed", handler); module.exports = app;',
+    );
+    const second = parse(
+      await client.callTool({
+        name: "query_audit",
+        arguments: { dir: root, kind: "routes", limit: 1, cursor: first.nextCursor },
+      }),
+    );
+    assert.equal(second.snapshotId, first.snapshotId);
+    assert.equal(second.items[0].path, "/two");
+
+    const mismatch = await client.callTool({
+      name: "query_audit",
+      arguments: {
+        dir: root,
+        kind: "routes",
+        paths: ["/two"],
+        cursor: first.nextCursor,
+      },
+    });
+    assert.equal(mismatch.isError, true);
+    assert.match(mismatch.content[0].text, /does not match this query and configuration/);
+
+    const explanation = parse(
+      await client.callTool({
+        name: "explain_route",
+        arguments: {
+          snapshotId: first.snapshotId,
+          applicationId: "app:app.js#app",
+          method: "GET",
+          path: largePath,
+        },
+      }),
+    );
+    assert.equal(explanation.operation, `GET ${largePath}`);
+    assert.equal(explanation.registrations.length, 1);
+  } finally {
+    await client.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("query_audit keeps old cursor pages stable when package resolution metadata changes", async () => {
+  const client = await connect();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-mcp-metadata-snapshot-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "app.cjs"),
+      'const app = require("express")(); app.use("/api", require("#router")); module.exports = app;',
+    );
+    fs.writeFileSync(
+      path.join(root, "a.cjs"),
+      'const router = require("express").Router(); router.get("/a", handler); module.exports = router;',
+    );
+    fs.writeFileSync(
+      path.join(root, "b.cjs"),
+      'const router = require("express").Router(); router.get("/b", handler); module.exports = router;',
+    );
+    const manifest = path.join(root, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ imports: { "#router": "./a.cjs" } }));
+    const query = (cursor) =>
+      client.callTool({
+        name: "query_audit",
+        arguments: { dir: root, kind: "routes", limit: 1, ...(cursor ? { cursor } : {}) },
+      });
+
+    const first = parse(await query());
+    const expectedNext = parse(await query(first.nextCursor));
+    fs.writeFileSync(manifest, JSON.stringify({ imports: { "#router": "./b.cjs" } }));
+    const fresh = parse(await query());
+    const retainedNext = parse(await query(first.nextCursor));
+
+    assert.notEqual(fresh.snapshotId, first.snapshotId);
+    assert.deepEqual(retainedNext.items, expectedNext.items);
+    assert.equal(retainedNext.snapshotId, first.snapshotId);
+  } finally {
+    await client.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("finding_by_fingerprint returns the finding and associated route", async () => {

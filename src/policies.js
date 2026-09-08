@@ -1,20 +1,12 @@
 "use strict";
 
+const { REPORT_METHODS } = require("./http-methods");
+
 const { fingerprintFinding } = require("./findings");
 
 const SEVERITIES = new Set(["high", "medium", "low"]);
 const AUTH_STATUSES = new Set(["proven", "public", "unknown"]);
-const METHODS = new Set([
-  "GET",
-  "POST",
-  "PUT",
-  "PATCH",
-  "DELETE",
-  "HEAD",
-  "OPTIONS",
-  "TRACE",
-  "ALL",
-]);
+const METHODS = new Set(REPORT_METHODS);
 const ARRAY_REQUIREMENTS = [
   "anyMiddleware",
   "allMiddleware",
@@ -297,8 +289,25 @@ function routeMatches(route, match) {
   return true;
 }
 
-function middlewareSequence(route) {
-  return route.middlewares.flatMap((middleware) => [middleware.name, ...(middleware.inner || [])]);
+function middlewareSequence(route, transparentWrappers = [], includePossible = false) {
+  const transparent = new Set(transparentWrappers);
+  return route.middlewares.flatMap((middleware) => {
+    if (!includePossible && middleware.applicability === "possible") return [];
+    const names = [middleware.name];
+    if (Array.isArray(middleware.innerPaths)) {
+      if (includePossible) return names.concat(middleware.innerPaths.map((item) => item.name));
+      if (!transparent.has(middleware.name)) return names;
+      return names.concat(
+        middleware.innerPaths
+          .filter((item) => item.wrappers.every((name) => transparent.has(name)))
+          .map((item) => item.name),
+      );
+    }
+    // Legacy descriptors did not retain wrapper nesting. They may still flag a
+    // forbidden middleware for review, but cannot satisfy positive presence or
+    // ordering requirements because execution is not provable.
+    return includePossible ? names.concat(middleware.inner || []) : names;
+  });
 }
 
 function missingAny(actual, required) {
@@ -328,8 +337,9 @@ function orderingFailure(sequence, required) {
   return undefined;
 }
 
-function evaluateRequirement(route, requirement) {
-  const middleware = middlewareSequence(route);
+function evaluateRequirement(route, requirement, options = {}) {
+  const middleware = middlewareSequence(route, options.authWrappers);
+  const apparentMiddleware = middlewareSequence(route, options.authWrappers, true);
   const tags = route.tags || [];
   const roles = route.roles || [];
   const scopes = route.scopes || [];
@@ -339,7 +349,7 @@ function evaluateRequirement(route, requirement) {
   const checks = [
     ["missingAnyMiddleware", missingAny(middleware, requirement.anyMiddleware)],
     ["missingAllMiddleware", missingAll(middleware, requirement.allMiddleware)],
-    ["forbiddenMiddleware", forbidden(middleware, requirement.noMiddleware)],
+    ["forbiddenMiddleware", forbidden(apparentMiddleware, requirement.noMiddleware)],
     ["middlewareOrder", orderingFailure(middleware, requirement.middlewareOrder)],
     ["missingAnyTag", missingAny(tags, requirement.anyTag)],
     ["missingAllTags", missingAll(tags, requirement.allTags)],
@@ -355,19 +365,19 @@ function evaluateRequirement(route, requirement) {
 
   if (requirement.all) {
     const failed = requirement.all
-      .map((child, index) => ({ index, result: evaluateRequirement(route, child) }))
+      .map((child, index) => ({ index, result: evaluateRequirement(route, child, options) }))
       .filter(({ result }) => !result.satisfied)
       .map(({ index, result }) => ({ index, evidence: result.evidence }));
     if (failed.length) evidence.allOf = failed;
   }
   if (requirement.any) {
-    const alternatives = requirement.any.map((child) => evaluateRequirement(route, child));
+    const alternatives = requirement.any.map((child) => evaluateRequirement(route, child, options));
     if (!alternatives.some((result) => result.satisfied)) {
       evidence.anyOf = alternatives.map((result, index) => ({ index, evidence: result.evidence }));
     }
   }
   if (requirement.not) {
-    const negated = evaluateRequirement(route, requirement.not);
+    const negated = evaluateRequirement(route, requirement.not, options);
     if (negated.satisfied) evidence.forbiddenCondition = { matched: true };
   }
   return { satisfied: Object.keys(evidence).length === 0, evidence };
@@ -468,6 +478,8 @@ function todayUtc(now) {
 /**
  * Evaluate normalized route policies against a classified registry and attach
  * deterministic violation and exception evidence without mutating the input.
+ * `options.authWrappers` supplies the reviewed transparency guarantees needed
+ * before nested middleware names can satisfy positive requirements.
  */
 function evaluatePolicies(registry, policies, options = {}) {
   const normalized = normalizePolicies(policies);
@@ -490,7 +502,7 @@ function evaluatePolicies(registry, policies, options = {}) {
       const matchingExceptions = policy.exceptions.filter((exception) =>
         routeMatches(route, exception.match),
       );
-      const result = evaluateRequirement(route, policy.require);
+      const result = evaluateRequirement(route, policy.require, options);
       if (result.satisfied) continue;
       const activeException = matchingExceptions.find((exception) => exception.expires >= today);
       if (activeException) {

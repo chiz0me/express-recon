@@ -191,6 +191,10 @@ function normalizeRouteGraph(graph, root) {
       ...mount,
       source: normalizeSource(mount.source, root),
     })),
+    gaps: (graph.gaps || []).map((gap) => ({
+      ...gap,
+      source: normalizeSource(gap.source, root),
+    })),
   };
 }
 

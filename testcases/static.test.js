@@ -147,6 +147,30 @@ test("scan file-count and total-byte limits fail coverage closed", () => {
   assert.ok(byBytes.diagnostics.some((message) => message.includes("scan.maxTotalBytes")));
 });
 
+test("post-parse route budgets return bounded partial evidence", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-route-budget-"));
+  try {
+    fs.writeFileSync(
+      path.join(dir, "app.js"),
+      [
+        'const app = require("express")();',
+        'app.get("/one", handler);',
+        'app.get("/two", handler);',
+        'app.get("/three", handler);',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    const result = audit({ mode: "static", src: dir, maxRoutes: 2 }, CONFIG);
+    assert.equal(result.routes.length, 2);
+    assert.equal(result.scanCoverage.complete, false);
+    assert.equal(result.routeGraph.complete, false);
+    assert.ok(result.routeGraph.gaps.some((gap) => gap.reasonCode === "analysis-budget-exhausted"));
+    assert.ok(result.diagnostics.some((message) => message.includes("analysis budget exhausted")));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("reconstructs paths across nested member expression mounts", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-nested-"));
   try {

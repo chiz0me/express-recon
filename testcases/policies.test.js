@@ -97,6 +97,7 @@ test("wrapped middleware names satisfy policy requirements", () => {
               kind: "call",
               raw: "asyncHandler(csrfProtection)",
               inner: ["csrfProtection"],
+              innerPaths: [{ name: "csrfProtection", wrappers: [] }],
             },
           ],
         }),
@@ -104,8 +105,81 @@ test("wrapped middleware names satisfy policy requirements", () => {
       globalMiddleware: [],
     },
     [{ id: "csrf", require: { allMiddleware: ["csrfProtection"] } }],
+    { authWrappers: ["asyncHandler"] },
   );
   assert.equal(registry.policyFindings.length, 0);
+});
+
+test("possible and non-transparent nested middleware cannot satisfy positive requirements", () => {
+  const possible = route({
+    middlewares: [
+      {
+        name: "requireAuth",
+        kind: "identifier",
+        raw: "requireAuth",
+        applicability: "possible",
+      },
+    ],
+  });
+  assert.equal(
+    evaluatePolicies({ routes: [possible], globalMiddleware: [] }, [
+      { id: "auth-layer", require: { allMiddleware: ["requireAuth"] } },
+    ]).policyFindings.length,
+    1,
+  );
+
+  const nested = route({
+    middlewares: [
+      {
+        name: "safe",
+        kind: "call",
+        raw: "safe(maybe(requireAuth))",
+        inner: ["maybe", "requireAuth"],
+        innerPaths: [
+          { name: "maybe", wrappers: [] },
+          { name: "requireAuth", wrappers: ["maybe"] },
+        ],
+      },
+    ],
+  });
+  const policy = [{ id: "auth-layer", require: { allMiddleware: ["requireAuth"] } }];
+  assert.equal(
+    evaluatePolicies({ routes: [nested], globalMiddleware: [] }, policy, {
+      authWrappers: ["safe"],
+    }).policyFindings.length,
+    1,
+  );
+  assert.equal(
+    evaluatePolicies({ routes: [nested], globalMiddleware: [] }, policy, {
+      authWrappers: ["safe", "maybe"],
+    }).policyFindings.length,
+    0,
+  );
+});
+
+test("legacy flat wrapper names can flag forbidden middleware but cannot satisfy presence", () => {
+  const legacy = route({
+    middlewares: [
+      {
+        name: "safe",
+        kind: "call",
+        raw: "safe(maybe(requireAuth))",
+        inner: ["requireAuth"],
+      },
+    ],
+  });
+  assert.equal(
+    evaluatePolicies({ routes: [legacy], globalMiddleware: [] }, [
+      { id: "requires-auth-layer", require: { allMiddleware: ["requireAuth"] } },
+    ]).policyFindings.length,
+    1,
+  );
+  assert.equal(
+    evaluatePolicies({ routes: [legacy], globalMiddleware: [] }, [
+      { id: "forbids-auth-layer", require: { noMiddleware: ["requireAuth"] } },
+    ]).policyFindings.length,
+    1,
+  );
 });
 
 test("forbidden middleware produces structured evidence", () => {

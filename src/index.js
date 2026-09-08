@@ -46,7 +46,7 @@ const {
  *   - `compareReports(before, after)` baseline delta + net-new findings
  *   - `compareOrganizationReports()`  bounded organization/repository route delta
  *   - `compareOpenApiDocuments()`      semantic OpenAPI contract delta
- *   - `evaluatePolicies(registry, policies)` enforce configurable route controls
+ *   - `evaluatePolicies(registry, policies, options)` enforce configurable route controls
  *   - `instrument(express)`        capture mount paths before app boot (runtime)
  *   - `executeRuntime(appPath, boot)` boot + walk an app in a bounded worker
  *   - `loadConfig(path)`            load JS, JSON, or YAML configuration

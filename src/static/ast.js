@@ -2,8 +2,9 @@
 
 const oxc = require("oxc-parser");
 const { descriptor } = require("../middleware");
+const { EXPRESS_METHODS } = require("../http-methods");
 
-const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options", "all"]);
+const HTTP_METHODS = new Set(EXPRESS_METHODS);
 
 const TS_WRAPPERS = new Set([
   "TSAsExpression",
@@ -123,7 +124,10 @@ function staticString(node, consts) {
     const right = staticString(n.right, consts);
     return left !== null && right !== null ? left + right : null;
   }
-  if (n.type === "Identifier" && consts && consts.has(n.name)) return consts.get(n.name);
+  if (n.type === "Identifier" && consts) {
+    if (typeof consts.resolve === "function") return consts.resolve(n);
+    if (consts.has(n.name)) return consts.get(n.name);
+  }
   return null;
 }
 
@@ -148,6 +152,30 @@ function collectInnerNames(args, acc) {
       collectInnerNames(n.arguments, acc);
     } else if (n.type === "ArrayExpression") {
       collectInnerNames(n.elements.filter(Boolean), acc);
+    }
+  }
+}
+
+/**
+ * Retain the wrapper path to every named reference inside a call argument.
+ * Flattened `inner` names remain available for display and older consumers,
+ * while proof can require every wrapper on a specific path to be transparent.
+ */
+function collectInnerPaths(args, wrappers, acc) {
+  for (const arg of args) {
+    const n = unwrap(arg);
+    if (!n) continue;
+    if (n.type === "Identifier") {
+      acc.push({ name: n.name, wrappers: [...wrappers] });
+    } else if (n.type === "MemberExpression") {
+      const name = calleeName(n);
+      if (name) acc.push({ name, wrappers: [...wrappers] });
+    } else if (n.type === "CallExpression") {
+      const name = calleeName(n.callee);
+      if (name) acc.push({ name, wrappers: [...wrappers] });
+      collectInnerPaths(n.arguments, [...wrappers, name || "<anonymous>"], acc);
+    } else if (n.type === "ArrayExpression") {
+      collectInnerPaths(n.elements.filter(Boolean), wrappers, acc);
     }
   }
 }
@@ -183,7 +211,12 @@ function middlewareFromArg(arg, code) {
     // wrapper's name; keep the inner names so the allowlist can still match.
     const inner = [];
     collectInnerNames(node.arguments, inner);
-    if (inner.length > 0) desc.inner = inner;
+    if (inner.length > 0) {
+      desc.inner = inner;
+      const innerPaths = [];
+      collectInnerPaths(node.arguments, [], innerPaths);
+      desc.innerPaths = innerPaths;
+    }
     return desc;
   }
   if (node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression") {

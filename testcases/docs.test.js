@@ -220,6 +220,41 @@ test("opaque mounts make documentation-only operations unverified and inventory 
   }
 });
 
+test("failed source analysis prevents documentation-only absence claims", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-incomplete-docs-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "incomplete-docs", dependencies: { express: "^5" } }),
+    );
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      'const express = require("express"); const app = express(); module.exports = app;',
+    );
+    fs.writeFileSync(path.join(root, "broken.js"), "function broken( {");
+    fs.writeFileSync(
+      path.join(root, "openapi.json"),
+      JSON.stringify({
+        openapi: "3.1.0",
+        info: { title: "Incomplete", version: "1" },
+        paths: { "/possibly-present": { get: { responses: { 200: { description: "OK" } } } } },
+      }),
+    );
+    const inventoryResult = inventory({ mode: "static", src: root });
+    assert.equal(inventoryResult.scanCoverage.complete, false);
+    const report = buildReport(inventoryResult, {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+    });
+    const result = reconcileDocumentation(report, { root });
+    assert.deepEqual(result.report.verifiedDocsOnlyOperations, []);
+    assert.deepEqual(result.report.unverifiedDocsOnlyOperations, ["GET /possibly-present"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("opaque mount uncertainty is scoped and ordinary middleware is not a route provider", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-scoped-opaque-docs-"));
   try {
@@ -233,7 +268,7 @@ test("opaque mount uncertainty is scoped and ordinary middleware is not a route 
         'const express = require("express");',
         "const app = express();",
         'app.use("/subscription/*", createRequestContext);',
-        'app.use("/docs", swaggerUi.serve);',
+        'app.use("/docs/", swaggerUi.serve);',
         "module.exports = app;",
       ].join("\n"),
     );
@@ -257,6 +292,42 @@ test("opaque mount uncertainty is scoped and ordinary middleware is not a route 
     assert.equal(result.report.routeGraph.opaqueMounts.length, 1);
     assert.deepEqual(result.report.unverifiedDocsOnlyOperations, ["GET /docs/index.html"]);
     assert.deepEqual(result.report.verifiedDocsOnlyOperations, ["GET /stale"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("parameterized opaque mounts prevent false documentation-only absence claims", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-parameterized-opaque-docs-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      [
+        'const app = require("express")();',
+        'app.use("/:tenant/*", swaggerUi.serve);',
+        'app.get("/health", (_q, response) => response.end());',
+        "module.exports = app;",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(root, "openapi.json"),
+      JSON.stringify({
+        openapi: "3.1.0",
+        info: { title: "Parameterized opaque mount", version: "1" },
+        paths: {
+          "/acme/users": { get: { responses: { 200: { description: "OK" } } } },
+        },
+      }),
+    );
+
+    const report = buildReport(inventory({ mode: "static", src: root }), {
+      command: "inventory",
+      mode: "static",
+      sourceRoot: root,
+    });
+    const result = reconcileDocumentation(report, { root });
+    assert.deepEqual(result.report.verifiedDocsOnlyOperations, []);
+    assert.deepEqual(result.report.unverifiedDocsOnlyOperations, ["GET /acme/users"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

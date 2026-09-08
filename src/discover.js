@@ -502,8 +502,8 @@ function discoverDocumentation(root, files, opts, diagnostics, packages = []) {
   return { documentation: { specifications, jsdoc: jsdoc.sort() }, complete };
 }
 
-/** Discover repository packages, supported HTTP applications, entry candidates, and API docs. */
-function discover(rootDir, opts = {}) {
+/** Derive discovery metadata from an existing static registry when supplied. */
+function discoverFromRegistry(rootDir, opts = {}, existingRegistry) {
   const root = path.resolve(rootDir);
   const limits = scanLimits(opts);
   const diagnostics = [];
@@ -511,7 +511,7 @@ function discover(rootDir, opts = {}) {
   const files = collection.files;
   const packageDiscovery = discoverPackages(root, files, limits, diagnostics);
   const packages = packageDiscovery.packages;
-  const registry = scan(root, opts);
+  const registry = existingRegistry || scan(root, opts);
   const applications = registry.applications.map((application) => {
     const owner = application.source?.file
       ? owningPackage(application.source.file, packages)
@@ -564,4 +564,9 @@ function discover(rootDir, opts = {}) {
   };
 }
 
-module.exports = { discover };
+/** Discover repository packages, supported HTTP applications, entry candidates, and API docs. */
+function discover(rootDir, opts = {}) {
+  return discoverFromRegistry(rootDir, opts);
+}
+
+module.exports = { discover, discoverFromRegistry };

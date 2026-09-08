@@ -70,8 +70,16 @@ function header(report) {
     const d = report.delta.summary;
     lines.push(
       paint(
-        `delta: +${d.addedRoutes}/-${d.removedRoutes} routes   regressions: ${d.authRegressions}   new findings: ${d.newFindings}`,
+        `delta: +${d.addedRoutes}/-${d.removedRoutes} routes (${d.unverifiedRemovedRoutes || 0} removals unverified)   regressions: ${d.authRegressions}   new findings: ${d.newFindings}`,
         d.authRegressions || d.newFindings ? COLORS.yellow : COLORS.dim,
+      ),
+    );
+  }
+  if (report.routeGraph?.complete === false) {
+    lines.push(
+      paint(
+        `route graph: incomplete   gaps: ${report.routeGraph.gaps?.length || 0}   opaque mounts: ${report.routeGraph.opaqueMounts?.length || 0}   partial routes: ${report.routeGraph.partialRoutes || 0}`,
+        COLORS.yellow,
       ),
     );
   }

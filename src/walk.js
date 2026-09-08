@@ -1,9 +1,16 @@
 "use strict";
 
 const { descriptor, ANONYMOUS } = require("./middleware");
+const { HTTP_METHODS } = require("./http-methods");
 const { MOUNT_KEY, SOURCE_KEY } = require("./runtime/instrument");
-
-const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
+const {
+  DEFINITE,
+  NONE,
+  POSSIBLE,
+  scopeApplicability,
+  scopeEvidence,
+  withApplicability,
+} = require("./express-scope");
 
 /**
  * Locate the top-level router on an Express app across v4/v5.
@@ -40,7 +47,7 @@ function extractMountPath(layer) {
   if (typeof layer[MOUNT_KEY] === "string" || Array.isArray(layer[MOUNT_KEY]))
     return layer[MOUNT_KEY];
   const re = layer.regexp;
-  if (!re) return "";
+  if (!re) return layer.slash === true ? "" : null;
   if (re.fast_slash) return "";
   if (re.fast_star) return "*";
   const source = re.toString();
@@ -56,24 +63,43 @@ function extractMountPath(layer) {
  * middleware in the chain.
  */
 function scopedTo(full, scopeAbs) {
-  if (scopeAbs == null) return true;
-  if (full.includes("<dynamic>") || scopeAbs.includes("<dynamic>")) return true;
-  return full === scopeAbs || full.startsWith(scopeAbs + "/");
+  return scopeApplicability(full, scopeAbs) !== NONE;
 }
 
 /**
- * Absolute guard scopes for a middleware layer's mount path, or null when it
- * applies to the whole subtree ("" = no path arg, "*"/wildcards = not a literal
- * prefix, null = a path exists but couldn't be recovered — conservative).
+ * Absolute guard scopes for a middleware layer's mount path. A null entry means
+ * a pathless host-wide layer; `<dynamic>` retains unknown mount metadata.
  */
 function middlewareScopes(mount, basePath) {
   const parts = Array.isArray(mount) ? mount : [mount];
   const scopes = [];
   for (const p of parts) {
-    if (p == null || p === "" || p === "/" || p.includes("*")) return null;
-    scopes.push(joinPath(basePath, p));
+    if (p === "" || p === "/") scopes.push(null);
+    else if (p == null) scopes.push(joinPath(basePath, "<dynamic>"));
+    else scopes.push(joinPath(basePath, p));
   }
   return scopes;
+}
+
+function scopedMiddleware(full, entry, routeCaseSensitive) {
+  let applicability = NONE;
+  const reasons = [];
+  for (const scope of entry.scopes) {
+    const current = scopeEvidence(full, scope, {
+      scopeCaseSensitive: entry.caseSensitive,
+      routeCaseSensitive,
+    });
+    if (current.applicability === DEFINITE) {
+      applicability = DEFINITE;
+      reasons.length = 0;
+      break;
+    }
+    if (current.applicability === POSSIBLE) {
+      applicability = POSSIBLE;
+      reasons.push(...current.reasons);
+    }
+  }
+  return applicability === NONE ? null : withApplicability(entry.mw, applicability, reasons);
 }
 
 function isErrorHandler(handle) {
@@ -155,6 +181,7 @@ function joinPath(base, segment) {
 function walkRouter(router, basePath, inherited, partial) {
   const routes = [];
   const globals = inherited.slice();
+  const caseSensitive = router.caseSensitive === true;
   for (const layer of router.stack) {
     if (layer.route) {
       const paths = Array.isArray(layer.route.path) ? layer.route.path : [layer.route.path];
@@ -169,8 +196,8 @@ function walkRouter(router, basePath, inherited, partial) {
           const dynamicPath = typeof path !== "string";
           const full = joinPath(basePath, dynamicPath ? "<dynamic>" : path);
           const chain = globals
-            .filter((g) => g.scopes === null || g.scopes.some((s) => scopedTo(full, s)))
-            .map((g) => g.mw);
+            .map((entry) => scopedMiddleware(full, entry, caseSensitive))
+            .filter(Boolean);
           routes.push({
             method: method.toUpperCase(),
             path: full,
@@ -200,6 +227,7 @@ function walkRouter(router, basePath, inherited, partial) {
     globals.push({
       mw: descriptor({ name, kind: name === ANONYMOUS ? "anonymous" : "identifier" }),
       scopes: middlewareScopes(extractMountPath(layer), basePath),
+      caseSensitive,
     });
   }
   return { routes, globals };

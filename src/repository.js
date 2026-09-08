@@ -4,13 +4,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { inventory, audit } = require("./harness");
 const { buildReport } = require("./report");
-const { discover } = require("./discover");
 const { describeRenderableSpecification, loadSpec, reconcileDocumentation } = require("./docs");
 const { loadPackageInfo } = require("./static/resolve");
 const { scanLimits } = require("./static/scan");
 const pkg = require("../package.json");
+const { createAnalysisSession } = require("./analysis-session");
 
 const SOURCE_EXTENSIONS = new Set([
   ".js",
@@ -186,8 +185,11 @@ function git(args, opts = {}) {
     windowsHide: true,
   });
   if (result.error) {
-    if (result.error.code === "ETIMEDOUT")
-      throw new Error(`Git command timed out after ${opts.timeoutMs}ms`);
+    if (result.error.code === "ETIMEDOUT") {
+      const error = new Error(`Git command timed out after ${opts.timeoutMs}ms`);
+      error.code = "GIT_TIMEOUT";
+      throw error;
+    }
     throw new Error(`Could not run git: ${result.error.message}`);
   }
   if (result.status !== 0) {
@@ -235,7 +237,11 @@ function gitArgs(repo, subcommand) {
 
 function remaining(deadline) {
   const value = deadline - Date.now();
-  if (value <= 0) throw new Error("Repository acquisition timed out");
+  if (value <= 0) {
+    const error = new Error("Repository acquisition timed out");
+    error.code = "REPOSITORY_ACQUISITION_TIMEOUT";
+    throw error;
+  }
   return value;
 }
 
@@ -400,13 +406,16 @@ function acquireRepository(source, opts = {}) {
   registerTempDir(temp);
   const objectRepo = path.join(temp, "objects");
   const snapshot = path.join(temp, "snapshot");
+  let acquisitionPhase = "Git initialization";
   try {
     const deadline = Date.now() + limits.timeoutMs;
     fs.mkdirSync(snapshot, { recursive: true });
     git(["init", "--quiet", objectRepo], { timeoutMs: remaining(deadline) });
+    acquisitionPhase = "remote configuration";
     git(gitArgs(repository, ["-C", objectRepo, "remote", "add", "origin", repository.remote]), {
       timeoutMs: remaining(deadline),
     });
+    acquisitionPhase = "Git fetch";
     git(
       gitArgs(repository, [
         "-C",
@@ -425,12 +434,14 @@ function acquireRepository(source, opts = {}) {
         gitConfig: remoteGitConfig,
       },
     );
+    acquisitionPhase = "commit resolution";
     const commit = String(
       git(gitArgs(repository, ["-C", objectRepo, "rev-parse", "--verify", "FETCH_HEAD^{commit}"]), {
         timeoutMs: remaining(deadline),
         gitConfig: remoteGitConfig,
       }),
     ).trim();
+    acquisitionPhase = "tree materialization";
     const acquisition = writeSnapshot(
       objectRepo,
       commit,
@@ -459,6 +470,14 @@ function acquireRepository(source, opts = {}) {
     };
   } catch (err) {
     unregisterTempDir(temp);
+    if (["GIT_TIMEOUT", "REPOSITORY_ACQUISITION_TIMEOUT"].includes(err?.code)) {
+      const timeout = new Error(
+        `Repository acquisition exceeded scan.timeoutMs (${limits.timeoutMs}ms) during ${acquisitionPhase}`,
+      );
+      timeout.code = "REPOSITORY_ACQUISITION_TIMEOUT";
+      timeout.cause = err;
+      throw timeout;
+    }
     throw err;
   }
 }
@@ -661,13 +680,14 @@ function scanRepository(source, opts = {}) {
     throw err;
   }
   try {
-    const root = acquired.snapshot;
+    const root = fs.realpathSync(acquired.snapshot);
     progress({
       phase: "discovering",
       commit: acquired.provenance.commit,
       materializedFiles: acquired.provenance.acquisition.materializedFiles,
     });
-    const discovery = discover(root, scan);
+    const session = createAnalysisSession(root, scan);
+    const discovery = session.discover();
     const config = opts.config || {};
     const command =
       Object.keys(config.authMiddleware || {}).length > 0 ||
@@ -684,10 +704,7 @@ function scanRepository(source, opts = {}) {
       specifications: discovery.documentation.specifications.length,
       jsdocSources: discovery.documentation.jsdoc.length,
     });
-    const registry =
-      command === "audit"
-        ? audit({ mode: "static", src: root, ...scan }, config)
-        : inventory({ mode: "static", src: root, ...scan });
+    const registry = command === "audit" ? session.audit(config) : session.inventory();
     const inventoryReport = buildReport(registry, {
       command,
       mode: "static",

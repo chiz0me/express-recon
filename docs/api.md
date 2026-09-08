@@ -159,6 +159,28 @@ rejected so a filter change cannot masquerade as a route change.
 Compares two resolved OpenAPI documents without treating scanner provenance as
 API contract. It reports added, removed, and changed operations and component
 schemas, plus a conservative set of definite and potentially breaking changes.
+Local reference expansion and the resulting memoized graph traversal are
+bounded. Repeated reference graphs do not expand exponentially; reaching the
+node or depth ceiling produces a `reference-expansion-limited` uncertainty
+instead of an unsupported absence or compatibility claim. Reusing a completed
+graph is limited according to its actual height, so ordinary shallow aliases do
+not create false depth uncertainty. Path-item uncertainty is retained even when
+expansion cannot recover an operation, and incomplete reference evidence never
+proves an operation or response removal. Within a resolved operation,
+uncertainty is scoped to every field that consumes the evidence, including
+cached values, so an unresolved response cannot hide a definite parameter or
+security change and one method cannot hide definite changes to a sibling
+method. Direct component comparison and raw schema-reference discovery are also
+bounded and emit `contract-comparison-limited` or
+`reference-discovery-limited` uncertainties. External references remain
+unresolved and are never fetched.
+Object keys are traversed deterministically before resolving references, so
+reordering mutually recursive schema definitions does not create contract drift.
+Required parameter schemas use request-direction compatibility checks, including
+the fact that `number` accepts integers. Widening or documentation-only edits do
+not constitute definite breaks; unproven compatibility remains advisory.
+Security checks distinguish anonymous alternatives (`{}`) from mandatory
+authentication and respect operation overrides of root security.
 Passing `null` as `before` produces an initial snapshot with
 `baselineAvailable: false`; callers should not gate that first run as a change.
 
@@ -192,6 +214,9 @@ aliases such as `roles`/`scopes`, and returns deterministic policy objects.
 Evaluates policies against a classified registry and returns a new registry with
 policy findings, active exceptions, and expiration diagnostics. `options.now`
 may supply a deterministic date for tests or reproducible evaluation.
+`options.authWrappers` supplies reviewed transparent wrapper names; nested
+middleware cannot satisfy a positive requirement unless every enclosing wrapper
+is included. `audit()` passes the validated configuration automatically.
 
 ### `loadConfig(path)`
 
@@ -261,6 +286,11 @@ Returns a promise for a bounded aggregate inventory. Important options include
 `config`, `scan`, `onProgress`, `onRepository`, `onReuse`, `retainScans`,
 `reuseUnchanged`, and validated `resumeEntries`.
 
+The aggregate includes `evidenceCompatibilityVersion`. Durable update/resume
+orchestration may reuse repository evidence only when this generation matches
+the current scanner; older reports remain valid comparison inputs but must be
+rescanned before being presented as current evidence.
+
 Concurrency defaults to one and is capped at eight. Repository attempts default
 to two and are capped at three. Repository failures are isolated, snapshots are
 cleaned independently, and incomplete evidence never becomes a negative
@@ -282,9 +312,32 @@ validation, browser connections, and query-string configuration disabled. Pass
 `{ baseline: priorOrganizationPath }` to render organization change views
 without rescanning.
 
+The renderer also accepts saved `gin-recon` `fleet.json` and route reports. An
+organization input can optionally include one same-organization fleet in its
+directory or an immediate child. This is a rendering adapter, not a Gin scanning
+capability: it preserves producer classifications and leaves scan artifacts and
+scanner architecture unchanged. Bundle directories with one immediate fleet or
+organization output are accepted. Malformed, mismatched, or ambiguous optional
+companions produce warnings and do not block the original organization report.
+Explicit invalid fleet inputs still fail. Baseline comparison remains limited to
+the original Express organization evidence, not imported Gin scans.
+
+Organization rows are grouped by status: complete/incomplete in the main table,
+remaining statuses in a closed reference disclosure. Entries can be filtered
+independently by framework and completion/status, with search
+applied alongside both filters. Multi-framework entries match their individual
+frameworks as well as the multi-framework option. Matching repository names
+are case-insensitively joined into one row with separate producer detail pages;
+combined route totals count scanner observations, not deduplicated endpoints.
+
 Repository and organization rendering also create a Swagger UI page for every
 retained OpenAPI 3 or Swagger 2 artifact referenced by a confirmed
-supported-framework entry. The pages share one local Swagger UI bundle;
+supported-framework entry. Each HTML page embeds its required CSS, scripts, logo,
+and favicon, so viewing does not depend on sibling asset access through `file://`.
+Exact SHA-256 hashes authorize the embedded style/script blocks; arbitrary inline
+scripts and network connections remain blocked. API pages embed Swagger UI and
+their specification, which increases their size. Auxiliary asset/configuration
+files and license notices are still retained in the manifest for compatibility;
 unsupported entries remain overview-only. Artifact
 paths are lexically and real-path contained within the organization input.
 

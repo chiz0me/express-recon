@@ -79,6 +79,7 @@ provide the generated reports to the agent.
 | Find possible guards for human review           | `suggest_auth`             |
 | Audit using already confirmed guards            | `audit_routes`             |
 | Page through a large audit                      | `query_audit`              |
+| Explain one route in a retained audit snapshot  | `explain_route`            |
 | Resolve one previously reported finding         | `finding_by_fingerprint`   |
 | Build/validate policy configuration             | `validate_policies`        |
 | Generate a code-derived skeleton                | `openapi_spec`             |
@@ -254,7 +255,7 @@ pages only for confirmed supported repositories and diagnostics pages for
 inconclusive scans; definite unsupported and unscanned entries remain in the
 index without separate pages. Retained OpenAPI 3 and Swagger 2 artifacts
 referenced by supported entries become per-repository Swagger UI pages. They use
-one shared local bundle; do not create API pages for unsupported entries. A
+the bundled Swagger UI embedded into each page; do not create API pages for unsupported entries. A
 `cataloged` documentation status means multiple valid contracts were preserved
 without guessing a canonical merge; it is not evidence that documentation was
 missing. If the scan used
@@ -497,12 +498,16 @@ Use `query_audit` instead of asking for the whole report repeatedly:
 1. request `kind: summary`;
 2. request filtered `findings` or `routes` with a modest `limit`;
 3. pass `nextCursor` unchanged until it is `null`;
-4. retain each finding's stable fingerprint;
-5. use `finding_by_fingerprint` when a user asks for one finding later.
+4. retain the returned `snapshotId` and each finding's stable fingerprint;
+5. use `explain_route` with that snapshot for one route's registrations and
+   relevant gaps, or `finding_by_fingerprint` for one finding.
 
-Repeat the same directory, allowlist, accepted-public entries, policies, and
-scan scope on every paginated call. A fingerprint lookup reruns the audit; it is
-meaningful only against the same repository revision and configuration.
+Pass `nextCursor` unchanged. The cursor binds the retained snapshot, filters,
+configuration, and analysis version, so later pages do not rescan changing
+source. Snapshots are byte-bounded and retained in a small in-memory LRU; an
+evicted snapshot must be queried again from its first page. A fingerprint lookup
+performs a fresh audit and is meaningful only against the same repository
+revision and configuration.
 
 ## Untrusted-source rule
 

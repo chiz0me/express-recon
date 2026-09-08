@@ -49,7 +49,7 @@ express-recon render --input .express-recon/acme
 ```
 
 That command derives `.express-recon/acme-html`, writes per-repository API pages
-under `openapi/`, and shares one packaged Swagger UI bundle across them. An
+under `openapi/`, and embeds packaged Swagger UI into each page for direct-file viewing. An
 unsupported entry does not get an API page merely because its artifact folder
 contains an OpenAPI-looking file. With exactly one saved result under
 `.express-recon/`, `express-recon render` can also infer both paths; scripts and

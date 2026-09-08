@@ -208,6 +208,20 @@ function toSortedArray(set) {
  */
 function handlerBindings(fnNode, inherited) {
   const bindings = new Map(inherited || []);
+  const removePattern = (pattern) => {
+    if (!pattern) return;
+    if (pattern.type === "Identifier") bindings.delete(pattern.name);
+    else if (pattern.type === "AssignmentPattern") removePattern(pattern.left);
+    else if (pattern.type === "RestElement") removePattern(pattern.argument);
+    else if (pattern.type === "ObjectPattern") {
+      for (const property of pattern.properties || []) {
+        removePattern(property.type === "Property" ? property.value : property.argument);
+      }
+    } else if (pattern.type === "ArrayPattern") {
+      for (const element of pattern.elements || []) removePattern(element);
+    }
+  };
+  for (const parameter of fnNode.params || []) removePattern(parameter);
   if (fnNode.body?.type !== "BlockStatement") return bindings;
   for (const statement of fnNode.body.body || []) {
     if (statement.type !== "VariableDeclaration" || statement.kind !== "const") continue;
