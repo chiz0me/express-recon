@@ -1,6 +1,6 @@
 {
   "name": "express-recon",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Offline-first Express, Fastify, and NestJS route inventory, auth audit, OpenAPI reconciliation, and GitHub organization discovery.",
   "keywords": [
     "audit",
@@ -40,6 +40,8 @@
     "skills",
     "LICENSE",
     "README.md",
+    "assets/logo/mark.svg",
+    "assets/favicon.svg",
     "src/cli.js",
     "src/mcp/server.js"
   ],
