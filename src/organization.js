@@ -901,6 +901,9 @@ async function scanOrganization(organization, opts = {}) {
       (resumed.repository.id !== null &&
         entry.repository.id !== null &&
         resumed.repository.id !== entry.repository.id) ||
+      (entry.repository.pushedAt ?? null) !== (resumed.repository.pushedAt ?? null) ||
+      (resumed.repository.defaultBranch !== undefined &&
+        entry.repository.defaultBranch !== resumed.repository.defaultBranch) ||
       (opts.reuseUnchanged === true && !repositoryUnchanged(entry.repository, resumed.repository))
     ) {
       pending.push(entry);
@@ -1136,10 +1139,7 @@ async function scanOrganization(organization, opts = {}) {
         entry.routeGraphComplete === false,
     )
     .map((entry) => entry.repository.fullName);
-  const complete =
-    listing.coverage.complete &&
-    listing.coverage.organizationAccessComplete !== false &&
-    incompleteRepositories.length === 0;
+  const complete = listing.coverage.complete && incompleteRepositories.length === 0;
   const result = {
     schemaVersion: "1.0",
     tool: "express-recon",

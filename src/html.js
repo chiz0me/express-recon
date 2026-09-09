@@ -1443,7 +1443,7 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
     coverage.complete === false
       ? notice(
           "Incomplete organization inventory",
-          `${list(coverage.incompleteRepositories).length} repositories were failed, inconclusive, limited, or otherwise incomplete.${coverage.enumeration?.organizationAccessComplete === false ? " This GitHub App installation can access selected repositories only; repositories outside its grant were not enumerated." : ""}`,
+          `${list(coverage.incompleteRepositories).length} repositories were failed, inconclusive, limited, or otherwise incomplete.`,
           "warn",
         )
       : "";
@@ -1464,6 +1464,13 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
   const referenceCount = entries.length - supportedEntries.length;
   const body = [
     incomplete,
+    coverage.enumeration?.organizationAccessComplete === false
+      ? notice(
+          "Limited organization visibility",
+          "This GitHub App installation can access selected repositories only. Scan completion covers the granted scope; repositories outside that grant were not enumerated.",
+          "warn",
+        )
+      : "",
     warningNotice,
     metrics([
       ["Repositories", entries.length],

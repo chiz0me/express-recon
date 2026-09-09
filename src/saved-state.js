@@ -60,23 +60,9 @@ function json(root, reference) {
 }
 
 function validateReferences(document) {
-  const stack = [document];
-  const anchors = new Map();
-  const references = [];
-  let count = 0;
-  while (stack.length) {
-    if (++count > 2000000) throw new Error("OpenAPI reference complexity limit exceeded");
-    const value = stack.pop();
-    if (!value || typeof value !== "object") continue;
-    if (typeof value.$anchor === "string") {
-      if (anchors.has(value.$anchor)) throw new Error("Ambiguous OpenAPI reference anchor");
-      anchors.set(value.$anchor, value);
-    }
-    if (typeof value.$ref === "string") {
-      references.push(value.$ref);
-    }
-    for (const child of Object.values(value)) stack.push(child);
-  }
+  const { anchors, references } = require("./specification-references").specificationReferences(
+    document,
+  );
   for (const reference of references) {
     const value = { $ref: reference };
     if (!value.$ref.startsWith("#"))

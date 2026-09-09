@@ -31,7 +31,10 @@ only the installation token needed for their bounded repository acquisition.
 App scans verify that the installation belongs to the requested organization and
 enumerate `/installation/repositories`, with pagination and the usual repository
 filters. `coverage.enumeration.access.repositorySelection` reports `all` or `selected`.
-Selected access deliberately cannot claim complete organization coverage. PAT
+`coverage.complete` means that the requested scan scope finished successfully;
+selected installations clear their checkpoints and support `--update` normally.
+`coverage.enumeration.organizationAccessComplete: false` separately records limited
+organization visibility, and HTML retains a warning. PAT
 coverage remains limited to what that token can see; it is not proof of all private
 repositories being accessible.
 
@@ -69,6 +72,12 @@ New inventories contain portable scan settings. For older inventories, explicitl
 supply the matching `--config` or rescan. An external ignore file is stored as bounded
 content, so relocating the checkout does not invalidate a machine-specific path.
 Refresh uses saved settings; use `prepare` again to deliberately change them.
+
+When a repository contains multiple specifications, pass a source-relative
+`--spec first.openapi.json` to `prepare`. Use repeatable `--jsdoc annotations.js`
+to select annotation files explicitly. Both selections persist in the workspace.
+Run `prepare` again with different selectors to change them: accepted enrichment
+is preserved, and operations with changed generated evidence require review.
 
 ## Enrich, accept, and update
 
@@ -150,6 +159,10 @@ inventory updates; existing checkpoint and compatibility checks decide which evi
 can be reused safely. Repository visibility restrictions remain explicit even when
 every accessible repository has been scanned.
 
+Resume rescans entries whose repository push marker or known default branch changed.
+For a selected installation left with a checkpoint by v0.17.0, run `--resume` once
+with v0.17.1 to finish it; subsequent runs can use `--update`.
+
 Workspace refreshes and HTML replacement use staged atomic updates. Verification or
 render failures leave the prior workspace/site intact. Multi-application preparation
 updates each application independently; rerun after resolving an application-specific
@@ -163,7 +176,7 @@ failure. Review and commit successful changes through your own PR process.
 read ambient credentials. Pass a shared `tokenProvider` to `scanOrganization` or
 `listOrganizationRepositories`.
 
-`prepareWorkspaces({ input, repository, root, output, applicationId?, scanSettings? })`
+`prepareWorkspaces({ input, repository, root, output, applicationId?, scanSettings?, spec?, jsdoc? })`
 and `refreshSourceWorkspace({ root, output, acceptEnrichment?, reviewOperations? })`
 provide the native source-bound workflow. `applicationId: "all"` prepares every app.
 

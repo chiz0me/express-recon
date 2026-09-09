@@ -523,6 +523,8 @@ function validateArgs(args) {
             "--repo",
             "--src",
             "--app-id",
+            "--spec",
+            "--jsdoc",
             "--out",
             "--config",
             "--ignore-file",
@@ -2828,6 +2830,8 @@ async function main(argv) {
       root: args.src,
       output: resolvePath(args.out),
       applicationId: args.appId,
+      ...(args.provided.has("--spec") ? { spec: args.spec } : {}),
+      ...(args.provided.has("--jsdoc") ? { jsdoc: args.jsdoc } : {}),
       render: args.render ?? false,
       ...(config
         ? {

@@ -947,32 +947,18 @@ function resolveLocalPointer(document, reference) {
   return true;
 }
 
-function validateReferences(value, document, location = "#") {
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => validateReferences(item, document, `${location}/${index}`));
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-  if (
-    typeof value.$ref === "string" &&
-    value.$ref.startsWith("#/") &&
-    !resolveLocalPointer(document, value.$ref)
-  ) {
-    throw new Error(`OpenAPI local reference does not resolve at ${location}: ${value.$ref}`);
-  }
-  for (const [key, child] of Object.entries(value)) {
-    validateReferences(
-      child,
-      document,
-      `${location}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`,
-    );
+function validateReferences(document) {
+  for (const reference of require("./specification-references").specificationReferences(document)
+    .references) {
+    if (reference.startsWith("#/") && !resolveLocalPointer(document, reference))
+      throw new Error(`OpenAPI local reference does not resolve: ${reference}`);
   }
 }
 
 function validateSpecification(document, label = "refreshed OpenAPI document") {
   describeRenderableSpecification(document, label);
   validateOpenApiDocument(document, label);
-  validateReferences(document, document);
+  validateReferences(document);
   if (Buffer.byteLength(JSON.stringify(document)) > MAX_STATE_JSON_BYTES) {
     throw new Error(`${label} exceeds ${MAX_STATE_JSON_BYTES} bytes`);
   }
@@ -1305,7 +1291,10 @@ function assertCompatibleState(existing, report, documentationReport, options) {
   if ((previousSelection.applicationId ?? null) !== applicationId) {
     throw new Error("Refresh application selection changed; use --overwrite to start a new state");
   }
-  if ((previousSelection.spec ?? null) !== (documentationReport.sources?.base ?? null)) {
+  if (
+    (previousSelection.spec ?? null) !== (documentationReport.sources?.base ?? null) &&
+    !options.selectionChange
+  ) {
     throw new Error("Refresh base OpenAPI selection changed; use --overwrite to start a new state");
   }
   if (

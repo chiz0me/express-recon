@@ -9,6 +9,8 @@ inventory and matching committed source: `prepare --input inventory --repo acme/
 --src ../api --out inventory/workspaces/api --app-id all`. Omit the application ID
 for a single-app repository. Settings are restored from inventory; explicitly use
 `--config` to change them. Existing accepted enrichment is preserved for review.
+Use `--spec` and repeatable `--jsdoc` to select documentation inputs. Selections
+persist; changing them with `prepare` retains accepted enrichment for evidence checks.
 
 ### `validate`
 

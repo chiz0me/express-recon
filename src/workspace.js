@@ -162,8 +162,9 @@ function refreshSourceWorkspace(options) {
       scan: scanOptions,
       discovery,
       applicationId: provenance.applicationId,
-      ...(existing?.manifest.selection.spec ? { spec: existing.manifest.selection.spec } : {}),
-      ...(existing?.manifest.selection.jsdoc ? { jsdoc: existing.manifest.selection.jsdoc } : {}),
+      spec: options.spec ?? existing?.manifest.selection.spec ?? undefined,
+      jsdoc: options.jsdoc ?? existing?.manifest.selection.jsdoc ?? undefined,
+      disableAutoJSDoc: (options.jsdoc ?? existing?.manifest.selection.jsdoc)?.length === 0,
     });
     return refreshDocumentation({
       ...options,
@@ -173,6 +174,8 @@ function refreshSourceWorkspace(options) {
       documentation,
       provenance: { ...provenance, toolVersion: pkg.version },
       configurationExplicit: true,
+      selectionChange: true,
+      explicitJSDoc: (options.jsdoc ?? existing?.manifest.selection.jsdoc) != null,
       render: options.render ?? existing?.manifest.render ?? false,
       scopeChange:
         existing?.manifest.provenance?.settingsFingerprint !== undefined &&

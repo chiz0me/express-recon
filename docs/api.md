@@ -12,7 +12,7 @@ returned provider as `tokenProvider` to organization enumeration/scanning.
 
 ### `prepareWorkspaces`
 
-Prepare from `{ input, repository, root, output, applicationId?, scanSettings? }`; use `applicationId: "all"` for independent apps.
+Prepare from `{ input, repository, root, output, applicationId?, scanSettings?, spec?, jsdoc? }`; use `applicationId: "all"` for independent apps. Documentation selectors are source-relative and persist across refreshes; changing them preserves accepted enrichment.
 
 ### `refreshSourceWorkspace`
 

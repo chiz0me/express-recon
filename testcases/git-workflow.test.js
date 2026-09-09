@@ -10,7 +10,7 @@ const { generateKeyPairSync } = require("node:crypto");
 const api = require("../src");
 const { credentialFreeEnvironment } = require("../src/github-auth");
 const { semanticSourceHash } = require("../src/source-semantics");
-const { writeRepositoryArtifacts } = require("../src/cli");
+const { writeRepositoryArtifacts, runScanOrganization } = require("../src/cli");
 
 const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
   type: "pkcs8",
@@ -226,7 +226,7 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-async function fixture(t, multiple = false) {
+async function fixture(t, multiple = false, specifications = false) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "recon-git-workflow-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const source = path.join(temp, "source"),
@@ -247,6 +247,27 @@ async function fixture(t, multiple = false) {
       path.join(source, "other.js"),
       'const express = require("express");\nconst other = express();\nother.get("/other", (req, res) => res.end());\nmodule.exports = other;\n',
     );
+  if (specifications) {
+    for (const name of ["first", "second"]) {
+      writeJson(path.join(source, `${name}.openapi.json`), {
+        openapi: "3.1.0",
+        info: { title: name, version: "1" },
+        paths: {
+          "/health": {
+            get: {
+              responses: {
+                200: {
+                  description: name,
+                  content: { "application/json": { example: { $ref: "customer-123" } } },
+                },
+              },
+            },
+          },
+        },
+      });
+      fs.writeFileSync(path.join(source, `${name}.js`), `/** ${name} documentation */\n`);
+    }
+  }
   git(source, "init", "-b", "main");
   git(source, "config", "user.email", "test@example.invalid");
   git(source, "config", "user.name", "Test");
@@ -349,6 +370,194 @@ test("multiple applications get stable independent workspace identities", async 
     (item) => api.loadRefreshWorkspace(item.output).manifest.provenance.applicationId,
   );
   assert.equal(new Set(identities).size, 2);
+});
+
+test("preparation selects and persists spec/JSDoc inputs while preserving acceptance on changes", async (t) => {
+  const f = await fixture(t, false, true);
+  const cli = (...args) =>
+    spawnSync(process.execPath, [path.join(__dirname, "../src/cli.js"), ...args], {
+      encoding: "utf8",
+      env: credentialFreeEnvironment(),
+    });
+  const args = [
+    "prepare",
+    "--input",
+    f.inventory,
+    "--repo",
+    "api",
+    "--src",
+    f.source,
+    "--out",
+    f.workspace,
+  ];
+  assert.match(cli(...args).stderr, /Multiple OpenAPI/);
+  const first = cli(...args, "--spec", "first.openapi.json", "--jsdoc", "first.js");
+  assert.equal(first.status, 0, first.stderr);
+  const initial = api.loadRefreshWorkspace(f.workspace);
+  assert.equal(initial.manifest.selection.spec, "first.openapi.json");
+  assert.deepEqual(initial.manifest.selection.jsdoc, ["first.js"]);
+  initial.openapi.paths["/health"].get.summary = "Accepted local review";
+  writeJson(path.join(f.workspace, "openapi.json"), initial.openapi);
+  api.refreshSourceWorkspace({ root: f.source, output: f.workspace, acceptEnrichment: true });
+  const accepted = api.loadRefreshWorkspace(f.workspace).enrichment;
+  const second = cli(...args, "--spec", "second.openapi.json", "--jsdoc", "second.js");
+  assert.equal(second.status, 0, second.stderr);
+  const saved = api.loadRefreshWorkspace(f.workspace);
+  assert.equal(saved.manifest.selection.spec, "second.openapi.json");
+  assert.deepEqual(saved.manifest.selection.jsdoc, ["second.js"]);
+  assert.deepEqual(saved.enrichment, accepted);
+  assert.equal(saved.report.enrichment.summary.staleOperations, 1);
+  api.refreshSourceWorkspace({ root: f.source, output: f.workspace });
+  assert.equal(api.loadRefreshWorkspace(f.workspace).report.enrichment.summary.staleOperations, 1);
+  const manifest = fs.readFileSync(path.join(f.workspace, "refresh-manifest.json"), "utf8");
+  assert.equal(cli(...args, "--spec", "missing.json").status, 1);
+  assert.equal(fs.readFileSync(path.join(f.workspace, "refresh-manifest.json"), "utf8"), manifest);
+});
+
+test("selected App scope completes, clears checkpoints and updates changed commits", async (t) => {
+  const f = await fixture(t);
+  const output = path.join(f.temp, "app-inventory");
+  let pushed = "2026-09-01T00:00:00Z",
+    scans = 0;
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith("access_tokens"))
+      return reply({
+        token: "installation-secret",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+        repository_selection: "selected",
+        permissions: {},
+      });
+    if (String(url).includes("/app/installations/"))
+      return reply({
+        id: 789,
+        account: { type: "Organization", login: "acme" },
+        repository_selection: "selected",
+      });
+    return reply({
+      repositories: [
+        {
+          id: 1,
+          name: "api",
+          full_name: "acme/api",
+          default_branch: "main",
+          size: 1,
+          pushed_at: pushed,
+        },
+      ],
+    });
+  };
+  const run = (update = false) =>
+    runScanOrganization(
+      {
+        org: "acme",
+        out: output,
+        auth: "github-app",
+        update,
+        progress: "none",
+        failOn: "incomplete",
+        provided: new Set(["--progress", ...(update ? ["--update"] : [])]),
+      },
+      {
+        environment: appEnvironment,
+        fetchImpl,
+        scanOrganization: (org, options) =>
+          api.scanOrganization(org, {
+            ...options,
+            fetchImpl,
+            scanRepositoryImpl: () => {
+              scans++;
+              return api.scanRepository(f.source);
+            },
+          }),
+      },
+    );
+  assert.equal(await run(), 0);
+  assert.equal(fs.existsSync(path.join(output, "organization-checkpoint.json")), false);
+  const initial = api.loadOrganizationInventory(output);
+  assert.equal(initial.report.coverage.complete, true);
+  assert.equal(initial.report.coverage.enumeration.organizationAccessComplete, false);
+  api.renderHtmlSite(output, path.join(f.temp, "site"));
+  assert.match(
+    fs.readFileSync(path.join(f.temp, "site/index.html"), "utf8"),
+    /Limited organization visibility/,
+  );
+  assert.equal(await run(true), 0);
+  assert.equal(scans, 1);
+  fs.appendFileSync(path.join(f.source, "app.js"), '\napp.get("/new", (req, res) => res.end());\n');
+  git(f.source, "add", "app.js");
+  git(f.source, "commit", "-m", "new operation");
+  pushed = "2026-09-02T00:00:00Z";
+  assert.equal(await run(true), 0);
+  assert.equal(scans, 2);
+  assert.equal(
+    api.loadOrganizationInventory(output).report.repositories[0].commit,
+    git(f.source, "rev-parse", "HEAD"),
+  );
+  const resumed = await api.scanOrganization("acme", {
+    tokenProvider: api.createGitHubTokenProvider({ environment: appEnvironment, fetchImpl }),
+    fetchImpl,
+    retainScans: false,
+    resumeEntries: initial.report.repositories,
+    scanRepositoryImpl: () => {
+      scans++;
+      return api.scanRepository(f.source);
+    },
+  });
+  assert.equal(scans, 3);
+  assert.equal(resumed.summary.repositoriesResumed, 0);
+  assert.equal(resumed.repositories[0].commit, git(f.source, "rev-parse", "HEAD"));
+});
+
+test("reference validation distinguishes schema/reference objects from literal example and extension data", () => {
+  const { validateReferences } = require("../src/saved-state");
+  const data = { $ref: "customer-123", nested: { $ref: "#/missing" } };
+  const media = {
+    examples: { literal: { value: data }, named: { $ref: "#/components/examples/customer" } },
+    schema: {
+      type: "object",
+      properties: {
+        $ref: { type: "string" },
+        example: { $ref: "#/components/schemas/Customer" },
+        "x-real-property": { type: "string" },
+      },
+      default: data,
+      examples: [data],
+      "x-payload": data,
+    },
+  };
+  const document = {
+    openapi: "3.1.0",
+    info: { title: "Data", version: "1" },
+    "x-payload": data,
+    paths: {
+      "/data": {
+        get: { responses: { 200: { description: "ok", content: { "application/json": media } } } },
+      },
+    },
+    components: {
+      schemas: { Customer: { type: "object", const: data } },
+      examples: { customer: { value: data } },
+    },
+  };
+  api.validateOpenApiDocument(document);
+  validateReferences(document);
+  const invalid = structuredClone(document);
+  invalid.components.examples.customer = { $ref: "#/components/examples/missing" };
+  assert.throws(() => validateReferences(invalid), /Unresolved/);
+  const schema = document.paths["/data"].get.responses["200"].content["application/json"].schema;
+  schema.properties["x-real-property"] = { $ref: "#/components/schemas/missing" };
+  assert.throws(() => validateReferences(document), /Unresolved/);
+  schema.properties["x-real-property"] = { $ref: "external.json" };
+  assert.throws(() => validateReferences(document), /self-contained/);
+  validateReferences({
+    swagger: "2.0",
+    paths: {
+      "/data": {
+        get: { responses: { 200: { description: "ok", examples: { "application/json": data } } } },
+      },
+    },
+    definitions: { Customer: { example: data, default: data } },
+  });
 });
 
 test("native settings changes stay stale across refreshes and render as needing review", async (t) => {
