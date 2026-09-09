@@ -153,15 +153,56 @@ viewing. Default rendering still creates independent self-contained API pages.
 
 ## Incomplete scans and failed updates
 
-Keep incomplete inventory artifacts and their checkpoint. Resolve the cause, then
-rerun the same scope with `scan-org --resume`. Use `scan-org --update` for subsequent
+Keep incomplete inventory artifacts and their checkpoint. A scan that exits with
+`--fail-on incomplete` (exit code 2) still saves an inventory that can be validated
+and rendered offline. Use `scan-org --resume` to continue it, or `scan-org --update` for subsequent
 inventory updates; existing checkpoint and compatibility checks decide which evidence
 can be reused safely. Repository visibility restrictions remain explicit even when
 every accessible repository has been scanned.
 
-Resume rescans entries whose repository push marker or known default branch changed.
+Resume checkpoints every successfully processed repository with integrity-checked
+artifacts, including incomplete results caused by symlinks, submodules, parser
+errors, file limits, or invalid source specifications. Reuse preserves incomplete
+coverage: it does not turn those results into complete scans. Interrupted work,
+operational failures, and damaged artifacts are retried. Unchanged eligible entries
+are checked against the current GitHub commit before reuse, using the same renewing
+token provider. Changed commits, push markers, default branches, configuration,
+scope, or evidence compatibility cause a rescan. If revision verification fails,
+the repository is scanned again instead of trusting stale evidence.
+
+Deterministic coverage gaps may continue to produce exit code 2 after resume.
+Fix the source and commit it, adjust scan settings, or use `--overwrite` to force
+a fresh scan. Oversized-file diagnostics contain up to 20 repository-relative
+paths, file sizes in bytes, and `scan.maxFileBytes` (default 5 MiB), plus an omitted
+entry count. No file contents are included in these diagnostics.
+
 For a selected installation left with a checkpoint by v0.17.0, run `--resume` once
 with v0.17.1 to finish it; subsequent runs can use `--update`.
+
+### Invalid retained source specifications
+
+Repository-owned OpenAPI and Swagger files are untrusted source evidence, not
+express-recon-generated contracts. During scanning, the catalog checks their
+renderable structure, OpenAPI schema where applicable, and internal references.
+Unresolved or external references are never silently repaired or fetched.
+
+An invalid catalog entry has `status: "invalid"` and a `diagnostic` containing
+`code: "invalid-source-specification"`, `message`, `repository`, `sourcePath`, and
+the saved `artifactPath`; `reference` and `applicationId` are included when known.
+The raw file is retained byte-for-byte and remains covered by the organization
+integrity manifest and checkpoint hashes. Invalid files mark repository coverage
+incomplete, but do not block `validate --input` or `render --input`. Validation
+reports warnings, and HTML shows the diagnostic without loading the file into
+the API viewer. Valid source contracts remain viewable.
+
+Generated OpenAPI, reconciled contracts, and accepted enrichment workspaces still
+require valid references; they cannot opt into the retained-source exception.
+Changing any retained raw artifact still fails integrity validation.
+
+To recover a v0.17.2 inventory affected by an invalid retained reference, upgrade
+to v0.17.3 and run `scan-org --resume` against the saved checkpoint. Repositories
+with older retained-spec metadata are rescanned once to establish the new status
+and diagnostics. The old output is not silently rewritten by offline validation.
 
 Workspace refreshes and HTML replacement use staged atomic updates. Verification or
 render failures leave the prior workspace/site intact. Multi-application preparation

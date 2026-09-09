@@ -16,6 +16,7 @@ const {
 } = require("./organization-checkpoint");
 const pkg = require("../package.json");
 const { validateSavedContract, validateSavedToolVersion } = require("./saved-state-schema");
+const { validateReferences, specificationContext } = require("./specification-references");
 const MANIFEST = "organization-manifest.json";
 let routeValidator;
 
@@ -57,35 +58,6 @@ function containedFile(root, reference) {
 
 function json(root, reference) {
   return JSON.parse(fs.readFileSync(containedFile(root, reference), "utf8"));
-}
-
-function validateReferences(document) {
-  const { anchors, references } = require("./specification-references").specificationReferences(
-    document,
-  );
-  for (const reference of references) {
-    const value = { $ref: reference };
-    if (!value.$ref.startsWith("#"))
-      throw new Error(
-        `Offline validation requires self-contained OpenAPI references: ${value.$ref}`,
-      );
-    if (value.$ref !== "#") {
-      const pointer = decodeURIComponent(value.$ref.slice(1));
-      if (!pointer.startsWith("/")) {
-        if (!anchors.has(pointer))
-          throw new Error(`Unresolved OpenAPI reference anchor: ${value.$ref}`);
-        continue;
-      }
-      let target = document;
-      for (const raw of pointer.slice(1).split("/")) {
-        if (/~(?![01])/.test(raw)) throw new Error("Invalid OpenAPI JSON pointer escape");
-        const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
-        if (!target || !Object.hasOwn(target, key))
-          throw new Error(`Unresolved OpenAPI reference: ${value.$ref}`);
-        target = target[key];
-      }
-    }
-  }
 }
 
 function declaredArtifacts(report) {
@@ -205,15 +177,44 @@ function loadOrganizationInventory(input) {
     for (const [name, reference] of Object.entries(entry.artifacts || {})) {
       if (name === "specifications") {
         for (const specification of reference) {
+          const context = {
+            repository: entry.repository.fullName,
+            applicationId: specification.applicationId,
+            sourcePath: specification.path,
+            artifactPath: specification.artifact,
+          };
           const file = containedFile(snapshot.root, specification.artifact);
-          const document = loadSpec(file, { allowSwagger2: true, maxFileBytes: 32 * 1024 * 1024 });
-          describeRenderableSpecification(document);
-          if (document.openapi) validateOpenApiDocument(document);
-          validateReferences(document);
+          if (specification.status === "invalid") {
+            if (!specification.diagnostic?.message || specification.reconciliation)
+              throw new Error(
+                `Invalid retained specification metadata (${specificationContext(context)})`,
+              );
+            validation.warnings.push(
+              `${specification.diagnostic.message} (${specificationContext(context)})`,
+            );
+            continue;
+          }
+          try {
+            const document = loadSpec(file, {
+              allowSwagger2: true,
+              maxFileBytes: 32 * 1024 * 1024,
+            });
+            describeRenderableSpecification(document);
+            if (document.openapi) validateOpenApiDocument(document);
+            validateReferences(document);
+          } catch (error) {
+            throw new Error(`${error.message} (${specificationContext(context)})`, {
+              cause: error,
+            });
+          }
           if (specification.reconciliation?.artifact) {
             const enriched = json(snapshot.root, specification.reconciliation.artifact);
             validateOpenApiDocument(enriched);
-            validateReferences(enriched);
+            validateReferences(enriched, {
+              ...context,
+              applicationId: specification.reconciliation.applicationId,
+              artifactPath: specification.reconciliation.artifact,
+            });
           }
           if (specification.reconciliation?.reportArtifact)
             json(snapshot.root, specification.reconciliation.reportArtifact);
@@ -227,7 +228,16 @@ function loadOrganizationInventory(input) {
         }
         if (name === "openapi") {
           validateOpenApiDocument(value);
-          validateReferences(value);
+          validateReferences(value, {
+            repository: entry.repository.fullName,
+            applicationId:
+              scan.documentation?.report?.applicationId ||
+              (scan.inventory.applications?.length === 1
+                ? scan.inventory.applications[0].id
+                : undefined),
+            sourcePath: scan.documentation?.report?.sources?.base || "express-recon-generated",
+            artifactPath: reference,
+          });
         }
       }
     }
@@ -259,6 +269,7 @@ function loadOrganizationInventory(input) {
       report.organization.login,
       { fingerprint: checkpoint.fingerprint },
       snapshot.root,
+      { verifyOnly: true },
     );
     if (loaded.diagnostics.length)
       throw new Error(`Saved checkpoint is invalid: ${loaded.diagnostics.join("; ")}`);

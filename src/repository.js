@@ -11,6 +11,8 @@ const { scanLimits } = require("./static/scan");
 const pkg = require("../package.json");
 const { createAnalysisSession } = require("./analysis-session");
 const { credentialFreeEnvironment } = require("./github-auth");
+const { validateOpenApiDocument } = require("./openapi-validation");
+const { validateReferences } = require("./specification-references");
 
 const SOURCE_EXTENSIONS = new Set([
   ".js",
@@ -304,6 +306,8 @@ function writeSnapshot(
   let skippedBytes = 0;
   let skippedSymlinks = 0;
   let skippedSubmodules = 0;
+  const oversizedFiles = [];
+  let oversizedFileCount = 0;
   let limited = false;
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
@@ -335,6 +339,15 @@ function writeSnapshot(
     if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > limits.maxFileBytes) {
       skippedFiles++;
       skippedBytes += Number.isFinite(entry.size) && entry.size > 0 ? entry.size : 0;
+      if (entry.size > limits.maxFileBytes) {
+        oversizedFileCount++;
+        if (oversizedFiles.length < 20)
+          oversizedFiles.push({
+            path: entry.path,
+            bytes: entry.size,
+            maxFileBytes: limits.maxFileBytes,
+          });
+      }
       continue;
     }
     if (
@@ -375,6 +388,14 @@ function writeSnapshot(
       `repository: omitted ${skippedFiles} eligible file(s) outside configured file/count/byte limits`,
     );
   }
+  for (const file of oversizedFiles)
+    diagnostics.push(
+      `repository: omitted ${JSON.stringify(file.path)}: ${file.bytes} bytes exceeds scan.maxFileBytes (${file.maxFileBytes})`,
+    );
+  if (oversizedFileCount > oversizedFiles.length)
+    diagnostics.push(
+      `repository: ${oversizedFileCount - oversizedFiles.length} additional oversized file(s) omitted from diagnostics`,
+    );
   if (skippedSymlinks) {
     diagnostics.push(`repository: did not materialize ${skippedSymlinks} symbolic link(s)`);
   }
@@ -386,6 +407,8 @@ function writeSnapshot(
     materializedFiles,
     materializedBytes,
     skippedFiles,
+    oversizedFiles,
+    oversizedFileCount,
     skippedBytes,
     skippedSymlinks,
     skippedSubmodules,
@@ -545,7 +568,7 @@ function specificationInput(root, relativePath, limits) {
  * snapshot is removed. Documents are embedded only when a caller will persist
  * them immediately, keeping ordinary library scans and stdout compact.
  */
-function catalogSpecifications(root, discovery, scan, retainDocuments) {
+function catalogSpecifications(root, discovery, scan, retainDocuments, repository) {
   const limits = scanLimits(scan);
   const deadline = Date.now() + limits.timeoutMs;
   const specifications = [];
@@ -557,6 +580,11 @@ function catalogSpecifications(root, discovery, scan, retainDocuments) {
       version: discovered.version ?? null,
       packageId: discovered.packageId ?? null,
     };
+    const applications = (discovery.applications || []).filter(
+      (item) => item.packageId === discovered.packageId,
+    );
+    if (applications.length === 1) metadata.applicationId = applications[0].id;
+    let rawSource;
     try {
       if (Date.now() >= deadline) {
         throw new Error(`specification catalog exceeded scan.timeoutMs (${limits.timeoutMs}ms)`);
@@ -566,6 +594,7 @@ function catalogSpecifications(root, discovery, scan, retainDocuments) {
       if (totalBytes > limits.maxTotalBytes) {
         throw new Error(`specification inputs exceed scan.maxTotalBytes (${limits.maxTotalBytes})`);
       }
+      rawSource = fs.readFileSync(input.file).toString("base64");
       const document = loadSpec(input.file, {
         ...limits,
         root: input.root,
@@ -575,6 +604,8 @@ function catalogSpecifications(root, discovery, scan, retainDocuments) {
         document,
         `API documentation ${JSON.stringify(discovered.path)}`,
       );
+      if (document.openapi) validateOpenApiDocument(document);
+      validateReferences(document);
       specifications.push({
         ...metadata,
         ...description,
@@ -583,10 +614,24 @@ function catalogSpecifications(root, discovery, scan, retainDocuments) {
         ...(retainDocuments ? { document } : {}),
       });
     } catch (error) {
+      const invalid = rawSource !== undefined;
       specifications.push({
         ...metadata,
-        status: "unavailable",
+        status: invalid ? "invalid" : "unavailable",
         reason: safeDocumentationError(error, root),
+        ...(invalid
+          ? {
+              diagnostic: {
+                code: "invalid-source-specification",
+                message: safeDocumentationError(error, root),
+                repository,
+                sourcePath: discovered.path,
+                ...(metadata.applicationId ? { applicationId: metadata.applicationId } : {}),
+                ...(error.reference ? { reference: error.reference } : {}),
+              },
+              ...(retainDocuments ? { rawSource } : {}),
+            }
+          : {}),
       });
     }
   }
@@ -597,6 +642,7 @@ function catalogSpecifications(root, discovery, scan, retainDocuments) {
       discovered: specifications.length,
       available: available.length,
       unavailable: specifications.length - available.length,
+      invalid: specifications.filter((item) => item.status === "invalid").length,
       openapi: available.filter((item) => item.format === "openapi").length,
       swagger: available.filter((item) => item.format === "swagger").length,
       reconciled: 0,
@@ -657,6 +703,8 @@ function reconcileUnambiguousSpecifications(report, options, catalog) {
         jsdoc,
         disableAutoJSDoc: jsdoc.length === 0,
       });
+      validateOpenApiDocument(result.document);
+      validateReferences(result.document);
       item.reconciliation = {
         status: "merged",
         applicationId: applications[0].id,
@@ -728,7 +776,13 @@ function scanRepository(source, opts = {}) {
       routes: inventoryReport.routes.length,
     });
     const retainDocuments = opts.retainSpecificationDocuments === true;
-    const catalog = catalogSpecifications(root, discovery, scan, retainDocuments);
+    const catalog = catalogSpecifications(
+      root,
+      discovery,
+      scan,
+      retainDocuments,
+      acquired.provenance.source,
+    );
     let documentation;
     const selected = opts.applicationId;
     const discoveredOpenApiCandidates = discovery.documentation.specifications.filter((item) =>
@@ -742,6 +796,18 @@ function scanRepository(source, opts = {}) {
         ? soleAvailableOpenApi.path
         : opts.spec;
     try {
+      const invalidSelection = catalog.specifications.find(
+        (item) =>
+          item.status === "invalid" &&
+          (selectedSpec
+            ? path.resolve(root, item.path) === path.resolve(root, selectedSpec)
+            : discoveredOpenApiCandidates.length === 1 &&
+              item.path === discoveredOpenApiCandidates[0].path),
+      );
+      if (invalidSelection)
+        throw new Error(
+          `Cannot reconcile invalid source specification ${invalidSelection.path}: ${invalidSelection.reason}`,
+        );
       const result = reconcileDocumentation(inventoryReport, {
         root,
         scan,
@@ -750,6 +816,8 @@ function scanRepository(source, opts = {}) {
         spec: selectedSpec,
         jsdoc: opts.jsdoc,
       });
+      validateOpenApiDocument(result.document);
+      validateReferences(result.document);
       documentation = {
         status: "merged",
         document: result.document,

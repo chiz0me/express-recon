@@ -63,6 +63,7 @@ function response(value, options = {}) {
 function fakeApi(repositories, calls = []) {
   return async (url, options) => {
     calls.push({ url: new URL(url), options });
+    if (new URL(url).pathname.includes("/commits/")) return response("a".repeat(40));
     return response(repositories, {
       headers: {
         "x-ratelimit-limit": 60,
@@ -732,7 +733,7 @@ test("organization progress covers skips, resume, concurrent phases, failures, a
     express: resumeEvidence(),
     command: "audit",
     auditSummary: { public: 1 },
-    commit: "b".repeat(40),
+    commit: "a".repeat(40),
   };
   const result = await scanOrganization("acme", {
     token: "token-for-test",
@@ -1536,7 +1537,7 @@ test("scan-org security gates require configuration and use aggregate audit coun
   }
 });
 
-test("scan-org resumes valid artifacts, retries damaged work, and rejects scope changes", async () => {
+test("scan-org resumes valid artifacts, retries damaged work, and invalidates changed scope", async () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-resume-"));
   const args = {
     org: "acme",
@@ -1599,14 +1600,16 @@ test("scan-org resumes valid artifacts, retries damaged work, and rejects scope 
         { ...args, resume: true, include: ["src/**"] },
         {
           environment: {},
-          async scanOrganization() {
+          async scanOrganization(_org, options) {
             resumedScannerCalls++;
+            assert.deepEqual(options.resumeEntries, []);
+            throw new Error("stop after changed scope check");
           },
         },
       ),
-      /checkpoint does not match/,
+      /stop after changed scope check/,
     );
-    assert.equal(resumedScannerCalls, 0);
+    assert.equal(resumedScannerCalls, 1);
 
     fs.appendFileSync(path.join(output, "repositories", "two", "routes.json"), "corrupt");
     const scanned = [];

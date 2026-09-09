@@ -141,8 +141,9 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
 
     const artifacts = writeArtifacts(root, "z-api");
     assert.equal(
-      checkpointEntry(payload("z-api", { coverageComplete: false }), artifacts, root),
-      null,
+      checkpointEntry(payload("z-api", { coverageComplete: false }), artifacts, root)
+        .coverageComplete,
+      false,
     );
     assert.throws(
       () =>
@@ -172,6 +173,29 @@ test("organization checkpoints validate contracts and artifact integrity", () =>
     assert.equal(loaded.entries.length, 1);
     assert.equal(loaded.entries[0].routeGraphComplete, false);
     assert.deepEqual(loaded.diagnostics, []);
+
+    const legacyCatalog = structuredClone(checkpoint);
+    legacyCatalog.completed[0].artifacts.specifications = [];
+    // Catalog migration is a resume decision, not a reason to reject valid saved hashes offline.
+    const specPath = "repositories/z-api/spec.json";
+    fs.writeFileSync(path.join(root, specPath), "{}\n");
+    const currentCatalogEntry = checkpointEntry(
+      payload("z-api"),
+      { ...artifacts, specifications: [{ artifact: specPath }] },
+      root,
+    );
+    delete currentCatalogEntry.specificationValidationVersion;
+    legacyCatalog.completed = [currentCatalogEntry];
+    atomicWriteJson(file, legacyCatalog);
+    assert.match(
+      loadCheckpoint(file, "acme", currentIdentity, root).diagnostics[0],
+      /predates reference validation/,
+    );
+    assert.equal(
+      loadCheckpoint(file, "acme", currentIdentity, root, { verifyOnly: true }).entries.length,
+      1,
+    );
+    atomicWriteJson(file, checkpoint);
 
     const preCatalog = structuredClone(entry);
     preCatalog.express.documentation = { specifications: 1 };
@@ -271,7 +295,6 @@ test("organization checkpoints reject malformed or incompatible top-level state"
       [[], /must contain an object/],
       [{}, /unsupported contract/],
       [initialCheckpoint("other", currentIdentity), /belongs to other/],
-      [initialCheckpoint("acme", identity({ maxRepositories: 200 })), /does not match/],
       [{ ...initialCheckpoint("acme", currentIdentity), completed: {} }, /must be an array/],
     ]) {
       atomicWriteJson(file, value);

@@ -215,7 +215,10 @@ function artifactPaths(artifacts) {
 }
 
 function checkpointEntry(payload, artifacts, outDir) {
-  if (payload.coverageComplete !== true || !COMPLETE_REPOSITORY_STATUSES.has(payload.status)) {
+  if (
+    typeof payload.coverageComplete !== "boolean" ||
+    (!COMPLETE_REPOSITORY_STATUSES.has(payload.status) && payload.status !== "inconclusive")
+  ) {
     return null;
   }
   const commit = payload.scan.repository?.commit;
@@ -229,12 +232,13 @@ function checkpointEntry(payload, artifacts, outDir) {
     scanned: true,
     express: payload.express,
     ...(payload.frameworks ? { frameworks: payload.frameworks } : {}),
-    coverageComplete: true,
+    coverageComplete: payload.coverageComplete,
     routeGraphComplete:
       payload.routeGraphComplete ?? payload.scan.inventory?.routeGraph?.complete !== false,
     command: payload.scan.inventory?.command || "inventory",
     auditSummary: payload.scan.inventory?.summary || null,
     commit,
+    specificationValidationVersion: "1",
     artifacts,
     files,
   };
@@ -307,9 +311,7 @@ function validateCheckpointShape(value, organization, identity) {
     );
   }
   if (value.fingerprint !== identity.fingerprint) {
-    throw new Error(
-      "Organization checkpoint does not match this checkpoint compatibility version, configuration, scan scope, or repository limit",
-    );
+    return { obsolete: true, reason: "configuration, scan scope, or repository limit changed" };
   }
   if (!Array.isArray(value.completed)) {
     throw new Error("Organization checkpoint completed must be an array");
@@ -317,7 +319,7 @@ function validateCheckpointShape(value, organization, identity) {
   return { obsolete: false };
 }
 
-function resumableEntries(checkpoint, outDir) {
+function resumableEntries(checkpoint, outDir, options = {}) {
   const entries = [];
   const diagnostics = [];
   const names = new Set();
@@ -333,8 +335,8 @@ function resumableEntries(checkpoint, outDir) {
     }
     names.add(fullName.toLowerCase());
     if (
-      !COMPLETE_REPOSITORY_STATUSES.has(entry.status) ||
-      entry.coverageComplete !== true ||
+      (!COMPLETE_REPOSITORY_STATUSES.has(entry.status) && entry.status !== "inconclusive") ||
+      typeof entry.coverageComplete !== "boolean" ||
       (entry.routeGraphComplete !== undefined && typeof entry.routeGraphComplete !== "boolean") ||
       !entry.express ||
       !["inventory", "audit"].includes(entry.command) ||
@@ -346,6 +348,16 @@ function resumableEntries(checkpoint, outDir) {
       throw new Error(`${label} is not a complete resumable entry`);
     }
     const documentation = entry.frameworks?.documentation || entry.express?.documentation || {};
+    if (
+      !options.verifyOnly &&
+      entry.artifacts.specifications?.length &&
+      entry.specificationValidationVersion !== "1"
+    ) {
+      diagnostics.push(
+        `${fullName}: saved specification evidence predates reference validation; repository will be scanned again`,
+      );
+      continue;
+    }
     if (
       Number.isSafeInteger(documentation.specifications) &&
       documentation.specifications > 0 &&
@@ -387,7 +399,7 @@ function resumableEntries(checkpoint, outDir) {
   return { entries, diagnostics };
 }
 
-function loadCheckpoint(file, organization, identity, outDir) {
+function loadCheckpoint(file, organization, identity, outDir, options = {}) {
   const source = readCheckpointFile(file);
   const compatibility = validateCheckpointShape(source, organization, identity);
   if (compatibility.obsolete) {
@@ -396,12 +408,12 @@ function loadCheckpoint(file, organization, identity, outDir) {
       migratedFromToolVersion: null,
       entries: [],
       diagnostics: [
-        `checkpoint evidence generation ${source.compatibilityVersion || "legacy"} predates the current proof semantics; all repositories will be rescanned`,
+        `${compatibility.reason || `checkpoint evidence generation ${source.compatibilityVersion || "legacy"} predates the current proof semantics`}; all repositories will be rescanned`,
       ],
     };
   }
   const checkpoint = source;
-  const resume = resumableEntries(checkpoint, outDir);
+  const resume = resumableEntries(checkpoint, outDir, options);
   return {
     checkpoint,
     migratedFromToolVersion: null,

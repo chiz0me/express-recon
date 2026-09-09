@@ -129,8 +129,28 @@ const ORGANIZATION_SCHEMA = {
                   required: ["artifact"],
                   properties: {
                     artifact: { type: "string", minLength: 1 },
+                    status: { type: "string" },
+                    diagnostic: {
+                      type: "object",
+                      required: ["code", "message", "repository", "sourcePath", "artifactPath"],
+                      properties: {
+                        code: { const: "invalid-source-specification" },
+                        message: { type: "string", minLength: 1 },
+                        repository: { type: "string", minLength: 1 },
+                        applicationId: { type: "string", minLength: 1 },
+                        sourcePath: { type: "string", minLength: 1 },
+                        artifactPath: { type: "string", minLength: 1 },
+                        reference: { type: "string" },
+                      },
+                    },
                     reconciliation: { type: "object" },
                   },
+                  allOf: [
+                    {
+                      if: { required: ["status"], properties: { status: { const: "invalid" } } },
+                      then: { required: ["diagnostic", "path"] },
+                    },
+                  ],
                 },
               },
             },

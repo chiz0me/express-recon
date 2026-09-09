@@ -1712,21 +1712,34 @@ function persistSpecificationArtifacts(outDir, scan, options = {}) {
   const local = [];
   const aggregate = [];
   for (const [index, specification] of specifications.entries()) {
-    const { document, reconciliation, ...metadata } = specification;
+    const { document, rawSource, reconciliation, ...metadata } = specification;
     const base = specificationArtifactBase(specification, index, used);
     const localMetadata = { ...metadata };
     const aggregateMetadata = { ...metadata };
-    if (document) {
-      const filename = `${base}.json`;
-      emit(JSON.stringify(document, null, 2), "openapi", directory, filename);
+    if (document || rawSource !== undefined) {
+      const filename =
+        rawSource !== undefined
+          ? `${base}${path.extname(specification.path) || ".txt"}`
+          : `${base}.json`;
+      if (rawSource !== undefined)
+        fs.writeFileSync(path.join(directory, filename), Buffer.from(rawSource, "base64"));
+      else emit(JSON.stringify(document, null, 2), "openapi", directory, filename);
       const localReference = path.posix.join("specifications", filename);
       const aggregateReference = options.relativeDir
         ? path.posix.join(options.relativeDir, localReference)
         : localReference;
-      localMetadata.status = "retained";
+      localMetadata.status = specification.status === "invalid" ? "invalid" : "retained";
       localMetadata.artifact = localReference;
-      aggregateMetadata.status = "retained";
+      aggregateMetadata.status = localMetadata.status;
       aggregateMetadata.artifact = aggregateReference;
+      if (metadata.diagnostic) {
+        const diagnostic = {
+          ...metadata.diagnostic,
+          repository: options.repository || metadata.diagnostic.repository,
+        };
+        localMetadata.diagnostic = { ...diagnostic, artifactPath: localReference };
+        aggregateMetadata.diagnostic = { ...diagnostic, artifactPath: aggregateReference };
+      }
     }
     if (reconciliation) {
       const { document: reconciledDocument, report, ...reconciliationMetadata } = reconciliation;
@@ -1756,7 +1769,7 @@ function persistSpecificationArtifacts(outDir, scan, options = {}) {
     local.push(localMetadata);
     aggregate.push(aggregateMetadata);
   }
-  const retained = local.filter((item) => item.status === "retained").length;
+  const retained = local.filter((item) => item.artifact).length;
   return {
     scan: {
       ...scan,
@@ -1771,6 +1784,17 @@ function persistSpecificationArtifacts(outDir, scan, options = {}) {
 }
 
 function writeRepositoryScanArtifacts(outDir, scan, options = {}) {
+  if (scan.documentation?.status === "merged") {
+    require("./openapi-validation").validateOpenApiDocument(scan.documentation.document);
+    require("./specification-references").validateReferences(scan.documentation.document, {
+      repository: options.repository || scan.repository?.source,
+      applicationId:
+        scan.documentation.report?.applicationId ||
+        (scan.inventory.applications?.length === 1 ? scan.inventory.applications[0].id : undefined),
+      sourcePath: scan.documentation.report?.sources?.base || "express-recon-generated",
+      artifactPath: options.relativeDir ? `${options.relativeDir}/openapi.json` : "openapi.json",
+    });
+  }
   const persisted = persistSpecificationArtifacts(outDir, scan, options);
   emit(JSON.stringify(persisted.scan, null, 2), "json", outDir, "repo-scan.json");
   emit(JSON.stringify(scan.discovery, null, 2), "json", outDir, "discovery.json");
@@ -2362,6 +2386,7 @@ function writeRepositoryArtifacts(outDir, repository, scan) {
   try {
     const artifacts = writeRepositoryScanArtifacts(staging, scan, {
       organization: true,
+      repository: repository.fullName,
       relativeDir,
     });
     if (!fs.existsSync(repoDir)) {
@@ -2637,6 +2662,19 @@ async function executeScanOrganization(args, dependencies, reporter) {
   // The CLI may be supplied a custom scanner implementation, but artifacts it
   // writes still participate in this process's resume/update contract.
   result.evidenceCompatibilityVersion = identity.compatibilityVersion;
+  // Drop old checkpoints for removed, interrupted or failed repositories. Their
+  // previous evidence must not disagree with the newly saved aggregate.
+  checkpoint.completed = checkpoint.completed.filter((saved) =>
+    result.repositories.some(
+      (entry) =>
+        entry.repository.fullName.toLowerCase() === saved.repository.fullName.toLowerCase() &&
+        entry.status === saved.status &&
+        entry.commit === saved.commit &&
+        entry.coverageComplete === saved.coverageComplete &&
+        JSON.stringify(entry.artifacts) === JSON.stringify(saved.artifacts),
+    ),
+  );
+  if (!result.coverage.complete) atomicWriteJson(checkpointFile, checkpoint);
   result.scanSettings = require("./workspace").portableScanSettings(config, scanOptions);
   result.resume = {
     requested: args.resume === true,

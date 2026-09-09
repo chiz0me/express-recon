@@ -134,6 +134,7 @@ test("the npm package exposes only the intended runtime and agent surfaces", () 
     "examples/render-bundle",
     "LICENSE",
     "README.md",
+    "CHANGELOG.md",
     "assets/logo/mark.svg",
     "assets/favicon.svg",
     "src/cli.js",

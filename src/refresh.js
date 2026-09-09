@@ -1150,8 +1150,13 @@ function loadRefreshWorkspace(output, options = {}) {
     [OPENAPI_FILE, artifacts.openapi],
     [OPENAPI_BASELINE_FILE, artifacts.baselineOpenApi],
   ]) {
+    require("./saved-state").validateReferences(value, {
+      repository: state.manifest.provenance?.repository,
+      applicationId: state.manifest.selection.applicationId,
+      sourcePath: state.manifest.selection.spec || "express-recon-generated",
+      artifactPath: name,
+    });
     validateSpecification(value, name);
-    require("./saved-state").validateReferences(value);
   }
   require("./saved-state").validateRouteReport(artifacts.routes);
   const applicationId = state.manifest.selection.applicationId;

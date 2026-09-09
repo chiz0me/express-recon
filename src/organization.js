@@ -297,6 +297,30 @@ async function readApiPage(fetchImpl, organization, page, token, timeoutMs, inst
   };
 }
 
+async function repositoryHead(repository, opts, provider) {
+  const token = validateToken(await provider.getToken());
+  const url = new URL(
+    `/repos/${repository.fullName}/commits/${encodeURIComponent(repository.defaultBranch || "HEAD")}`,
+    GITHUB_API,
+  );
+  const response = await (opts.fetchImpl || globalThis.fetch)(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/vnd.github.sha",
+      "User-Agent": `express-recon/${pkg.version}`,
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    redirect: "error",
+    signal: AbortSignal.timeout(opts.apiTimeoutMs || DEFAULT_API_TIMEOUT_MS),
+  });
+  if (!response.ok)
+    throw new Error(`Could not verify saved source revision: HTTP ${response.status}`);
+  const sha = (await boundedResponseText(response, 128)).trim();
+  if (!/^[a-f0-9]{40,64}$/.test(sha)) throw new Error("GitHub returned an invalid source revision");
+  return sha;
+}
+
 /**
  * Enumerate every repository visible through the GitHub organization API,
  * following pagination and retaining explicit partial-coverage evidence when
@@ -400,7 +424,10 @@ function scanIsComplete(scan) {
     scan.repository?.acquisition?.complete === true &&
     scan.discovery?.discoveryCoverage?.complete === true &&
     scan.discovery?.scanCoverage?.complete === true &&
-    scan.inventory?.scanCoverage?.complete === true
+    scan.inventory?.scanCoverage?.complete === true &&
+    !(scan.documentation?.specifications || []).some(
+      (item) => item.status === "invalid" || item.status === "unavailable",
+    )
   );
 }
 
@@ -578,7 +605,10 @@ function normalizeResumeEntries(value) {
     if (typeof fullName !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName)) {
       throw new Error(`${label}.repository.fullName is invalid`);
     }
-    if (!COMPLETE_REPOSITORY_STATUSES.has(item.status) || item.coverageComplete !== true) {
+    if (
+      (!COMPLETE_REPOSITORY_STATUSES.has(item.status) && item.status !== "inconclusive") ||
+      typeof item.coverageComplete !== "boolean"
+    ) {
       throw new Error(`${label} is not a complete resumable repository result`);
     }
     const hasExpress =
@@ -593,7 +623,9 @@ function normalizeResumeEntries(value) {
         ? statusForFrameworks(item.frameworks.names || [])
         : hasExpress && item.express.detected
           ? "express"
-          : "not-express";
+          : item.coverageComplete
+            ? "not-express"
+            : "inconclusive";
     if (item.status !== expectedStatus) {
       throw new Error(`${label} framework evidence does not match its status`);
     }
@@ -894,7 +926,7 @@ async function scanOrganization(organization, opts = {}) {
   for (const entry of eligible.slice(maxRepositories)) entry.status = "skipped-limit";
   const selected = eligible.slice(0, maxRepositories);
   const pending = [];
-  for (const entry of selected) {
+  await runPool(selected, concurrency, async (entry) => {
     const resumed = resumeEntries.get(entry.repository.fullName.toLowerCase());
     if (
       !resumed ||
@@ -907,7 +939,21 @@ async function scanOrganization(organization, opts = {}) {
       (opts.reuseUnchanged === true && !repositoryUnchanged(entry.repository, resumed.repository))
     ) {
       pending.push(entry);
-      continue;
+      return;
+    }
+    try {
+      if ((await repositoryHead(entry.repository, opts, token)) !== resumed.commit) {
+        pending.push(entry);
+        return;
+      }
+    } catch (error) {
+      pending.push(entry);
+      progress.emit({
+        event: "repository-reuse-invalidated",
+        repository: entry.repository.fullName,
+        error: safeFailure(error, token),
+      });
+      return;
     }
     let reusedArtifacts = resumed.artifacts;
     if (typeof opts.onReuse === "function") {
@@ -922,7 +968,7 @@ async function scanOrganization(organization, opts = {}) {
           repository: entry.repository.fullName,
           error: safeFailure(error, token),
         });
-        continue;
+        return;
       }
     }
     entry.status = resumed.status;
@@ -931,13 +977,13 @@ async function scanOrganization(organization, opts = {}) {
     else entry.resumed = true;
     entry.express = resumed.express;
     if (resumed.frameworks) entry.frameworks = resumed.frameworks;
-    entry.coverageComplete = true;
+    entry.coverageComplete = resumed.coverageComplete;
     entry.routeGraphComplete = resumed.routeGraphComplete !== false;
     entry.command = resumed.command;
     entry.auditSummary = resumed.auditSummary || null;
     entry.commit = resumed.commit || null;
     if (reusedArtifacts) entry.artifacts = reusedArtifacts;
-  }
+  });
   const selectedIndexes = new Map(
     selected.map((entry, index) => [entry.repository.fullName.toLowerCase(), index + 1]),
   );
@@ -1104,7 +1150,7 @@ async function scanOrganization(organization, opts = {}) {
         concurrency,
       });
     } catch (err) {
-      entry.scanned = entry.scanned === true;
+      entry.scanned = Boolean(entry.artifacts || entry.scan);
       entry.status = "failed";
       entry.error = safeFailure(err, token);
       active--;

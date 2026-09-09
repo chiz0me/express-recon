@@ -680,6 +680,15 @@ function repositoryPage(scan, fallback, navigation = {}) {
       repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
     afterRoutes:
       documentationPanel(scan.documentation, navigation.apiReferences) +
+      diagnosticPanel([
+        ...list(scan.repository?.acquisition?.diagnostics),
+        ...list(scan.documentation?.specifications)
+          .filter((item) => item.status === "invalid")
+          .map(
+            (item) =>
+              `${item.path}: ${item.diagnostic?.message || item.reason} (Artifact: ${item.artifact || "not saved"})`,
+          ),
+      ]) +
       workspacePanel(navigation.workspaceReferences, navigation.assetPrefix) +
       ginEvidencePanel(scan.gin, navigation.assetPrefix) +
       importedEvidencePanel(scan.imported, navigation.assetPrefix),
@@ -961,6 +970,13 @@ function repositoryApiDescriptors(entry, scan) {
     }
     for (const specificationValue of artifacts.specifications) {
       const specification = object(specificationValue);
+      if (specification.status === "invalid") {
+        descriptors.push({
+          error: `${specification.diagnostic?.message || specification.reason || "Invalid retained source specification"} (Artifact: ${specification.artifact}; Application: ${specification.applicationId || "not associated"})`,
+          source: specification.path,
+        });
+        continue;
+      }
       if (!specification.artifact) {
         descriptors.push({
           error: "specification artifact is missing its source path",
@@ -994,6 +1010,13 @@ function repositoryApiDescriptors(entry, scan) {
     }
     for (const specificationValue of specifications) {
       const specification = object(specificationValue);
+      if (specification.status === "invalid") {
+        descriptors.push({
+          error: `${specification.diagnostic?.message || specification.reason || "Invalid retained source specification"} (Artifact: ${specification.artifact || "not saved"}; Application: ${specification.applicationId || "not associated"})`,
+          source: specification.path,
+        });
+        continue;
+      }
       if (specification.artifact || specification.document) {
         descriptors.push({
           ...(specification.artifact
@@ -1472,6 +1495,17 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
         )
       : "",
     warningNotice,
+    warnings.length
+      ? panel(
+          "Artifact warnings",
+          `<div class="panel__body"><ul>${warnings
+            .slice(0, 100)
+            .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+            .join(
+              "",
+            )}</ul>${warnings.length > 100 ? "<p>Showing the first 100 warnings; see render-manifest.json for all warnings.</p>" : ""}</div>`,
+        )
+      : "",
     metrics([
       ["Repositories", entries.length],
       [
@@ -2043,6 +2077,7 @@ function renderOrganization(
       writeImportedFiles(descriptor.workspace, output, data);
     const wantsDetail = Boolean(
       organizationDetailLabel(entry.status, evidence) ||
+      list(entry.artifacts?.specifications).length ||
       entry.scan?.imported ||
       change?.changes?.routes ||
       change?.routeChanges,
@@ -2068,6 +2103,8 @@ function renderOrganization(
 
     if (
       isRenderableStatus(entry.status) ||
+      list(entry.artifacts?.specifications).length ||
+      list(scan?.documentation?.specifications).length ||
       scan?.imported ||
       importedScans.length ||
       workspaceDescriptors.length

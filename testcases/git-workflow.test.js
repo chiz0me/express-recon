@@ -433,6 +433,7 @@ test("selected App scope completes, clears checkpoints and updates changed commi
         account: { type: "Organization", login: "acme" },
         repository_selection: "selected",
       });
+    if (String(url).includes("/commits/")) return new Response(git(f.source, "rev-parse", "HEAD"));
     return reply({
       repositories: [
         {

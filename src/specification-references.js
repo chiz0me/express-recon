@@ -134,4 +134,49 @@ function specificationReferences(document) {
   return { references, anchors };
 }
 
-module.exports = { specificationReferences };
+function specificationContext(context = {}) {
+  return Object.entries({
+    Repository: context.repository,
+    Application: context.applicationId,
+    Source: context.sourcePath,
+    Artifact: context.artifactPath,
+  })
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("; ");
+}
+
+function validateReferences(document, context = {}) {
+  const { anchors, references } = specificationReferences(document);
+  for (const reference of references) {
+    try {
+      if (!reference.startsWith("#"))
+        throw new Error(
+          `Offline validation requires self-contained OpenAPI references: ${reference}`,
+        );
+      if (reference === "#") continue;
+      const pointer = decodeURIComponent(reference.slice(1));
+      if (!pointer.startsWith("/")) {
+        if (!anchors.has(pointer))
+          throw new Error(`Unresolved OpenAPI reference anchor: ${reference}`);
+        continue;
+      }
+      let target = document;
+      for (const raw of pointer.slice(1).split("/")) {
+        if (/~(?![01])/.test(raw))
+          throw new Error(`Invalid OpenAPI JSON pointer escape: ${reference}`);
+        const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+        if (!target || !Object.hasOwn(target, key))
+          throw new Error(`Unresolved OpenAPI reference: ${reference}`);
+        target = target[key];
+      }
+    } catch (cause) {
+      const label = specificationContext(context);
+      const error = new Error(`${cause.message}${label ? ` (${label})` : ""}`, { cause });
+      error.reference = reference;
+      throw error;
+    }
+  }
+}
+
+module.exports = { specificationReferences, specificationContext, validateReferences };
