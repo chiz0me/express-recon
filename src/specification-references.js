@@ -39,7 +39,7 @@ const FIELDS = {
   operation: {
     parameters: "list:parameter",
     requestBody: "body",
-    responses: "map:response",
+    responses: "responses",
     callbacks: "map:callback",
   },
   parameter: { schema: "schema", content: "map:media", examples: "map:reference", items: "schema" },
@@ -101,10 +101,16 @@ function specificationReferences(document) {
       continue;
     }
     if (Array.isArray(value)) continue;
-    if (context.startsWith("map:") || context === "paths") {
+    if (context.startsWith("map:") || context === "paths" || context === "responses") {
       for (const [key, child] of Object.entries(value)) {
-        if (context !== "paths" || key.startsWith("/"))
-          stack.push([child, context === "paths" ? "path" : context.slice(4)]);
+        // Responses and Paths Objects permit extension entries. Ordinary named
+        // maps (schema properties, components, headers, etc.) retain x- names.
+        if (context === "paths" && !key.startsWith("/")) continue;
+        if (context === "responses" && key.startsWith("x-")) continue;
+        stack.push([
+          child,
+          context === "paths" ? "path" : context === "responses" ? "response" : context.slice(4),
+        ]);
       }
       continue;
     }

@@ -560,6 +560,76 @@ test("reference validation distinguishes schema/reference objects from literal e
   });
 });
 
+test("response-map extensions remain data while x-prefixed named objects retain reference validation", async (t) => {
+  const { validateReferences } = require("../src/saved-state");
+  const f = await fixture(t);
+  const file = path.join(f.inventory, f.report.repositories[0].artifacts.openapi);
+  const document = {
+    openapi: "3.1.0",
+    info: { title: "Response extensions", version: "1" },
+    paths: {
+      "/health": {
+        get: {
+          responses: {
+            200: {
+              description: "OK",
+              headers: { "x-trace": { $ref: "#/components/headers/x-trace" } },
+            },
+            "2XX": { $ref: "#/components/responses/x-success" },
+            default: { $ref: "#/components/responses/x-success" },
+            "x-review-data": { $ref: "customer-123", nested: { $ref: "#/missing" } },
+          },
+        },
+      },
+    },
+    components: {
+      responses: { "x-success": { description: "Success" } },
+      headers: { "x-trace": { schema: { type: "string" } } },
+      schemas: {
+        Customer: { type: "object", properties: { "x-id": { $ref: "#/components/schemas/x-id" } } },
+        "x-id": { type: "string" },
+      },
+    },
+  };
+  for (const version of ["3.0.3", "3.1.0"]) {
+    document.openapi = version;
+    api.validateOpenApiDocument(document);
+    writeJson(file, document);
+    assert.equal(api.loadSavedState(f.inventory).scans.size, 1);
+  }
+  validateReferences({
+    swagger: "2.0",
+    paths: {
+      "/health": {
+        get: {
+          responses: {
+            200: { description: "OK" },
+            "x-review-data": { $ref: "customer-123" },
+          },
+        },
+      },
+    },
+  });
+  const targets = [
+    document.components.schemas.Customer.properties["x-id"],
+    document.components.schemas["x-id"],
+    document.components.responses["x-success"],
+    document.paths["/health"].get.responses["200"].headers["x-trace"],
+    document.paths["/health"].get.responses.default,
+    document.paths["/health"].get.responses["2XX"],
+  ];
+  for (const target of targets) {
+    const previous = target.$ref;
+    for (const reference of ["#/missing", "missing.json"]) {
+      target.$ref = reference;
+      writeJson(file, document);
+      assert.throws(() => api.loadSavedState(f.inventory), /Unresolved|self-contained/);
+    }
+    if (previous === undefined) delete target.$ref;
+    else target.$ref = previous;
+  }
+});
+
 test("native settings changes stay stale across refreshes and render as needing review", async (t) => {
   const f = await fixture(t);
   const prepare = { input: f.inventory, repository: "api", root: f.source, output: f.workspace };
