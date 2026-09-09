@@ -137,6 +137,12 @@ test("invalid retained references survive scan-org gates, offline validation, re
   });
   assert.equal(validate.status, 0, validate.stderr);
   assert.equal(JSON.parse(validate.stdout).valid, true);
+  assert.equal(JSON.parse(validate.stdout).diagnosticSummary.invalidSpecifications, 1);
+  assert.equal(JSON.parse(validate.stdout).diagnosticSummary.affectedRepositories, 1);
+  assert.deepEqual(
+    JSON.parse(validate.stdout).validation.diagnostics,
+    saved.validation.diagnostics,
+  );
   for (const shared of [false, true]) {
     const site = path.join(f.root, `site-${shared}`);
     const render = spawnSync(
@@ -145,9 +151,27 @@ test("invalid retained references survive scan-org gates, offline validation, re
       { encoding: "utf8", env: credentialFreeEnvironment() },
     );
     assert.equal(render.status, 0, render.stderr);
+    const summary = JSON.parse(render.stdout).diagnosticSummary;
+    assert.deepEqual(summary, {
+      total: 1,
+      byCategory: { "invalid-api-specification": 1, artifact: 0, render: 0 },
+      invalidSpecifications: 1,
+      affectedRepositories: 1,
+    });
     const manifest = json(path.join(site, "render-manifest.json"));
     assert.match(manifest.warnings.join("\n"), /acme\/api.*api.yaml.*ForbiddenResponse.*Artifact:/);
     assert.match(fs.readFileSync(path.join(site, "index.html"), "utf8"), /ForbiddenResponse/);
+    const html = fs.readFileSync(path.join(site, "index.html"), "utf8");
+    assert.ok(html.includes("Invalid API specifications"));
+    assert.ok(html.includes("Retained raw copy"));
+    assert.ok(!html.includes("Artifact warnings"));
+    assert.ok(!html.includes("unavailable or unsafe"));
+    assert.deepEqual(manifest.diagnosticSummary, summary);
+    assert.deepEqual(manifest.diagnostics, saved.validation.diagnostics);
+    assert.ok(
+      manifest.pages.some((reference) => reference.startsWith("openapi/")),
+      "valid specification remains viewable",
+    );
     for (const reference of [...manifest.pages, ...manifest.assets].filter((name) =>
       name.startsWith("openapi/"),
     ))
@@ -161,6 +185,12 @@ test("invalid retained references survive scan-org gates, offline validation, re
   );
   fs.appendFileSync(path.join(f.output, spec.artifact), "# tampered\n");
   assert.throws(() => api.loadOrganizationInventory(f.output), /integrity check/);
+  const priorSite = fs.readFileSync(path.join(f.root, "site-false/index.html"), "utf8");
+  assert.throws(
+    () => api.renderHtmlSite(f.output, path.join(f.root, "site-false")),
+    /integrity check/,
+  );
+  assert.equal(fs.readFileSync(path.join(f.root, "site-false/index.html"), "utf8"), priorSite);
   assert.equal(await f.run({ resume: true }), 2);
   assert.equal(f.state.calls, 2);
   assert.equal(api.loadOrganizationInventory(f.output).validation.integrity, "verified");

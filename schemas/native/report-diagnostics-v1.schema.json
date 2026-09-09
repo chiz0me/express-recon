@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Express Recon report diagnostics (additive fields, v1)",
+  "type": "object",
+  "required": ["diagnostics", "diagnosticSummary"],
+  "properties": {
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "category",
+          "repository",
+          "applicationId",
+          "sourcePath",
+          "artifactPath",
+          "message"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": ["invalid-source-specification", "artifact-unavailable", "render-warning"]
+          },
+          "category": {
+            "enum": ["invalid-api-specification", "artifact", "render"]
+          },
+          "repository": {
+            "type": ["string", "null"]
+          },
+          "applicationId": {
+            "type": ["string", "null"]
+          },
+          "sourcePath": {
+            "type": ["string", "null"]
+          },
+          "artifactPath": {
+            "type": ["string", "null"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "cause": {
+            "enum": [
+              "unresolved-reference",
+              "external-reference",
+              "invalid-schema",
+              "invalid-document"
+            ]
+          }
+        }
+      }
+    },
+    "diagnosticSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "byCategory", "invalidSpecifications", "affectedRepositories"],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "invalidSpecifications": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "affectedRepositories": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byCategory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["invalid-api-specification", "artifact", "render"],
+          "properties": {
+            "invalid-api-specification": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "artifact": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "render": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

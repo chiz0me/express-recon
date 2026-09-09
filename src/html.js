@@ -11,6 +11,11 @@ const {
 const pkg = require("../package.json");
 const { getAbsoluteFSPath: swaggerUiPath } = require("swagger-ui-dist");
 const { describeRenderableSpecification, loadSpec } = require("./docs");
+const {
+  createDiagnosticCollector,
+  invalidSpecificationDiagnostic,
+  summarizeDiagnostics,
+} = require("./report-diagnostics");
 const { isFrameworkStatus } = require("./frameworks");
 const { isGinFleet, normalizeGinReport, readGinFleet } = require("./gin-artifacts");
 const { importRenderBundles } = require("./render-bundle");
@@ -680,15 +685,8 @@ function repositoryPage(scan, fallback, navigation = {}) {
       repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
     afterRoutes:
       documentationPanel(scan.documentation, navigation.apiReferences) +
-      diagnosticPanel([
-        ...list(scan.repository?.acquisition?.diagnostics),
-        ...list(scan.documentation?.specifications)
-          .filter((item) => item.status === "invalid")
-          .map(
-            (item) =>
-              `${item.path}: ${item.diagnostic?.message || item.reason} (Artifact: ${item.artifact || "not saved"})`,
-          ),
-      ]) +
+      diagnosticPanel(list(scan.repository?.acquisition?.diagnostics)) +
+      invalidSpecificationsPanel(navigation.diagnostics || []) +
       workspacePanel(navigation.workspaceReferences, navigation.assetPrefix) +
       ginEvidencePanel(scan.gin, navigation.assetPrefix) +
       importedEvidencePanel(scan.imported, navigation.assetPrefix),
@@ -972,7 +970,8 @@ function repositoryApiDescriptors(entry, scan) {
       const specification = object(specificationValue);
       if (specification.status === "invalid") {
         descriptors.push({
-          error: `${specification.diagnostic?.message || specification.reason || "Invalid retained source specification"} (Artifact: ${specification.artifact}; Application: ${specification.applicationId || "not associated"})`,
+          invalidSpecification: specification,
+          reference: specification.artifact,
           source: specification.path,
         });
         continue;
@@ -1012,7 +1011,8 @@ function repositoryApiDescriptors(entry, scan) {
       const specification = object(specificationValue);
       if (specification.status === "invalid") {
         descriptors.push({
-          error: `${specification.diagnostic?.message || specification.reason || "Invalid retained source specification"} (Artifact: ${specification.artifact || "not saved"}; Application: ${specification.applicationId || "not associated"})`,
+          invalidSpecification: specification,
+          reference: specification.artifact,
           source: specification.path,
         });
         continue;
@@ -1050,6 +1050,72 @@ function descriptorDocument(root, descriptor) {
   return descriptor.reference
     ? referencedApiSpecification(root, descriptor.reference)
     : embeddedSpecification(descriptor.document);
+}
+
+function recordInvalidSpecification(root, descriptor, repository, diagnostics) {
+  if (!descriptor.invalidSpecification) return false;
+  // Do not mistake a missing/escaped/unreadable raw copy for a retained invalid
+  // document. Reading the copy as a specification would wrongly reopen the viewer.
+  const file = require("./saved-state").containedFile(root, descriptor.reference);
+  fs.closeSync(fs.openSync(file, "r"));
+  const diagnostic = invalidSpecificationDiagnostic(descriptor.invalidSpecification, repository);
+  diagnostics.add(
+    diagnostic,
+    `${repository || "Repository"} API specification ${diagnostic.sourcePath}: ${diagnostic.message} (Artifact: ${diagnostic.artifactPath}; Application: ${diagnostic.applicationId || "not associated"})`,
+  );
+  return true;
+}
+
+function invalidSpecificationsPanel(diagnostics) {
+  const invalid = diagnostics.filter((item) => item.category === "invalid-api-specification");
+  if (!invalid.length) return "";
+  const summary = summarizeDiagnostics(invalid);
+  const repositories = new Map();
+  for (const item of invalid) {
+    const repository = item.repository || "Unassociated repository";
+    if (!repositories.has(repository)) repositories.set(repository, new Map());
+    const causes = repositories.get(repository);
+    const cause = item.cause || "invalid-document";
+    if (!causes.has(cause)) causes.set(cause, new Map());
+    const messages = causes.get(cause);
+    if (!messages.has(item.message)) messages.set(item.message, []);
+    messages.get(item.message).push(item);
+  }
+  const labels = {
+    "unresolved-reference": "Unresolved internal references",
+    "external-reference": "External references unavailable offline",
+    "invalid-schema": "Invalid OpenAPI schema",
+    "invalid-document": "Invalid document structure or syntax",
+  };
+  let shown = 0;
+  const groups = [...repositories]
+    .slice(0, 25)
+    .map(([repository, causes]) => {
+      const items = [...causes.values()].flatMap((messages) => [...messages.values()].flat());
+      const content = [...causes]
+        .slice(0, 10)
+        .map(([cause, messages]) => {
+          const count = [...messages.values()].reduce((total, values) => total + values.length, 0);
+          const details = [...messages]
+            .map(([message, values]) => {
+              const visible = values.slice(0, Math.max(0, 100 - shown));
+              shown += visible.length;
+              if (!visible.length) return "";
+              return `<div class="specification-diagnostic"><p>${escapeHtml(message.slice(0, 2000))}</p><ul>${visible.map((item) => `<li><dl class="key-values"><dt>Source path</dt><dd><code>${escapeHtml(item.sourcePath || "Not recorded")}</code></dd><dt>Retained raw copy</dt><dd><code>${escapeHtml(item.artifactPath || "Not recorded")}</code></dd>${item.applicationId ? `<dt>Application ID</dt><dd><code>${escapeHtml(item.applicationId)}</code></dd>` : ""}${item.reference !== undefined ? `<dt>Reference</dt><dd><code>${escapeHtml(item.reference)}</code></dd>` : ""}</dl></li>`).join("")}</ul></div>`;
+            })
+            .join("");
+          return `<details><summary>${escapeHtml(labels[cause] || cause)} (${count} diagnostics)</summary>${details}</details>`;
+        })
+        .join("");
+      return `<details class="invalid-specification-repository"><summary>${escapeHtml(repository)} — ${summarizeDiagnostics(items).invalidSpecifications} invalid specifications</summary>${content}</details>`;
+    })
+    .join("");
+  return panel(
+    "Invalid API specifications",
+    `<div class="panel__body"><p>${summary.invalidSpecifications} invalid specifications across ${summary.affectedRepositories} repositories.</p><p>The source documents are invalid; their retained raw copies remain available for review. They are excluded from API viewers. Retained raw copy paths are relative to the inventory folder, not GitHub Actions artifacts.</p>${groups}<p>${shown < invalid.length ? `Showing ${shown} of ${invalid.length} diagnostics. ` : ""}Complete structured diagnostics are available in render-manifest.json.</p></div>`,
+    "Grouped by repository and cause",
+    { id: "invalid-api-specifications" },
+  );
 }
 
 function organizationDelta(input, warnings) {
@@ -1442,7 +1508,7 @@ function organizationScopePanel(report) {
   );
 }
 
-function organizationPage(report, detailPages, apiReferencePages, warnings, delta) {
+function organizationPage(report, detailPages, apiReferencePages, diagnostics, delta) {
   const summary = object(report.summary);
   const coverage = object(report.coverage);
   const organization = object(report.organization);
@@ -1470,10 +1536,12 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
           "warn",
         )
       : "";
-  const warningNotice = warnings.length
+  const artifactWarnings = diagnostics.filter((item) => item.category === "artifact");
+  const renderWarnings = diagnostics.filter((item) => item.category === "render");
+  const warningNotice = artifactWarnings.length
     ? notice(
         "Some detailed reports or API references could not be rendered",
-        `${warnings.length} referenced artifact${warnings.length === 1 ? " was" : "s were"} unavailable or unsafe. The aggregate evidence remains visible.`,
+        `${artifactWarnings.length} saved-file problem(s) prevented access to detailed evidence. These are local inventory files, not GitHub Actions artifacts.`,
         "warn",
       )
     : "";
@@ -1495,15 +1563,28 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
         )
       : "",
     warningNotice,
-    warnings.length
+    invalidSpecificationsPanel(diagnostics),
+    artifactWarnings.length
       ? panel(
           "Artifact warnings",
-          `<div class="panel__body"><ul>${warnings
+          `<div class="panel__body"><ul>${artifactWarnings
             .slice(0, 100)
-            .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+            .map(
+              (item) =>
+                `<li>${escapeHtml([item.repository, item.artifactPath, item.message].filter(Boolean).join(": "))}</li>`,
+            )
             .join(
               "",
-            )}</ul>${warnings.length > 100 ? "<p>Showing the first 100 warnings; see render-manifest.json for all warnings.</p>" : ""}</div>`,
+            )}</ul>${artifactWarnings.length > 100 ? "<p>Showing the first 100 warnings; see render-manifest.json for all warnings.</p>" : ""}</div>`,
+        )
+      : "",
+    renderWarnings.length
+      ? panel(
+          "Render notices",
+          `<div class="panel__body"><ul>${renderWarnings
+            .slice(0, 100)
+            .map((item) => `<li>${escapeHtml(item.message)}</li>`)
+            .join("")}</ul></div>`,
         )
       : "",
     metrics([
@@ -1970,19 +2051,24 @@ function prepareOutput(output, kind) {
   return resolved;
 }
 
-function renderRepository(input, output, warnings, pages, assets) {
+function renderRepository(input, output, warnings, pages, assets, diagnostics) {
   const references = [];
   let descriptors = [];
   try {
     descriptors = repositoryApiDescriptors(input.value, input.value);
   } catch (error) {
-    warnings.push(`API specifications: ${String(error.message).split(input.root).join(".")}`);
+    const message = String(error.message).split(input.root).join(".");
+    diagnostics.add(
+      { code: "artifact-unavailable", category: "artifact", message },
+      `API specifications: ${message}`,
+    );
   }
   let swaggerUiWritten = false;
   const title = repositoryTitle(input.value, "repository");
   const used = new Set();
   for (const [index, descriptor] of descriptors.entries()) {
     try {
+      if (recordInvalidSpecification(input.root, descriptor, title, diagnostics)) continue;
       const document = descriptorDocument(input.root, descriptor);
       const description = describeRenderableSpecification(document);
       if (!swaggerUiWritten) {
@@ -2017,14 +2103,25 @@ function renderRepository(input, output, warnings, pages, assets) {
       );
     } catch (error) {
       const source = descriptor.source ? ` ${descriptor.source}` : "";
-      warnings.push(
+      diagnostics.add(
+        {
+          code: "artifact-unavailable",
+          category: "artifact",
+          repository: title,
+          sourcePath: descriptor.source,
+          artifactPath: descriptor.reference,
+          message: String(error.message).split(input.root).join("."),
+        },
         `API specification${source}: ${String(error.message).split(input.root).join(".")}`,
       );
     }
   }
   writeFile(
     path.join(output, "index.html"),
-    repositoryPage(input.value, "Repository report", { apiReferences: references }),
+    repositoryPage(input.value, "Repository report", {
+      apiReferences: references,
+      diagnostics: diagnostics.diagnostics,
+    }),
   );
 }
 
@@ -2037,6 +2134,7 @@ function renderOrganization(
   suppliedDelta = null,
   data = [],
   options = {},
+  diagnostics = createDiagnosticCollector(warnings),
 ) {
   const delta =
     suppliedDelta ||
@@ -2087,7 +2185,16 @@ function renderOrganization(
       try {
         scan = referencedRepositoryScan(input.root, entry);
       } catch (error) {
-        warnings.push(`${name}: ${safeError(error)}`);
+        diagnostics.add(
+          {
+            code: "artifact-unavailable",
+            category: "artifact",
+            repository: name,
+            artifactPath: entry.artifacts?.repositoryScan,
+            message: safeError(error),
+          },
+          `${name}: ${safeError(error)}`,
+        );
       }
     }
 
@@ -2124,10 +2231,19 @@ function renderOrganization(
             );
         }
       } catch (error) {
-        warnings.push(`${name} API specifications: ${safeError(error)}`);
+        diagnostics.add(
+          {
+            code: "artifact-unavailable",
+            category: "artifact",
+            repository: name,
+            message: safeError(error),
+          },
+          `${name} API specifications: ${safeError(error)}`,
+        );
       }
       for (const [descriptorIndex, descriptor] of descriptors.entries()) {
         try {
+          if (recordInvalidSpecification(input.root, descriptor, name, diagnostics)) continue;
           const document = descriptorDocument(input.root, descriptor);
           if (!swaggerUiWritten) {
             copySwaggerUiAssets(output);
@@ -2172,7 +2288,17 @@ function renderOrganization(
           );
         } catch (error) {
           const source = descriptor.source ? ` ${descriptor.source}` : "";
-          warnings.push(`${name} API specification${source}: ${safeError(error)}`);
+          diagnostics.add(
+            {
+              code: "artifact-unavailable",
+              category: "artifact",
+              repository: name,
+              sourcePath: descriptor.source,
+              artifactPath: descriptor.reference,
+              message: safeError(error),
+            },
+            `${name} API specification${source}: ${safeError(error)}`,
+          );
         }
       }
     }
@@ -2192,6 +2318,7 @@ function renderOrganization(
         assetPrefix: "../",
         backHref: "../index.html",
         delta: change,
+        diagnostics: diagnostics.diagnostics.filter((item) => item.repository === name),
         workspaceReferences: workspaceDescriptors.map((descriptor) => descriptor.workspace),
         apiReferences: list(apiReferencePages[index])
           .filter((reference) => !reference.importedScan)
@@ -2270,7 +2397,7 @@ function renderOrganization(
   }
   writeFile(
     path.join(output, "index.html"),
-    organizationPage(input.value, detailPages, apiReferencePages, warnings, delta),
+    organizationPage(input.value, detailPages, apiReferencePages, diagnostics.diagnostics, delta),
   );
   if (delta) {
     writeFile(
@@ -2291,6 +2418,15 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
   if (!outputPath) throw new Error("HTML report rendering requires an output directory");
   const input = resolveInput(inputPath);
   const warnings = [];
+  const diagnostics = createDiagnosticCollector(warnings);
+  // Native hashed inventories must pass their existing strict saved-state
+  // validation before rendering, including raw invalid-specification hashes.
+  // Legacy/unhashed inputs retain best-effort artifact warning behavior.
+  if (
+    input.kind === "organization" &&
+    fs.existsSync(path.join(input.root, "organization-manifest.json"))
+  )
+    require("./saved-state").loadOrganizationInventory(input.file);
   let suppliedDelta = null;
   if (options.baseline) {
     if (input.kind !== "organization") {
@@ -2334,9 +2470,10 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
       suppliedDelta,
       data,
       options,
+      diagnostics,
     );
   } else if (input.kind === "repository") {
-    renderRepository(input, output, warnings, pages, assets);
+    renderRepository(input, output, warnings, pages, assets, diagnostics);
   } else if (input.kind === "openapi") {
     writeFile(path.join(output, "assets", "openapi-config.js"), openApiConfigScript(input.value));
     writeFile(path.join(output, "index.html"), openApiPage(input.value));
@@ -2358,6 +2495,8 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
     assets,
     data: [...(delta ? [ORGANIZATION_DELTA_FILENAME] : []), ...data],
     warnings,
+    diagnostics: diagnostics.diagnostics,
+    diagnosticSummary: diagnostics.summary,
   };
   writeFile(path.join(output, "render-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
   return { ...manifest, output: path.join(output, "index.html") };

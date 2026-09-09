@@ -1113,6 +1113,7 @@ function runRender(args) {
         output: result.output,
         pages: result.pages.length,
         warnings: result.warnings.length,
+        diagnosticSummary: result.diagnosticSummary,
         ...(args.check ? { current: result.current, changedFiles: result.changedFiles } : {}),
       },
       null,
@@ -2842,7 +2843,7 @@ async function main(argv) {
   if (args.command === "validate") {
     const saved = require("./saved-state").loadSavedState(args.input);
     process.stdout.write(
-      `${JSON.stringify({ kind: "saved-state-validation", valid: true, sourceKind: saved.kind, validation: saved.validation, repositories: saved.report?.repositories?.length, applicationId: saved.manifest?.selection.applicationId })}\n`,
+      `${JSON.stringify({ kind: "saved-state-validation", valid: true, sourceKind: saved.kind, validation: saved.validation, diagnosticSummary: saved.validation?.diagnosticSummary || require("./report-diagnostics").summarizeDiagnostics([]), repositories: saved.report?.repositories?.length, applicationId: saved.manifest?.selection.applicationId })}\n`,
     );
     return 0;
   }

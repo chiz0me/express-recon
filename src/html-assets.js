@@ -236,6 +236,12 @@ tr[hidden] { display: none; }
 .key-values { display: grid; grid-template-columns: minmax(130px, 0.3fr) 1fr; gap: 8px 16px; margin: 0; }
 .key-values dt { color: var(--muted); }
 .key-values dd { margin: 0; overflow-wrap: anywhere; }
+.invalid-specification-repository { border-top: 1px solid var(--border); margin-top: 12px; }
+.invalid-specification-repository > summary { cursor: pointer; padding: 12px 0; font-weight: 700; }
+.invalid-specification-repository > details { margin: 0 0 12px 16px; }
+.invalid-specification-repository > details > summary { cursor: pointer; padding: 8px 0; }
+.specification-diagnostic { padding: 8px 12px; background: var(--panel-muted); border-radius: 8px; margin-top: 8px; overflow-wrap: anywhere; }
+.specification-diagnostic li + li { margin-top: 12px; }
 .empty { margin: 0; color: var(--muted); font-style: italic; }
 
 .site-footer { padding: 24px 0 42px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }

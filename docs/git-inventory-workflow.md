@@ -199,6 +199,89 @@ Generated OpenAPI, reconciled contracts, and accepted enrichment workspaces stil
 require valid references; they cannot opt into the retained-source exception.
 Changing any retained raw artifact still fails integrity validation.
 
+### Diagnostic output contract (v0.17.4+)
+
+`renderHtmlSite()` / `checkHtmlSite()` results and `render-manifest.json` add
+`diagnostics` and `diagnosticSummary`. Saved-state loaders add the same fields
+inside `validation`. The machine-readable `validate` CLI also places
+`diagnosticSummary` at the top level; the `render` CLI includes that summary but
+leaves full details in the render manifest and HTML. Existing CLI fields and exit
+codes are unchanged.
+
+Every diagnostic contains these required fields:
+
+| Field           | Type           | Meaning                                                                                  |
+| --------------- | -------------- | ---------------------------------------------------------------------------------------- |
+| `code`          | string         | `invalid-source-specification`, `artifact-unavailable`, or `render-warning`              |
+| `category`      | string         | `invalid-api-specification`, `artifact`, or `render`, respectively                       |
+| `repository`    | string or null | Repository identity when known                                                           |
+| `applicationId` | string or null | Associated application when known                                                        |
+| `sourcePath`    | string or null | Original repository-relative source path                                                 |
+| `artifactPath`  | string or null | Saved-file path relative to the inventory/input root, not a GitHub Actions artifact name |
+| `message`       | string         | Complete recorded diagnostic message                                                     |
+
+`reference` is an optional string containing the invalid reference, when recorded.
+Invalid-spec diagnostics also include `cause`: `unresolved-reference`,
+`external-reference`, `invalid-schema`, or `invalid-document`. The cause is a display
+group inferred from the recorded v0.17.3-compatible message; it does not replace
+the original evidence or change validation decisions. Other categories omit it.
+The published schema is [report-diagnostics-v1.schema.json](../schemas/native/report-diagnostics-v1.schema.json).
+
+The summary always includes all keys, including zero counts:
+
+```json
+{
+  "total": 40,
+  "byCategory": {
+    "invalid-api-specification": 40,
+    "artifact": 0,
+    "render": 0
+  },
+  "invalidSpecifications": 40,
+  "affectedRepositories": 6
+}
+```
+
+The numbers above are illustrative. `total` and category counts count unique
+diagnostics after exact deduplication of all structured fields. `invalidSpecifications`
+counts unique `(repository, artifactPath)` identities (falling back to `sourcePath`
+when no saved-file path exists); `affectedRepositories` counts distinct known
+repositories with invalid specifications, case-insensitively. Several diagnostics
+can describe one specification. Other categories do not affect these two counts.
+
+The legacy `warnings` string array in render results/manifests and organization
+`validation.warnings` remains available, including invalid-spec warning strings.
+The render CLI retains its numeric `warnings` count. These legacy observations may
+contain duplicates and must **not** be used as artifact-error counts. Consumers
+should use `diagnosticSummary.byCategory` instead. Unclassified legacy integration
+or comparison warnings use category `render`; real saved-file access errors use
+category `artifact`.
+
+HTML separates “Invalid API specifications”, “Artifact warnings”, and “Render
+notices”. Invalid specifications are grouped by repository, cause, and exact
+message; identical messages appear once per group with their associated source
+paths, retained-copy paths, application IDs, and references. Repository and cause
+details start collapsed. Each page displays at most 25 repository groups, 10 cause
+groups per repository, and 100 detailed diagnostic entries overall. Displayed
+messages are limited to 2,000 characters. Complete deduplicated diagnostics and
+full messages remain in `render-manifest.json`, without those display limits.
+
+For native inventories with an integrity manifest, rendering first runs strict
+saved-state validation: missing/unsafe files, mismatched hashes, and invalid
+generated or enriched contracts are fatal and leave the previous site intact.
+Legacy/unhashed inputs retain best-effort rendering and report file problems under
+“Artifact warnings”. A missing or unsafe raw copy is a file problem, not a retained
+invalid-spec warning. Source invalidity itself remains non-blocking and does not
+change coverage, raw bytes, hashes, viewer exclusion, or strict enrichment checks.
+
+**Upgrading from v0.17.3:** no inventory migration, rescan, or re-acceptance is needed
+for these reporting changes. Update the package pin to v0.17.4 and rerender the
+existing inventory. Generated HTML/manifests change, so `render --check` reports
+them outdated until regenerated. Allow the additive fields in strict consumer
+models and use the category summary instead of parsing warning text. Input schemas
+and the render-manifest `schemaVersion: "1.0"` remain unchanged; no source credentials
+or checkouts are needed to validate or rerender.
+
 To recover a v0.17.2 inventory affected by an invalid retained reference, upgrade
 to v0.17.3 and run `scan-org --resume` against the saved checkpoint. Repositories
 with older retained-spec metadata are rescanned once to establish the new status

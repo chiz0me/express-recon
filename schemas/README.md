@@ -12,6 +12,8 @@ Native saved-state schemas are also generated from `src/saved-state-schema.js`:
 - [Organization inventory](native/organization-v1.schema.json)
 - [Organization integrity manifest](native/organization-manifest-v1.schema.json)
 - [Workspace source provenance](native/workspace-source-v1.schema.json)
+- [Report diagnostics and summary](native/report-diagnostics-v1.schema.json) — additive
+  fields on render results/manifests and saved-state `validation` objects.
 
 Use the public saved-state loaders for complete cross-file, integrity, OpenAPI,
 and compatibility checks; schema validation alone cannot verify referenced evidence.

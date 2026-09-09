@@ -4,6 +4,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { REPORT_SCHEMA } = require("../src/schema");
+const { DIAGNOSTICS_SCHEMA } = require("../src/report-diagnostics");
 const {
   SOURCE_SCHEMA,
   ORGANIZATION_SCHEMA,
@@ -15,6 +16,7 @@ for (const [name, schema] of Object.entries({
   "workspace-source-v1": SOURCE_SCHEMA,
   "organization-v1": ORGANIZATION_SCHEMA,
   "organization-manifest-v1": ORGANIZATION_MANIFEST_SCHEMA,
+  "report-diagnostics-v1": DIAGNOSTICS_SCHEMA,
 })) {
   const file = path.join(__dirname, `../schemas/native/${name}.schema.json`);
   const value = JSON.stringify(schema);

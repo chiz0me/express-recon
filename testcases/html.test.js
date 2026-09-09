@@ -1375,6 +1375,106 @@ test("HTML input and output validation fail clearly", () => {
   });
 });
 
+test("invalid specification diagnostics are grouped and deduplicated separately from actual artifact errors", () => {
+  temporary("html-specification-diagnostics", (root) => {
+    const message = "Unresolved OpenAPI reference: #/components/responses/ForbiddenResponse";
+    const specifications = Array.from({ length: 110 }, (_, index) => {
+      const artifact = `raw/api-${String(index).padStart(3, "0")}.yaml`;
+      fs.mkdirSync(path.join(root, "raw"), { recursive: true });
+      fs.writeFileSync(path.join(root, artifact), "unchanged invalid raw source\n");
+      return {
+        status: "invalid",
+        path: `source/api-${index}.yaml`,
+        artifact,
+        applicationId: "app:api",
+        diagnostic: { message, reference: "#/components/responses/ForbiddenResponse" },
+      };
+    });
+    const second = {
+      ...specifications[0],
+      applicationId: null,
+      diagnostic: { message: "OpenAPI schema validation failed: invalid response" },
+    };
+    const input = path.join(root, "organization-inventory.json");
+    writeJson(input, {
+      kind: "github-organization-inventory",
+      organization: { login: "acme" },
+      coverage: { complete: false },
+      summary: {},
+      repositories: [
+        {
+          repository: { name: "api", fullName: "acme/api" },
+          status: "express",
+          scan: repositoryScan({ documentation: { status: "cataloged" } }),
+          artifacts: { specifications: [...specifications, specifications[0]] },
+        },
+        {
+          repository: { name: "second", fullName: "acme/second" },
+          status: "inconclusive",
+          scan: repositoryScan({ documentation: { status: "needs-input" } }),
+          artifacts: { specifications: [second] },
+        },
+        {
+          repository: { name: "missing", fullName: "acme/missing" },
+          status: "inconclusive",
+          scan: repositoryScan({ documentation: { status: "needs-input" } }),
+          artifacts: {
+            specifications: [
+              { ...specifications[0], artifact: "raw/missing.yaml" },
+              { ...specifications[0], artifact: "../escaped.yaml" },
+            ],
+          },
+        },
+      ],
+    });
+    const result = renderHtmlSite(input, path.join(root, "site"));
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(root, "site/render-manifest.json"), "utf8"),
+    );
+    const html = fs.readFileSync(result.output, "utf8");
+    assert.deepEqual(result.diagnosticSummary, {
+      total: 113,
+      byCategory: { "invalid-api-specification": 111, artifact: 2, render: 0 },
+      invalidSpecifications: 111,
+      affectedRepositories: 2,
+    });
+    assert.equal(result.warnings.length, 114, "legacy warning observations remain compatible");
+    assert.deepEqual(manifest.diagnostics, result.diagnostics);
+    const validate = new (require("ajv/dist/2020"))({ strict: false }).compile(
+      require("../src/report-diagnostics").DIAGNOSTICS_SCHEMA,
+    );
+    assert.equal(validate(manifest), true, JSON.stringify(validate.errors));
+    assert.ok(html.includes("111 invalid specifications across 2 repositories"));
+    assert.ok(html.includes("Showing 100 of 111 diagnostics"));
+    assert.equal(
+      html.split(message).length - 1,
+      1,
+      "identical diagnostic messages are displayed only once per group",
+    );
+    assert.ok(html.includes("Unresolved internal references"));
+    assert.ok(html.includes("Invalid OpenAPI schema"));
+    assert.ok(html.includes("Retained raw copy"));
+    assert.ok(html.includes("Application ID"));
+    assert.ok(html.includes("Artifact warnings"));
+    assert.ok(!html.includes("unavailable or unsafe"));
+    const warningSection = html.slice(html.indexOf("Artifact warnings"));
+    assert.ok(
+      !warningSection.includes("ForbiddenResponse"),
+      "invalid source diagnostics do not appear under artifact warnings",
+    );
+    assert.ok(
+      result.diagnostics.some((item) => item.sourcePath === "source/api-109.yaml"),
+      "full details remain in manifest",
+    );
+    assert.ok(
+      result.diagnostics
+        .filter((item) => item.category === "artifact")
+        .every((item) => item.repository === "acme/missing"),
+    );
+    assert.ok(!result.pages.some((name) => name.startsWith("openapi/")));
+  });
+});
+
 test("organization rendering rejects absolute, missing, wrong-kind, and escaping symlink artifacts", () => {
   temporary("html-artifacts", (root) => {
     const outside = path.join(path.dirname(root), `${path.basename(root)}-outside.json`);
@@ -1416,6 +1516,8 @@ test("organization rendering rejects absolute, missing, wrong-kind, and escaping
       const result = renderHtmlSite(root, path.join(root, "site"));
       assert.equal(result.pages.length, 1);
       assert.equal(result.warnings.length, 4);
+      assert.equal(result.diagnosticSummary.byCategory.artifact, 4);
+      assert.equal(result.diagnosticSummary.invalidSpecifications, 0);
       assert.ok(result.warnings.some((warning) => /must be relative/.test(warning)));
       assert.ok(result.warnings.some((warning) => /Could not read|ENOENT/.test(warning)));
       assert.ok(result.warnings.some((warning) => /wrong kind/.test(warning)));
@@ -1559,6 +1661,12 @@ test("render CLI supports explicit paths and safe input/output defaults", () => 
       output: path.join(output, "index.html"),
       pages: 1,
       warnings: 0,
+      diagnosticSummary: {
+        total: 0,
+        byCategory: { "invalid-api-specification": 0, artifact: 0, render: 0 },
+        invalidSpecifications: 0,
+        affectedRepositories: 0,
+      },
     });
 
     const specification = path.join(root, "contract.json");
@@ -1576,6 +1684,12 @@ test("render CLI supports explicit paths and safe input/output defaults", () => 
       output: path.join(openApiOutput, "index.html"),
       pages: 1,
       warnings: 0,
+      diagnosticSummary: {
+        total: 0,
+        byCategory: { "invalid-api-specification": 0, artifact: 0, render: 0 },
+        invalidSpecifications: 0,
+        affectedRepositories: 0,
+      },
     });
 
     const inputOnly = path.join(root, "input-only");

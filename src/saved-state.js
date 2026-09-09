@@ -17,6 +17,10 @@ const {
 const pkg = require("../package.json");
 const { validateSavedContract, validateSavedToolVersion } = require("./saved-state-schema");
 const { validateReferences, specificationContext } = require("./specification-references");
+const {
+  createDiagnosticCollector,
+  invalidSpecificationDiagnostic,
+} = require("./report-diagnostics");
 const MANIFEST = "organization-manifest.json";
 let routeValidator;
 
@@ -131,6 +135,7 @@ function loadOrganizationInventory(input) {
       "Unsupported organization evidence compatibility version; rescan before enrichment",
     );
   const validation = { integrity: "legacy-unhashed", warnings: [] };
+  const diagnostics = createDiagnosticCollector(validation.warnings);
   if (fs.existsSync(path.join(snapshot.root, MANIFEST))) {
     const manifest = json(snapshot.root, MANIFEST);
     validateSavedContract("organizationManifest", manifest);
@@ -189,7 +194,8 @@ function loadOrganizationInventory(input) {
               throw new Error(
                 `Invalid retained specification metadata (${specificationContext(context)})`,
               );
-            validation.warnings.push(
+            diagnostics.add(
+              invalidSpecificationDiagnostic(specification, entry.repository.fullName),
               `${specification.diagnostic.message} (${specificationContext(context)})`,
             );
             continue;
@@ -286,6 +292,8 @@ function loadOrganizationInventory(input) {
         throw new Error("Saved checkpoint repository evidence differs from organization inventory");
     }
   }
+  validation.diagnostics = diagnostics.diagnostics;
+  validation.diagnosticSummary = diagnostics.summary;
   return { ...snapshot, scans, validation };
 }
 

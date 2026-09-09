@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.4
+
+- Separate retained invalid source specifications from saved-file access errors.
+  Organization HTML shows “Invalid API specifications” with specification and
+  repository counts, collapsed repository/cause groups, and deduplicated messages.
+  “Artifact warnings” is reserved for saved-file problems; other notices are separate.
+- Add deduplicated structured `diagnostics` and `diagnosticSummary` to render
+  results/manifests and saved-state validation. CLI summaries include category
+  counts while preserving existing warning fields for consuming tools.
+- Publish the additive diagnostics JSON Schema and document exact fields, count
+  semantics, display limits, and v0.17.3 integration compatibility.
+- Verify native organization integrity manifests before rendering. Invalid raw
+  source files remain retained and excluded from API viewers; hash failures and
+  invalid generated/enriched specifications remain fatal. Failed renders preserve
+  the existing site.
+
 ## 0.17.3
 
 - Validate retained OpenAPI/Swagger references during repository scans. Invalid

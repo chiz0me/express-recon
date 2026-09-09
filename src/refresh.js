@@ -1197,6 +1197,8 @@ function loadRefreshWorkspace(output, options = {}) {
     documentationReport,
     report,
     validation: {
+      diagnostics: [],
+      diagnosticSummary: require("./report-diagnostics").summarizeDiagnostics([]),
       integrity: state.manifest.ownedFiles.every(
         (file) => file === REFRESH_MANIFEST || Object.hasOwn(state.manifest.integrity, file),
       )
