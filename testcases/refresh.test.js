@@ -59,6 +59,37 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+test("accepted enrichment survives ordinary comments and formatting but reviews documentation changes", () => {
+  fixture((root) => {
+    runRefresh(root, ["--no-render"]);
+    const output = path.join(root, ".express-recon", "api");
+    const file = path.join(output, "openapi.json");
+    const edited = readJson(file);
+    edited.paths["/things/{id}"].get.summary = "Accepted documentation";
+    writeJson(file, edited);
+    runRefresh(root, ["--accept-enrichment", "--no-render"]);
+    fs.writeFileSync(
+      path.join(root, "app.js"),
+      "// ordinary comment\n\n" +
+        source().replace("const app = express();", "const app=express( );"),
+    );
+    const clean = JSON.parse(
+      runRefresh(root, ["--no-render", "--fail-on", "enrichment-stale"]).stdout,
+    );
+    assert.equal(clean.enrichmentSummary.appliedOperations, 1);
+    assert.equal(readJson(file).paths["/things/{id}"].get.summary, "Accepted documentation");
+    fs.appendFileSync(
+      path.join(root, "app.js"),
+      "\n/** Generated API documentation may depend on this comment. */\n",
+    );
+    const stale = JSON.parse(
+      runRefresh(root, ["--no-render", "--fail-on", "enrichment-stale"], 2).stdout,
+    );
+    assert.equal(stale.enrichmentSummary.staleOperations, 1);
+    assert.equal(readJson(path.join(output, "openapi.enrichment.json")).operations.length, 1);
+  });
+});
+
 test("refresh uses durable defaults, computes deltas, and renders automatically", () => {
   fixture((root) => {
     const result = JSON.parse(runRefresh(root).stdout);
@@ -386,7 +417,7 @@ test("refresh records no-change review receipts and can renew stale evidence", (
     const receipt = readJson(path.join(output, "openapi.enrichment.json")).operations[0];
     assert.deepEqual(receipt.fields, {});
 
-    fs.appendFileSync(path.join(root, "app.js"), "\n// reviewed implementation changed\n");
+    fs.appendFileSync(path.join(root, "app.js"), "\napp.disable('etag');\n");
     const stale = JSON.parse(runRefresh(root, ["--no-render"]).stdout);
     assert.equal(stale.enrichmentSummary.staleOperations, 1);
     const renewed = JSON.parse(

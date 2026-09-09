@@ -30,6 +30,7 @@ const { loadConfig } = require("./config");
 const { loadReviewFile } = require("./review");
 const { defaultRenderOutput, detectRenderInput } = require("./html");
 const { defaultRefreshOutput, readRefreshDefaults, refreshDocumentation } = require("./refresh");
+const { createGitHubTokenProvider } = require("./github-auth");
 const { acquireArtifactLock } = require("./artifact-transaction");
 const { createAnalysisSession } = require("./analysis-session");
 const {
@@ -87,6 +88,8 @@ Commands:
                 and the offline route inventory into OpenAPI + drift evidence.
   refresh       Refresh durable OpenAPI state, preserve accepted AI enrichment
                 while its evidence matches, compute route changes, and render HTML.
+  prepare       Prepare application workspaces from saved org inventory and local source.
+  validate      Validate saved inventory or workspaces offline without writing files.
   review-middleware
                 Export bounded source evidence + a provider-neutral assessment
                 schema for human or AI middleware classification.
@@ -133,6 +136,12 @@ Options:
                         repository for scan-repo (HTTPS/GitHub shorthand/local).
   --org <name>          GitHub organization for scan-org. GH_TOKEN or GITHUB_TOKEN
                         adds repositories visible to that token and private fetches.
+  --auth <mode>         scan-org/scan-repo: auto (default), github-app, or token.
+                        App credentials: GITHUB_APP_ID, GITHUB_INSTALLATION_ID,
+                        GITHUB_APP_PRIVATE_KEY (multiline PEM supported).
+  --check              render: compare output in memory, exit 2 if stale; no writes.
+  --workspaces <dir>   render: discover native application workspaces (repeatable).
+  --shared-assets     render: share one offline API viewer across organization apps.
   --ref <git-ref>       branch, tag, or commit to fetch (default: remote HEAD).
   --max-repos <n>       scan-org repository cap (default 100; maximum 10000).
   --concurrency <n>     scan-org snapshots processed at once (default 1; maximum 8).
@@ -295,6 +304,8 @@ const COMMANDS = new Set([
   "import-review",
   "inventory",
   "notify",
+  "prepare",
+  "validate",
   "refresh",
   "review-middleware",
   "render",
@@ -306,6 +317,7 @@ const COMMANDS = new Set([
 const MODES = new Set(["static", "runtime", "hybrid"]);
 const FORMATS = new Set(["json", "md", "pretty", "openapi"]);
 const REPEATABLE_OPTIONS = new Set([
+  "--workspaces",
   "--allow-host",
   "--clear-operation",
   "--clear-schema",
@@ -368,6 +380,7 @@ function parseArgs(argv) {
     if (arg === "--help" || arg === "-h") out.help = true;
     else if (arg === "--mode") out.mode = takeValue(arg, i++);
     else if (arg === "--src") out.src = takeValue(arg, i++);
+    else if (arg === "--auth") out.auth = takeValue(arg, i++);
     else if (arg === "--app") out.app = takeValue(arg, i++);
     else if (arg === "--app-id") out.appId = takeValue(arg, i++);
     else if (arg === "--spec") out.spec = takeValue(arg, i++);
@@ -378,6 +391,7 @@ function parseArgs(argv) {
     else if (arg === "--review") out.review = takeValue(arg, i++);
     else if (arg === "--assessment") out.assessment = takeValue(arg, i++);
     else if (arg === "--input") out.input = takeValue(arg, i++);
+    else if (arg === "--workspaces") (out.workspaces ||= []).push(takeValue(arg, i++));
     else if (arg === "--provider") out.provider = takeValue(arg, i++);
     else if (arg === "--events") out.events = takeValue(arg, i++);
     else if (arg === "--url-env") out.urlEnv = takeValue(arg, i++);
@@ -420,6 +434,11 @@ function parseArgs(argv) {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
       out.includeSource = true;
+    } else if (arg === "--check" || arg === "--shared-assets") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      if (arg === "--check") out.check = true;
+      else out.sharedAssets = true;
     } else if (arg === "--dry-run") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
@@ -494,6 +513,34 @@ function validateArgs(args) {
 
   if ((args.command === "schema" || args.command === "help") && args.provided.size) {
     throw new Error(`${args.command} does not accept scan or output options`);
+  }
+  if (args.command === "validate" || args.command === "prepare") {
+    const supported = new Set(
+      args.command === "validate"
+        ? ["--input"]
+        : [
+            "--input",
+            "--repo",
+            "--src",
+            "--app-id",
+            "--out",
+            "--config",
+            "--ignore-file",
+            "--no-ignore-file",
+            "--include",
+            "--exclude",
+            "--include-tests",
+            "--include-hidden",
+            "--no-render",
+            "--render",
+          ],
+    );
+    const unsupported = [...args.provided].filter((option) => !supported.has(option));
+    if (unsupported.length)
+      throw new Error(`${args.command} does not accept ${unsupported.join(", ")}`);
+    if (!args.input) throw new Error(`${args.command} requires --input`);
+    if (args.command === "prepare" && (!args.src || !args.repo || !args.out))
+      throw new Error("prepare requires --src, --repo, and --out");
   }
   if (args.command === "inventory" || args.command === "audit") {
     const supported = new Set([
@@ -669,7 +716,14 @@ function validateArgs(args) {
     }
   }
   if (args.command === "render") {
-    const supported = new Set(["--baseline", "--input", "--out"]);
+    const supported = new Set([
+      "--baseline",
+      "--input",
+      "--out",
+      "--check",
+      "--workspaces",
+      "--shared-assets",
+    ]);
     const unsupported = [...args.provided].filter((option) => !supported.has(option));
     if (unsupported.length) throw new Error(`render does not accept ${unsupported.join(", ")}`);
   }
@@ -720,6 +774,7 @@ function validateArgs(args) {
   }
   if (args.command === "scan-repo") {
     const supported = new Set([
+      "--auth",
       "--app-id",
       "--config",
       "--exclude",
@@ -754,6 +809,7 @@ function validateArgs(args) {
   }
   if (args.command === "scan-org") {
     const supported = new Set([
+      "--auth",
       "--concurrency",
       "--baseline",
       "--config",
@@ -1043,6 +1099,9 @@ function runRender(args) {
   const output = args.out ? resolvePath(args.out) : defaultRenderOutput(input);
   const result = renderHtmlSite(input, output, {
     baseline: args.baseline ? resolvePath(args.baseline) : undefined,
+    check: args.check,
+    workspaces: args.workspaces?.map(resolvePath),
+    sharedAssets: args.sharedAssets,
   });
   process.stdout.write(
     JSON.stringify(
@@ -1052,12 +1111,13 @@ function runRender(args) {
         output: result.output,
         pages: result.pages.length,
         warnings: result.warnings.length,
+        ...(args.check ? { current: result.current, changedFiles: result.changedFiles } : {}),
       },
       null,
       2,
     ) + "\n",
   );
-  return 0;
+  return args.check && !result.current ? 2 : 0;
 }
 
 function readNotificationReport(input) {
@@ -1499,6 +1559,38 @@ function refreshInvocation(root, args) {
 async function runRefresh(args) {
   const root = fs.realpathSync(resolvePath(args.src || process.cwd()));
   const output = args.out ? resolvePath(args.out) : defaultRefreshOutput(root);
+  if (fs.existsSync(path.join(output, "source.json"))) {
+    for (const flag of [
+      "--config",
+      "--include",
+      "--exclude",
+      "--ignore-file",
+      "--no-ignore-file",
+      "--include-tests",
+      "--include-hidden",
+      "--app-id",
+      "--spec",
+      "--jsdoc",
+      "--overwrite",
+    ]) {
+      if (args.provided.has(flag))
+        throw new Error(
+          `Native workspaces use saved source settings; use prepare to change ${flag}`,
+        );
+    }
+    const result = require("./workspace").refreshSourceWorkspace({
+      root,
+      output,
+      acceptEnrichment: args.acceptEnrichment,
+      reviewOperations: args.reviewOperations,
+      clearOperations: args.clearOperations,
+      clearSchemas: args.clearSchemas,
+      render: args.render,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    const saved = require("./refresh").loadRefreshWorkspace(output);
+    return refreshFailOnExit(saved.documentationReport, result, args.failOn);
+  }
   const defaults = readRefreshDefaults(root, output, {
     acceptEnrichment: args.acceptEnrichment,
     overwrite: args.overwrite,
@@ -1711,7 +1803,14 @@ async function runScanRepository(args) {
   ) {
     throw new Error("scan-repo public/unknown/policy gates require an audit --config");
   }
-  const githubToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || undefined;
+  const tokenProvider = createGitHubTokenProvider({ auth: args.auth, environment: process.env });
+  if (tokenProvider.mode === "github-app") {
+    const identity = /^(?:https:\/\/github\.com\/)?([A-Za-z0-9-]+)\//.exec(args.repo);
+    if (!identity)
+      throw new Error("GitHub App authentication requires a GitHub repository identity");
+    await tokenProvider.verifyOrganization(identity[1]);
+  }
+  const githubToken = await tokenProvider.getToken();
   const outDir = args.out ? resolvePath(args.out) : null;
   const result = scanRepository(args.repo, {
     ref: args.ref,
@@ -2355,6 +2454,11 @@ async function executeScanOrganization(args, dependencies, reporter) {
   const outDir = resolvePath(args.out);
   const environment = dependencies.environment || process.env;
   const token = environment.GH_TOKEN || environment.GITHUB_TOKEN || undefined;
+  const tokenProvider = createGitHubTokenProvider({
+    auth: args.auth,
+    environment,
+    fetchImpl: dependencies.fetchImpl,
+  });
   const scan = dependencies.scanOrganization || scanOrganization;
   const scanOptions = discoveryOptions(args, config);
   const maxRepositories =
@@ -2464,6 +2568,7 @@ async function executeScanOrganization(args, dependencies, reporter) {
   );
   const result = await scan(args.org, {
     token,
+    tokenProvider,
     config,
     scan: scanOptions,
     maxRepositories,
@@ -2530,6 +2635,7 @@ async function executeScanOrganization(args, dependencies, reporter) {
   // The CLI may be supplied a custom scanner implementation, but artifacts it
   // writes still participate in this process's resume/update contract.
   result.evidenceCompatibilityVersion = identity.compatibilityVersion;
+  result.scanSettings = require("./workspace").portableScanSettings(config, scanOptions);
   result.resume = {
     requested: args.resume === true,
     repositoriesReused: result.summary?.repositoriesResumed || 0,
@@ -2609,6 +2715,7 @@ async function executeScanOrganization(args, dependencies, reporter) {
     removeOrganizationBaseline(outDir);
   }
   const gateHits = organizationGateHits(result, gateStatuses, outDir);
+  require("./saved-state").writeOrganizationManifest(outDir, result);
   if (gateHits > 0) {
     const message =
       args.failOn === "incomplete"
@@ -2692,6 +2799,48 @@ async function main(argv) {
     return 0;
   }
   if (args.command === "discover") return runDiscover(args);
+  if (args.command === "validate") {
+    const saved = require("./saved-state").loadSavedState(args.input);
+    process.stdout.write(
+      `${JSON.stringify({ kind: "saved-state-validation", valid: true, sourceKind: saved.kind, validation: saved.validation, repositories: saved.report?.repositories?.length, applicationId: saved.manifest?.selection.applicationId })}\n`,
+    );
+    return 0;
+  }
+  if (args.command === "prepare") {
+    if (
+      !args.config &&
+      [
+        "--include",
+        "--exclude",
+        "--ignore-file",
+        "--no-ignore-file",
+        "--include-tests",
+        "--include-hidden",
+      ].some((flag) => args.provided.has(flag))
+    )
+      throw new Error(
+        "prepare scan overrides require --config; otherwise the inventory's saved settings are used",
+      );
+    const config = args.config ? loadConfig(args.config) : undefined;
+    const result = require("./workspace").prepareWorkspaces({
+      input: args.input,
+      repository: args.repo,
+      root: args.src,
+      output: resolvePath(args.out),
+      applicationId: args.appId,
+      render: args.render ?? false,
+      ...(config
+        ? {
+            scanSettings: require("./workspace").portableScanSettings(
+              config,
+              discoveryOptions(args, config),
+            ),
+          }
+        : {}),
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
   if (args.command === "docs") return runDocs(args);
   if (args.command === "refresh") return runRefresh(args);
   if (args.command === "review-middleware") return runMiddlewareReview(args);

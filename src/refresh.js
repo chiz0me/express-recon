@@ -17,6 +17,7 @@ const {
 } = require("./artifact-transaction");
 const { compareOpenApiDocuments } = require("./openapi-compare");
 const { validateOpenApiDocument } = require("./openapi-validation");
+const { semanticSourceHash, stableSourceLocations } = require("./source-semantics");
 
 const REFRESH_MANIFEST = "refresh-manifest.json";
 const ENRICHMENT_FILE = "openapi.enrichment.json";
@@ -250,7 +251,11 @@ function sourceFingerprint(root, reference) {
     if (stat.size > MAX_FINGERPRINT_SOURCE_BYTES) {
       return { file, status: "too-large", bytes: stat.size };
     }
-    return { file, status: "hashed", sha256: hash(fs.readFileSync(realFile)) };
+    return {
+      file,
+      status: "hashed",
+      sha256: semanticSourceHash(realFile, fs.readFileSync(realFile)),
+    };
   } catch (error) {
     return { file, status: error.code === "ENOENT" ? "missing" : "unreadable" };
   }
@@ -272,6 +277,7 @@ function operationFingerprint(root, operation) {
   const metadata = object(copy["x-express-recon"]);
   delete metadata.enrichmentFingerprint;
   delete metadata.enrichmentSources;
+  copy["x-express-recon"] = stableSourceLocations(metadata);
   const sourceReferences = [...collectFileReferences(metadata)].sort();
   if (sourceReferences.length > MAX_FINGERPRINT_SOURCES) {
     throw new Error(
@@ -284,13 +290,14 @@ function operationFingerprint(root, operation) {
   });
 }
 
-function addOperationFingerprints(document, root) {
+function addOperationFingerprints(document, root, settingsFingerprint) {
   const output = clone(document);
   for (const entry of operationEntries(output)) {
     const metadata = object(entry.operation["x-express-recon"]);
     if (entry.operation["x-express-recon"] !== metadata) {
       define(entry.operation, "x-express-recon", metadata);
     }
+    if (settingsFingerprint) metadata.workspaceSettingsFingerprint = settingsFingerprint;
     metadata.enrichmentFingerprint = operationFingerprint(root, entry.operation);
   }
   return output;
@@ -779,7 +786,7 @@ function schemaCompatibility(root, entry, current, currentDependents) {
   return null;
 }
 
-function applyEnrichment(root, base, enrichment) {
+function applyEnrichment(root, base, enrichment, options = {}) {
   const output = clone(base);
   const current = new Map(operationEntries(output).map((entry) => [entry.key, entry.operation]));
   const applicableOperations = new Map();
@@ -792,8 +799,26 @@ function applyEnrichment(root, base, enrichment) {
       removedOperations.push(entry.operation);
       continue;
     }
-    const reason = operationCompatibility(root, operation, entry);
-    if (reason) staleOperationDetails.push({ operation: entry.operation, reason });
+    const reason = options.scopeChange
+      ? "scan-settings-changed"
+      : operationCompatibility(root, operation, entry);
+    if (reason)
+      staleOperationDetails.push({
+        operation: entry.operation,
+        reason,
+        explanation:
+          reason === "scan-settings-changed"
+            ? "The saved scan settings changed; review this acceptance under the new scope."
+            : reason === "reviewed-source-changed"
+              ? "A reviewer-declared dependency changed or is unavailable."
+              : "Generated operation evidence, documentation comments, or meaningful referenced source changed. Review the listed evidence files; whole-file detection is conservative.",
+        evidenceFiles: [
+          ...new Set([
+            ...collectFileReferences(operation["x-express-recon"]),
+            ...(entry.reviewedSources || []).map((source) => source.file),
+          ]),
+        ].sort(),
+      });
     else applicableOperations.set(entry.operation, entry);
   }
 
@@ -830,7 +855,9 @@ function applyEnrichment(root, base, enrichment) {
   const applicableSchemas = new Map();
   const dormantSchemas = [];
   for (const [name, entry] of matchingSchemas) {
-    const reason = schemaCompatibility(root, entry, prospectiveCurrent, currentDependents);
+    const reason = options.scopeChange
+      ? "scan-settings-changed"
+      : schemaCompatibility(root, entry, prospectiveCurrent, currentDependents);
     if (reason) {
       staleSchemaDetails.push({ name, reason });
     } else if (!Object.hasOwn(baseSchemas, name) && !(currentDependents.get(name)?.size > 0)) {
@@ -886,7 +913,7 @@ function applyEnrichment(root, base, enrichment) {
     tool: "express-recon",
     schemaVersion: ENRICHMENT_SCHEMA_VERSION,
     artifact: ENRICHMENT_FILE,
-    fingerprintPolicy: "operation-all-evidence-and-schema-dependencies-v2",
+    fingerprintPolicy: "operation-semantic-source-and-schema-dependencies-v3",
     summary,
   };
   return {
@@ -1045,6 +1072,13 @@ function validateManifest(manifest, output) {
   }
   const owned = new Set(manifest.ownedFiles);
   if (
+    manifest.provenance &&
+    manifest.ownedFiles.some(
+      (file) => file !== REFRESH_MANIFEST && !Object.hasOwn(manifest.integrity, file),
+    )
+  )
+    throw new Error("Native workspace integrity must cover every owned artifact");
+  if (
     !owned.has(REFRESH_MANIFEST) ||
     CORE_STATE_FILES.some(
       (reference) => !owned.has(reference) || !Object.hasOwn(manifest.integrity, reference),
@@ -1077,6 +1111,11 @@ function validateManifest(manifest, output) {
 
 function inspectExistingState(root, output, options = {}) {
   const location = validateOutputLocation(root, output);
+  return { ...location, ...inspectSavedState(location.output, options) };
+}
+
+function inspectSavedState(output, options = {}) {
+  const location = { output: path.resolve(output) };
   if (!fs.existsSync(location.output)) return { ...location, manifest: null };
   const stat = fs.lstatSync(location.output);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -1109,6 +1148,71 @@ function inspectExistingState(root, output, options = {}) {
     }
   }
   return { ...location, manifest };
+}
+
+/** Validate and load a saved workspace without source, credentials, network, or writes. */
+function loadRefreshWorkspace(output, options = {}) {
+  const state = inspectSavedState(output, {
+    acceptEnrichment: options.allowEditedOpenApi === true,
+  });
+  if (!state.manifest) throw new Error("No refresh workspace found");
+  require("./saved-state-schema").validateSavedToolVersion(state.manifest.toolVersion);
+  const artifacts = loadExistingArtifacts(state, {});
+  validateEnrichment(artifacts.enrichment, state.manifest.selection.applicationId);
+  for (const [name, value] of [
+    [GENERATED_FILE, artifacts.generated],
+    [OPENAPI_FILE, artifacts.openapi],
+    [OPENAPI_BASELINE_FILE, artifacts.baselineOpenApi],
+  ]) {
+    validateSpecification(value, name);
+    require("./saved-state").validateReferences(value);
+  }
+  require("./saved-state").validateRouteReport(artifacts.routes);
+  const applicationId = state.manifest.selection.applicationId;
+  if (
+    applicationId !== null &&
+    (!artifacts.routes.applications.some((application) => application.id === applicationId) ||
+      artifacts.routes.routes.some((route) => route.applicationId !== applicationId))
+  )
+    throw new Error("Saved workspace routes disagree with its application selection");
+  if (state.manifest.provenance)
+    require("./workspace").validateWorkspaceProvenance(
+      state.manifest.provenance,
+      state.manifest.selection.applicationId,
+    );
+  if (
+    state.manifest.provenance &&
+    (!state.manifest.integrity["source.json"] ||
+      !same(readBoundedJson(path.join(state.output, "source.json")), state.manifest.provenance))
+  )
+    throw new Error("Workspace manifest and source provenance disagree");
+  const documentationReport = readBoundedJson(path.join(state.output, DOCS_REPORT_FILE));
+  const report = readBoundedJson(path.join(state.output, REFRESH_REPORT_FILE));
+  if (
+    documentationReport.schemaVersion !== "1.0" ||
+    documentationReport.applicationId !== applicationId ||
+    !isObject(documentationReport.summary) ||
+    report.schemaVersion !== STATE_SCHEMA_VERSION ||
+    report.kind !== "express-recon-openapi-refresh-report" ||
+    report.applicationId !== applicationId ||
+    !isObject(report.enrichment?.summary)
+  )
+    throw new Error(
+      "Saved workspace reports have incompatible contracts or application identities",
+    );
+  return {
+    ...artifacts,
+    directory: state.output,
+    documentationReport,
+    report,
+    validation: {
+      integrity: state.manifest.ownedFiles.every(
+        (file) => file === REFRESH_MANIFEST || Object.hasOwn(state.manifest.integrity, file),
+      )
+        ? "verified"
+        : "legacy-core-only",
+    },
+  };
 }
 
 function readRefreshDefaults(root, output, options = {}) {
@@ -1194,6 +1298,8 @@ function scopedRouteReport(report, applicationId) {
 
 function assertCompatibleState(existing, report, documentationReport, options) {
   if (!existing) return;
+  if (existing.manifest.provenance && !options.provenance)
+    throw new Error("Source-bound workspaces must be refreshed with refreshSourceWorkspace");
   const previousSelection = existing.manifest.selection || {};
   const applicationId = documentationReport.applicationId ?? null;
   if ((previousSelection.applicationId ?? null) !== applicationId) {
@@ -1217,7 +1323,7 @@ function assertCompatibleState(existing, report, documentationReport, options) {
       "Refresh output belongs to a different package; use a separate --out directory",
     );
   }
-  compareReports(existing.routes, report);
+  if (!options.scopeChange) compareReports(existing.routes, report);
 }
 
 function integrityFor(directory, references) {
@@ -1256,13 +1362,19 @@ function refreshDocumentationUnlocked(options, recovery) {
     render: options.render !== false,
   });
   const state = inspectExistingState(options.root, options.output, options);
+  if (state.manifest?.provenance && !options.provenance)
+    throw new Error("Source-bound workspaces must be refreshed with refreshSourceWorkspace");
   const existing = loadExistingArtifacts(state, options);
   const expectedGeneration = artifactGeneration(state.output);
   const applicationId = options.documentation.report.applicationId ?? null;
   const currentRoutes = scopedRouteReport(options.routes, applicationId);
   assertCompatibleState(existing, currentRoutes, options.documentation.report, options);
 
-  const generated = addOperationFingerprints(options.documentation.document, state.source);
+  const generated = addOperationFingerprints(
+    options.documentation.document,
+    state.source,
+    options.provenance?.settingsFingerprint,
+  );
   validateSpecification(generated, GENERATED_FILE);
   let enrichment = existing
     ? validateEnrichment(existing.enrichment, applicationId)
@@ -1284,12 +1396,12 @@ function refreshDocumentationUnlocked(options, recovery) {
     enrichment = captured.enrichment;
     acceptance = captured.summary;
   }
-  const applied = applyEnrichment(state.source, generated, enrichment);
+  const applied = applyEnrichment(state.source, generated, enrichment, options);
   validateSpecification(applied.document);
   const openapiDelta = compareOpenApiDocuments(existing?.baselineOpenApi || null, applied.document);
 
   const routes = clone(currentRoutes);
-  if (existing) routes.delta = compareReports(existing.routes, routes);
+  if (existing && !options.scopeChange) routes.delta = compareReports(existing.routes, routes);
   const routeChanges = routes.delta?.summary || null;
   const refreshReport = {
     schemaVersion: STATE_SCHEMA_VERSION,
@@ -1329,20 +1441,10 @@ function refreshDocumentationUnlocked(options, recovery) {
     writeJson(path.join(staging, OPENAPI_DELTA_FILE), openapiDelta);
     writeJson(path.join(staging, DOCS_REPORT_FILE), options.documentation.report);
     writeJson(path.join(staging, REFRESH_REPORT_FILE), refreshReport);
+    if (options.provenance) writeJson(path.join(staging, "source.json"), options.provenance);
     if (options.render !== false) {
       renderHtmlSite(path.join(staging, OPENAPI_FILE), path.join(staging, API_REFERENCE_DIRECTORY));
     }
-    const integrityFiles = [
-      ROUTES_FILE,
-      DISCOVERY_FILE,
-      GENERATED_FILE,
-      ENRICHMENT_FILE,
-      OPENAPI_BASELINE_FILE,
-      OPENAPI_FILE,
-      OPENAPI_DELTA_FILE,
-      DOCS_REPORT_FILE,
-      REFRESH_REPORT_FILE,
-    ];
     const selection = {
       applicationId,
       spec: options.documentation.report.sources?.base ?? null,
@@ -1355,6 +1457,7 @@ function refreshDocumentationUnlocked(options, recovery) {
       tool: "express-recon",
       toolVersion: pkg.version,
       selection,
+      ...(options.provenance ? { provenance: options.provenance } : {}),
       invocation,
       source: {
         target: currentRoutes.target || null,
@@ -1363,7 +1466,10 @@ function refreshDocumentationUnlocked(options, recovery) {
       render: options.render !== false,
       artifacts: refreshReport.artifacts,
       ownedFiles,
-      integrity: integrityFor(staging, integrityFiles),
+      integrity: integrityFor(
+        staging,
+        ownedFiles.filter((file) => file !== REFRESH_MANIFEST),
+      ),
     };
     writeJson(path.join(staging, REFRESH_MANIFEST), manifest);
     replaceArtifactDirectory({
@@ -1399,6 +1505,7 @@ function defaultRefreshOutput(root) {
 }
 
 module.exports = {
+  loadRefreshWorkspace,
   defaultRefreshOutput,
   readRefreshDefaults,
   refreshDocumentation,

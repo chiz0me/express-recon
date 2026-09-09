@@ -27,6 +27,14 @@ const {
 const MAX_JSON_BYTES = 128 * 1024 * 1024;
 const MAX_OPENAPI_BYTES = 32 * 1024 * 1024;
 const MAX_SPECIFICATIONS_PER_REPOSITORY = 500;
+let capturedFiles = null;
+
+function normalizedText(value) {
+  return String(value)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\t ]+$/gm, "")
+    .replace(/\n*$/, "\n");
+}
 const INPUT_CANDIDATES = [
   "organization-inventory.json",
   "render-bundle.json",
@@ -62,7 +70,7 @@ function embeddedScript(source) {
   // Preserve JS string/regexp values while preventing HTML raw-text termination
   // and the legacy script-comment parsing mode. Only bundled code reaches here;
   // report data uses scriptLiteral's JSON escaping first.
-  return source
+  return normalizedText(source)
     .replace(/\r\n?/g, "\n")
     .replace(/<\/script/gi, (match) => `<\\/${match.slice(2)}`)
     .replace(/<!--/g, "<\\!--");
@@ -82,7 +90,7 @@ function embeddedPolicy(styles, scripts) {
 }
 
 function embeddedStyle(source) {
-  return source.replace(/\r\n?/g, "\n").replace(/\/\*# sourceMappingURL=[\s\S]*?\*\//g, "");
+  return normalizedText(source.replace(/\/\*# sourceMappingURL=[\s\S]*?\*\//g, ""));
 }
 
 function brandDataUri(filename) {
@@ -530,10 +538,16 @@ function scriptLiteral(value) {
   });
 }
 
-function openApiConfigScript(document) {
+function openApiConfigScript(document, documents) {
   return `"use strict";
 
-const spec = JSON.parse(${scriptLiteral(document)});
+${
+  documents
+    ? `const documents = JSON.parse(${scriptLiteral(documents)});
+const selected = new URLSearchParams(window.location.search).get("spec");
+const spec = Object.hasOwn(documents, selected) ? documents[selected] : JSON.parse(${scriptLiteral(document)});`
+    : `const spec = JSON.parse(${scriptLiteral(document)});`
+}
 
 window.ui = SwaggerUIBundle({
   spec,
@@ -562,7 +576,7 @@ function openApiPage(document, options = {}) {
   ].map(embeddedStyle);
   const scripts = [
     fs.readFileSync(path.join(swaggerUiPath(), "swagger-ui-bundle.js"), "utf8"),
-    openApiConfigScript(document),
+    openApiConfigScript(document, options.documents),
   ].map(embeddedScript);
   return `<!doctype html>
 <html lang="en">
@@ -588,7 +602,7 @@ function openApiPage(document, options = {}) {
 
 function layout({ title, eyebrow, lede, body, assetPrefix = "", backHref = "" }) {
   const mark = `<img class="brand__mark" src="${brandDataUri("logo/mark.svg")}" width="32" height="32" alt="">`;
-  const styles = [STYLES.trimStart()];
+  const styles = [embeddedStyle(STYLES.trimStart())];
   const scripts = [embeddedScript(SCRIPT.trimStart())];
   const brand = backHref
     ? `<a class="brand" href="${escapeHtml(backHref)}">${mark}<span>express-recon</span></a>`
@@ -666,6 +680,7 @@ function repositoryPage(scan, fallback, navigation = {}) {
       repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
     afterRoutes:
       documentationPanel(scan.documentation, navigation.apiReferences) +
+      workspacePanel(navigation.workspaceReferences, navigation.assetPrefix) +
       ginEvidencePanel(scan.gin, navigation.assetPrefix) +
       importedEvidencePanel(scan.imported, navigation.assetPrefix),
   });
@@ -1389,6 +1404,8 @@ function organizationScopePanel(report) {
     `<div class="panel__body">${keyValues([
       ["Repository visibility", organization.repositoryVisibility],
       ["Authenticated", yesNo(organization.authenticated)],
+      ["Authentication mode", enumeration.access?.mode],
+      ["Installation repository access", enumeration.access?.repositorySelection],
       ["Include archived", yesNo(scope.includeArchived)],
       ["Include forks", yesNo(scope.includeForks)],
       ["Repository cap", scope.maxRepositories],
@@ -1426,7 +1443,7 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
     coverage.complete === false
       ? notice(
           "Incomplete organization inventory",
-          `${list(coverage.incompleteRepositories).length} repositories were failed, inconclusive, limited, or otherwise incomplete.`,
+          `${list(coverage.incompleteRepositories).length} repositories were failed, inconclusive, limited, or otherwise incomplete.${coverage.enumeration?.organizationAccessComplete === false ? " This GitHub App installation can access selected repositories only; repositories outside its grant were not enumerated." : ""}`,
           "warn",
         )
       : "";
@@ -1541,8 +1558,13 @@ function organizationPage(report, detailPages, apiReferencePages, warnings, delt
 }
 
 function writeFile(file, contents) {
+  const normalized = normalizedText(contents);
+  if (capturedFiles) {
+    capturedFiles.set(path.resolve(file), normalized);
+    return;
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, contents, "utf8");
+  fs.writeFileSync(file, normalized, "utf8");
 }
 
 function importedEvidencePanel(source, prefix = "") {
@@ -1575,6 +1597,25 @@ function writeImportedFiles(source, output, data) {
     data.push(href);
     return { label, href };
   });
+}
+
+function workspacePanel(references, prefix = "") {
+  if (!list(references).length) return "";
+  return panel(
+    "Application enrichment",
+    list(references)
+      .map(
+        (reference) =>
+          notice(
+            reference.source.applicationId,
+            `${reference.status} · source ${reference.source.commit}`,
+            reference.status === "current" ? "info" : "warn",
+          ) +
+          `<div class="panel__body"><p>${escapeHtml(reference.enrichment.summary.appliedOperations)} accepted operations applied; ${escapeHtml(reference.enrichment.summary.staleOperations)} require review.</p><details><summary>Review reasons and saved enrichment</summary><pre>${escapeHtml(JSON.stringify({ operations: reference.enrichment.staleOperationDetails, schemas: reference.enrichment.staleSchemaDetails }, null, 2))}</pre><ul>${reference.files.map((file) => `<li><a href="${escapeHtml(prefix + file.href)}" download>${escapeHtml(file.label)}</a></li>`).join("")}</ul></details></div>`,
+      )
+      .join(""),
+    "Source and application identities are checked against this inventory. Route counts remain based on the original scan.",
+  );
 }
 
 function ginEvidencePanel(gin, prefix = "") {
@@ -1856,8 +1897,7 @@ function copySwaggerUiAssets(output) {
       throw new Error(`Swagger UI distribution asset is not a regular file: ${sourceName}`);
     }
     const target = path.join(output, ...outputReference.split("/"));
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(source, target);
+    writeFile(target, fs.readFileSync(source, "utf8"));
   }
   writeFile(path.join(output, OPENAPI_THEME_ASSET), OPENAPI_STYLES.trimStart());
 }
@@ -1867,16 +1907,18 @@ function prepareOutput(output, kind) {
   if (fs.existsSync(resolved) && !fs.statSync(resolved).isDirectory()) {
     throw new Error(`HTML report output is not a directory: ${resolved}`);
   }
-  fs.mkdirSync(resolved, { recursive: true });
-  cleanPreviousOutput(resolved);
-  fs.mkdirSync(path.join(resolved, "assets"), { recursive: true });
-  fs.copyFileSync(
-    path.join(__dirname, "../assets/logo/mark.svg"),
+  if (!capturedFiles) {
+    fs.mkdirSync(resolved, { recursive: true });
+    cleanPreviousOutput(resolved);
+    fs.mkdirSync(path.join(resolved, "assets"), { recursive: true });
+  }
+  writeFile(
     path.join(resolved, "assets/logo.svg"),
+    fs.readFileSync(path.join(__dirname, "../assets/logo/mark.svg"), "utf8"),
   );
-  fs.copyFileSync(
-    path.join(__dirname, "../assets/favicon.svg"),
+  writeFile(
     path.join(resolved, "assets/favicon.svg"),
+    fs.readFileSync(path.join(__dirname, "../assets/favicon.svg"), "utf8"),
   );
   if (kind === "openapi") {
     copySwaggerUiAssets(resolved);
@@ -1953,6 +1995,7 @@ function renderOrganization(
   assets,
   suppliedDelta = null,
   data = [],
+  options = {},
 ) {
   const delta =
     suppliedDelta ||
@@ -1967,6 +2010,12 @@ function renderOrganization(
   const apiReferencePages = [];
   const usedDetails = new Set();
   const usedOpenApi = new Set();
+  const sharedDocuments = {};
+  const workspaces = require("./workspace-render").loadWorkspaceReferences(
+    input,
+    options.workspaces,
+    warnings,
+  );
   let swaggerUiWritten = false;
   writeGinFiles(input.value.gin, output, data);
   for (const source of list(input.value.imports)) writeImportedFiles(source, output, data);
@@ -1982,6 +2031,9 @@ function renderOrganization(
       : object(entry.express);
     const change = changes.get(String(repository.fullName || "").toLowerCase());
     const name = display(repository.fullName, `repository ${index + 1}`);
+    const workspaceDescriptors = workspaces.get(String(repository.fullName).toLowerCase()) || [];
+    for (const descriptor of workspaceDescriptors)
+      writeImportedFiles(descriptor.workspace, output, data);
     const wantsDetail = Boolean(
       organizationDetailLabel(entry.status, evidence) ||
       entry.scan?.imported ||
@@ -2007,10 +2059,16 @@ function renderOrganization(
     for (const importedScan of new Set([scan, ...importedScans]))
       writeImportedFiles(importedScan?.imported, output, data);
 
-    if (isRenderableStatus(entry.status) || scan?.imported || importedScans.length) {
+    if (
+      isRenderableStatus(entry.status) ||
+      scan?.imported ||
+      importedScans.length ||
+      workspaceDescriptors.length
+    ) {
       let descriptors = [];
       try {
         descriptors = repositoryApiDescriptors(entry, scan);
+        descriptors.push(...workspaceDescriptors);
         if (ginScan && scan !== ginScan) descriptors.push(...repositoryApiDescriptors({}, ginScan));
         for (const importedScan of importedScans) {
           if (scan !== importedScan)
@@ -2048,13 +2106,19 @@ function renderOrganization(
           const configReference = path.posix.join("openapi", configFilename);
           const description = describeRenderableSpecification(document);
           (apiReferencePages[index] ||= []).push({
-            href: pageReference,
+            href: options.sharedAssets
+              ? `openapi/index.html?spec=${encodeURIComponent(filename)}`
+              : pageReference,
             label: descriptor.label || description.title,
             source: descriptor.source,
             format: descriptor.format || description.format,
             version: descriptor.version || description.version,
             importedScan: descriptor.importedScan,
           });
+          if (options.sharedAssets) {
+            sharedDocuments[filename] = document;
+            continue;
+          }
           pages.push(pageReference);
           assets.push(configReference);
           writeFile(path.join(output, "openapi", configFilename), openApiConfigScript(document));
@@ -2084,6 +2148,7 @@ function renderOrganization(
         assetPrefix: "../",
         backHref: "../index.html",
         delta: change,
+        workspaceReferences: workspaceDescriptors.map((descriptor) => descriptor.workspace),
         apiReferences: list(apiReferencePages[index])
           .filter((reference) => !reference.importedScan)
           .map((reference) => ({
@@ -2134,6 +2199,23 @@ function renderOrganization(
         }),
       );
     }
+  }
+  if (Object.keys(sharedDocuments).length) {
+    const document = Object.values(sharedDocuments)[0];
+    pages.push("openapi/index.html");
+    assets.push("openapi/index.js");
+    writeFile(
+      path.join(output, "openapi", "index.js"),
+      openApiConfigScript(document, sharedDocuments),
+    );
+    writeFile(
+      path.join(output, "openapi", "index.html"),
+      openApiPage(document, {
+        assetPrefix: "../",
+        configSource: "index.js",
+        documents: sharedDocuments,
+      }),
+    );
   }
   if (input.value.gin || input.value.imports) {
     input.value.summary.apiSpecifications = apiReferencePages.flat().length;
@@ -2199,7 +2281,16 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
   const assets = input.kind === "openapi" ? [...OPENAPI_ASSETS] : [...REPORT_ASSETS];
   let delta = null;
   if (input.kind === "organization") {
-    delta = renderOrganization(input, output, warnings, pages, assets, suppliedDelta, data);
+    delta = renderOrganization(
+      input,
+      output,
+      warnings,
+      pages,
+      assets,
+      suppliedDelta,
+      data,
+      options,
+    );
   } else if (input.kind === "repository") {
     renderRepository(input, output, warnings, pages, assets);
   } else if (input.kind === "openapi") {
@@ -2235,6 +2326,7 @@ function renderHtmlSiteInto(inputPath, outputPath, options = {}) {
 function renderHtmlSite(inputPath, outputPath, options = {}) {
   if (!inputPath) throw new Error("HTML report rendering requires an input path");
   if (!outputPath) throw new Error("HTML report rendering requires an output directory");
+  if (options.check) return checkHtmlSite(inputPath, outputPath, options);
   const output = path.resolve(outputPath);
   if (fs.existsSync(output) && !fs.statSync(output).isDirectory()) {
     throw new Error(`HTML report output is not a directory: ${output}`);
@@ -2269,7 +2361,44 @@ function renderHtmlSite(inputPath, outputPath, options = {}) {
   });
 }
 
+/** Compare a deterministic in-memory render with saved output without filesystem writes. */
+function checkHtmlSite(input, output, options = {}) {
+  if (capturedFiles) throw new Error("A render check is already in progress");
+  const expected = new Map();
+  let rendered;
+  capturedFiles = expected;
+  try {
+    rendered = renderHtmlSiteInto(input, output, options);
+  } finally {
+    capturedFiles = null;
+  }
+  const changedFiles = [];
+  for (const [file, contents] of expected) {
+    const reference = path.relative(path.resolve(output), file).split(path.sep).join("/");
+    const existing = ownedOutputFile(path.resolve(output), reference);
+    if (!existing || fs.readFileSync(existing, "utf8") !== contents) changedFiles.push(reference);
+  }
+  const manifestFile = path.join(output, "render-manifest.json");
+  if (fs.existsSync(manifestFile)) {
+    const manifest = readJson(manifestFile);
+    for (const reference of [
+      ...list(manifest.pages),
+      ...list(manifest.assets),
+      ...list(manifest.data),
+    ]) {
+      const existing = ownedOutputFile(path.resolve(output), reference);
+      if (existing && !expected.has(path.resolve(output, reference))) changedFiles.push(reference);
+    }
+  }
+  return {
+    ...rendered,
+    current: changedFiles.length === 0,
+    changedFiles: [...new Set(changedFiles)].sort(),
+  };
+}
+
 module.exports = {
+  checkHtmlSite,
   MAX_JSON_BYTES,
   MAX_OPENAPI_BYTES,
   defaultRenderOutput,

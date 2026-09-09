@@ -2,6 +2,46 @@
 
 Welcome to the `express-recon` Node.js Library API reference. You can use these functions to scan projects, audit routes, generate OpenAPI specifications, and manage repository snapshots programmatically in your Node.js scripts or automation pipelines.
 
+### Native Git inventory workflow
+
+### `createGitHubTokenProvider`
+
+Select App/PAT identity and share renewable tokens;
+explicitly pass `environment: process.env` for environment credentials. Pass the
+returned provider as `tokenProvider` to organization enumeration/scanning.
+
+### `prepareWorkspaces`
+
+Prepare from `{ input, repository, root, output, applicationId?, scanSettings? }`; use `applicationId: "all"` for independent apps.
+
+### `refreshSourceWorkspace`
+
+Verify repository/commit and refresh a committed snapshot
+using `{ root, output, acceptEnrichment?, reviewOperations? }` and saved settings.
+
+### `loadSavedState`
+
+Read-only offline format detection, validation, and loading.
+
+### `loadOrganizationInventory`
+
+Validate all saved inventory references and available
+hashes; return report, scans map, root, and integrity validation status.
+
+### `loadRefreshWorkspace`
+
+Validate/load a workspace with no source directory. Returns
+manifest, routes, generated/applied/baseline OpenAPI, overlay and both reports.
+`{ allowEditedOpenApi: true }` is reserved for deliberate acceptance integrations.
+
+### `checkHtmlSite`
+
+Deterministic, zero-write rendering check with the same arguments
+as `renderHtmlSite`; returns `current` and `changedFiles`. Rendering also accepts
+`{ check: true, workspaces: [paths], sharedAssets: true }`.
+
+See the [complete Git workflow and compatibility guidance](git-inventory-workflow.md).
+
 ### Quick Example
 
 ```js

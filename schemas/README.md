@@ -7,10 +7,18 @@
 | Render repository `1.0`             | [render/v1/repository.schema.json](render/v1/repository.schema.json) | Embedded repository entry, referenced by the bundle schema.             |
 | Render routes `1.0`                 | [render/v1/routes.schema.json](render/v1/routes.schema.json)         | A referenced route-observation file.                                    |
 
-The native snapshot is the existing route-report contract, not a schema for
-every native artifact. Repository/organization envelopes, checkpoints, deltas,
-and refresh state remain internal native formats; do not emulate them in other
-tools. OpenAPI/Swagger documents retain their own standard schemas.
+Native saved-state schemas are also generated from `src/saved-state-schema.js`:
+
+- [Organization inventory](native/organization-v1.schema.json)
+- [Organization integrity manifest](native/organization-manifest-v1.schema.json)
+- [Workspace source provenance](native/workspace-source-v1.schema.json)
+
+Use the public saved-state loaders for complete cross-file, integrity, OpenAPI,
+and compatibility checks; schema validation alone cannot verify referenced evidence.
+Native refresh state is owned by Express Recon: prepare it using the public API,
+not by emulating its manifest. See the [Git workflow](../docs/git-inventory-workflow.md).
+Other producers should continue to use render bundles. OpenAPI/Swagger documents
+retain their own standard schemas.
 
 Start with the [integration guide](../docs/render-integration.md). Ship all three
 render schemas together; their references resolve locally. Schemas are included

@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "tool",
+    "toolVersion",
+    "kind",
+    "organization",
+    "repositories",
+    "summary",
+    "coverage"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "tool": {
+      "const": "express-recon"
+    },
+    "toolVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+    },
+    "kind": {
+      "const": "github-organization-inventory"
+    },
+    "organization": {
+      "type": "object",
+      "required": ["login"],
+      "properties": {
+        "login": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]+$"
+        }
+      }
+    },
+    "summary": {
+      "type": "object"
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["complete"],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "scanSettings": {
+      "type": "object",
+      "required": ["config", "scan"],
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "object"
+        },
+        "scan": {
+          "type": "object"
+        },
+        "externalIgnore": {
+          "type": "object",
+          "required": ["name", "content"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 1048576
+            }
+          }
+        }
+      }
+    },
+    "repositories": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "required": ["repository", "status"],
+        "properties": {
+          "repository": {
+            "type": "object",
+            "required": ["name", "fullName"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "fullName": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$"
+              }
+            }
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "commit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40,64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            },
+            "properties": {
+              "specifications": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["artifact"],
+                  "properties": {
+                    "artifact": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "reconciliation": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

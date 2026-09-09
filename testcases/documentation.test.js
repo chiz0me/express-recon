@@ -130,6 +130,7 @@ test("the npm package exposes only the intended runtime and agent surfaces", () 
     "skills",
     "schemas",
     "docs/render-integration.md",
+    "docs/git-inventory-workflow.md",
     "examples/render-bundle",
     "LICENSE",
     "README.md",

@@ -7,6 +7,9 @@
 
 # express-recon
 
+For GitHub App authentication, portable application workspaces, offline validation,
+and Git-friendly rendering, see the [Git inventory workflow](docs/git-inventory-workflow.md).
+
 Fast, offline-first route scanner, authentication auditor, and OpenAPI generator for **Express**, **Fastify**, and **NestJS**.
 
 It statically inspects supported JavaScript and TypeScript route patterns, authentication middleware, and schema evidence to generate an OpenAPI (Swagger) inventory — **without executing your code or running your server** (with optional worker execution available for runtime Express inspection). Unresolved paths and incomplete route graphs remain visible for review instead of being presented as confirmed coverage.

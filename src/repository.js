@@ -10,6 +10,7 @@ const { loadPackageInfo } = require("./static/resolve");
 const { scanLimits } = require("./static/scan");
 const pkg = require("../package.json");
 const { createAnalysisSession } = require("./analysis-session");
+const { credentialFreeEnvironment } = require("./github-auth");
 
 const SOURCE_EXTENSIONS = new Set([
   ".js",
@@ -145,7 +146,7 @@ function normalizeRepository(value) {
 }
 
 function gitEnvironment(config = []) {
-  const environment = { ...process.env };
+  const environment = credentialFreeEnvironment();
   for (const name of Object.keys(environment)) {
     if (
       name.startsWith("GIT_") ||
@@ -193,9 +194,18 @@ function git(args, opts = {}) {
     throw new Error(`Could not run git: ${result.error.message}`);
   }
   if (result.status !== 0) {
-    const stderr = Buffer.isBuffer(result.stderr)
+    let stderr = Buffer.isBuffer(result.stderr)
       ? result.stderr.toString("utf8")
       : String(result.stderr || "");
+    for (const { value } of opts.gitConfig || []) {
+      const encoded = /Basic (\S+)/i.exec(value)?.[1];
+      if (!encoded) continue;
+      const token = Buffer.from(encoded, "base64")
+        .toString("utf8")
+        .replace(/^x-access-token:/, "");
+      for (const secret of [value, encoded, token])
+        if (secret) stderr = stderr.split(secret).join("[REDACTED]");
+    }
     throw new Error(`Git command failed: ${stderr.trim() || `exit ${result.status}`}`);
   }
   return result.stdout;
@@ -203,7 +213,7 @@ function git(args, opts = {}) {
 
 function githubGitConfig(repository, token) {
   if (!token) return [];
-  if (typeof token !== "string" || token.length > 4096 || hasControlCharacters(token)) {
+  if (typeof token !== "string" || hasControlCharacters(token)) {
     throw new Error("GitHub token must not contain control characters");
   }
   if (repository.kind !== "https") return [];
@@ -798,6 +808,7 @@ function scanRepository(source, opts = {}) {
 }
 
 module.exports = {
+  gitEnvironment,
   acquireRepository,
   githubGitConfig,
   normalizeRepository,

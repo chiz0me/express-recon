@@ -2,6 +2,35 @@
 
 Welcome to the comprehensive reference manual for the `express-recon` CLI, configuration options, route policies, and output report contracts.
 
+### `prepare`
+
+Initialize or update native application enrichment workspaces using saved organization
+inventory and matching committed source: `prepare --input inventory --repo acme/api
+--src ../api --out inventory/workspaces/api --app-id all`. Omit the application ID
+for a single-app repository. Settings are restored from inventory; explicitly use
+`--config` to change them. Existing accepted enrichment is preserved for review.
+
+### `validate`
+
+Validate saved state without source, credentials, network, or writes:
+`validate --input inventory` or `validate --input path/to/application-workspace`.
+Invalid state exits 1. The JSON result distinguishes verified integrity from legacy
+inventory lacking historical hashes. See the [Git workflow](git-inventory-workflow.md).
+
+### Git workflow options
+
+- `--auth` (`auto|github-app|token`): select one identity for `scan-org`/`scan-repo`.
+  `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` select renewable
+  installation authentication; PEM newlines may be literal or escaped. Complete App
+  settings take priority in auto mode; partial settings error. Explicit token mode
+  uses `GH_TOKEN`/`GITHUB_TOKEN`. Authentication failure never switches identities.
+- `--workspaces` (`PATH`): repeatable organization-render workspace discovery roots.
+  The default is the inventory's `workspaces` folder.
+- `--shared-assets`: organization rendering uses one embedded offline API viewer
+  instead of duplicating Swagger UI in every application page.
+- `--check`: `render` checks exact deterministic output without writing; exits 0
+  when current and 2 when outdated/missing. Reuse the original rendering options.
+
 If you are new to the tool or looking for a quick 5-minute tutorial, start with the [README](../README.md).
 
 > 💡 **Quick Navigation Guide**:

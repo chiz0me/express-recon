@@ -40,6 +40,7 @@
     "skills",
     "schemas",
     "docs/render-integration.md",
+    "docs/git-inventory-workflow.md",
     "examples/render-bundle",
     "LICENSE",
     "README.md",
@@ -68,6 +69,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@octokit/auth-app": "8.3.1",
     "@readme/openapi-schemas": "4.0.0",
     "ajv": "8.20.0",
     "ajv-draft-04": "1.0.0",

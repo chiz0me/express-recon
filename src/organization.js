@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const { Worker } = require("node:worker_threads");
+const { createGitHubTokenProvider, credentialFreeEnvironment } = require("./github-auth");
 const { organizationCheckpointIdentity } = require("./organization-checkpoint");
 const {
   COMPLETE_REPOSITORY_STATUSES,
@@ -61,7 +62,7 @@ function validateOrganization(value) {
 
 function validateToken(value) {
   if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string" || value.length > 4096 || hasControlCharacters(value)) {
+  if (typeof value !== "string" || hasControlCharacters(value)) {
     throw new Error("GitHub token must be a non-empty string without control characters");
   }
   return value;
@@ -229,11 +230,16 @@ async function boundedResponseText(response, maximum) {
   return Buffer.concat(chunks, bytes).toString("utf8");
 }
 
-async function readApiPage(fetchImpl, organization, page, token, timeoutMs) {
-  const url = new URL(`/orgs/${encodeURIComponent(organization)}/repos`, GITHUB_API);
-  url.searchParams.set("type", "all");
-  url.searchParams.set("sort", "full_name");
-  url.searchParams.set("direction", "asc");
+async function readApiPage(fetchImpl, organization, page, token, timeoutMs, installation = false) {
+  const url = new URL(
+    installation ? "/installation/repositories" : `/orgs/${encodeURIComponent(organization)}/repos`,
+    GITHUB_API,
+  );
+  if (!installation) {
+    url.searchParams.set("type", "all");
+    url.searchParams.set("sort", "full_name");
+    url.searchParams.set("direction", "asc");
+  }
   url.searchParams.set("per_page", "100");
   url.searchParams.set("page", String(page));
   let response;
@@ -278,6 +284,7 @@ async function readApiPage(fetchImpl, organization, page, token, timeoutMs) {
   } catch (err) {
     throw new Error(`GitHub repository response was not valid JSON: ${err.message}`);
   }
+  if (installation) value = value?.repositories;
   if (!Array.isArray(value)) throw new Error("GitHub repository response must be an array");
   return {
     repositories: value.map((repository) => canonicalRepository(repository, organization)),
@@ -297,7 +304,7 @@ async function readApiPage(fetchImpl, organization, page, token, timeoutMs) {
  */
 async function listOrganizationRepositories(organization, opts = {}) {
   const login = validateOrganization(organization);
-  const token = validateToken(opts.token);
+  const provider = opts.tokenProvider || createGitHubTokenProvider(opts);
   const timeoutMs = positiveInteger(
     opts.apiTimeoutMs,
     DEFAULT_API_TIMEOUT_MS,
@@ -308,6 +315,7 @@ async function listOrganizationRepositories(organization, opts = {}) {
   if (typeof fetchImpl !== "function") {
     throw new Error("This Node.js runtime does not provide fetch() for the GitHub API");
   }
+  const access = await provider.verifyOrganization(login);
   const byName = new Map();
   const diagnostics = [];
   let page = 1;
@@ -317,9 +325,16 @@ async function listOrganizationRepositories(organization, opts = {}) {
   while (page <= MAX_API_PAGES) {
     let result;
     try {
-      result = await readApiPage(fetchImpl, login, page, token, timeoutMs);
+      result = await readApiPage(
+        fetchImpl,
+        login,
+        page,
+        validateToken(await provider.getToken()),
+        timeoutMs,
+        provider.mode === "github-app",
+      );
     } catch (err) {
-      const failure = safeFailure(err, token);
+      const failure = safeFailure(err, provider);
       if (pagesFetched === 0) throw new Error(failure);
       complete = false;
       diagnostics.push(`github: pagination stopped at page ${page}: ${failure}`);
@@ -365,8 +380,15 @@ async function listOrganizationRepositories(organization, opts = {}) {
       complete,
       pagesFetched,
       repositoriesVisible: repositories.length,
-      visibility: "api-visible",
-      authenticated: Boolean(token),
+      visibility: provider.mode === "github-app" ? "installation-accessible" : "api-visible",
+      authenticated: access.authenticated,
+      access,
+      organizationAccessComplete:
+        access.repositorySelection === "all"
+          ? true
+          : access.repositorySelection === "selected"
+            ? false
+            : null,
     },
     rateLimit,
     diagnostics,
@@ -590,7 +612,8 @@ function normalizeResumeEntries(value) {
 
 function safeFailure(err, token) {
   let message = err instanceof Error ? err.message : String(err);
-  if (token) {
+  if (token?.redact) message = token.redact(message);
+  else if (token) {
     for (const secret of [token, Buffer.from(`x-access-token:${token}`).toString("base64")]) {
       message = message.split(secret).join("[REDACTED]");
     }
@@ -600,9 +623,7 @@ function safeFailure(err, token) {
 
 function scanInWorker(source, options, onProgress) {
   return new Promise((resolve, reject) => {
-    const environment = { ...process.env };
-    delete environment.GH_TOKEN;
-    delete environment.GITHUB_TOKEN;
+    const environment = credentialFreeEnvironment();
     const worker = new Worker(path.join(__dirname, "organization-worker.js"), {
       workerData: { source, options },
       env: environment,
@@ -653,6 +674,15 @@ function createProgressEmitter(organization, callback, token) {
   const diagnostics = [];
   const startedAt = Date.now();
   let enabled = typeof callback === "function";
+  function redacted(value) {
+    if (typeof value === "string") return token?.redact ? token.redact(value) : value;
+    if (Array.isArray(value)) return value.map(redacted);
+    if (value && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [key, redacted(child)]),
+      );
+    return value;
+  }
   function emit(event) {
     if (!enabled) return;
     try {
@@ -662,7 +692,7 @@ function createProgressEmitter(organization, callback, token) {
         timestamp: new Date().toISOString(),
         elapsedMs: Date.now() - startedAt,
         organization,
-        ...event,
+        ...redacted(event),
       });
       if (returned && typeof returned.then === "function") {
         enabled = false;
@@ -783,7 +813,7 @@ function aggregateSummary(entries, auditMode) {
  */
 async function scanOrganization(organization, opts = {}) {
   const login = validateOrganization(organization);
-  const token = validateToken(opts.token);
+  const token = opts.tokenProvider || createGitHubTokenProvider(opts);
   if (opts.onProgress !== undefined && typeof opts.onProgress !== "function") {
     throw new Error("onProgress must be a function");
   }
@@ -824,7 +854,6 @@ async function scanOrganization(organization, opts = {}) {
       structuredClone({
         config: opts.config || {},
         scan: opts.scan || {},
-        githubToken: token || undefined,
       });
     } catch (err) {
       throw new Error(
@@ -846,7 +875,7 @@ async function scanOrganization(organization, opts = {}) {
   let listing;
   try {
     listing = await listOrganizationRepositories(login, {
-      token,
+      tokenProvider: token,
       fetchImpl: opts.fetchImpl,
       apiTimeoutMs: opts.apiTimeoutMs,
       onPage(event) {
@@ -986,7 +1015,7 @@ async function scanOrganization(organization, opts = {}) {
               ref: "HEAD",
               config: opts.config || {},
               scan: opts.scan || {},
-              githubToken: token || undefined,
+              githubToken: validateToken(await token.getToken()) || undefined,
               retainSpecificationDocuments: typeof opts.onRepository === "function",
             },
             (event) => {
@@ -1107,18 +1136,22 @@ async function scanOrganization(organization, opts = {}) {
         entry.routeGraphComplete === false,
     )
     .map((entry) => entry.repository.fullName);
-  const complete = listing.coverage.complete && incompleteRepositories.length === 0;
+  const complete =
+    listing.coverage.complete &&
+    listing.coverage.organizationAccessComplete !== false &&
+    incompleteRepositories.length === 0;
   const result = {
     schemaVersion: "1.0",
     tool: "express-recon",
     toolVersion: pkg.version,
     evidenceCompatibilityVersion: identity.compatibilityVersion,
     kind: "github-organization-inventory",
+    scanSettings: require("./workspace").portableScanSettings(opts.config || {}, opts.scan || {}),
     organization: {
       login: listing.organization,
       api: GITHUB_API,
-      authenticated: Boolean(token),
-      repositoryVisibility: "api-visible",
+      authenticated: listing.coverage.authenticated,
+      repositoryVisibility: listing.coverage.visibility,
     },
     scope: {
       includeArchived: opts.includeArchived === true,

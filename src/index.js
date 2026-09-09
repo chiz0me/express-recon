@@ -12,7 +12,10 @@ const { compareReports } = require("./compare");
 const { compareOrganizationReports } = require("./organization-compare");
 const { compareOpenApiDocuments } = require("./openapi-compare");
 const { validateOpenApiDocument } = require("./openapi-validation");
-const { refreshDocumentation } = require("./refresh");
+const { refreshDocumentation, loadRefreshWorkspace } = require("./refresh");
+const { loadSavedState, loadOrganizationInventory } = require("./saved-state");
+const { prepareWorkspaces, refreshSourceWorkspace } = require("./workspace");
+const { createGitHubTokenProvider } = require("./github-auth");
 const { loadConfig, validateConfig } = require("./config");
 const { discover } = require("./discover");
 const { reconcileDocumentation } = require("./docs");
@@ -24,7 +27,7 @@ const {
 } = require("./review");
 const { acquireRepository, releaseRepository, scanRepository } = require("./repository");
 const { listOrganizationRepositories, scanOrganization } = require("./organization");
-const { renderHtmlSite } = require("./html");
+const { renderHtmlSite, checkHtmlSite } = require("./html");
 const {
   buildNotificationEvents,
   deliverWebhook,
@@ -69,6 +72,13 @@ const {
  * that no supported API is published without both code and user documentation.
  *
  * @typedef {Object} ExpressReconAPI
+ * @property {typeof createGitHubTokenProvider} createGitHubTokenProvider Select one identity and share renewable GitHub installation tokens.
+ * @property {typeof loadSavedState} loadSavedState Validate and load inventory or workspace evidence offline without writes.
+ * @property {typeof loadOrganizationInventory} loadOrganizationInventory Validate saved organization artifacts and integrity.
+ * @property {typeof loadRefreshWorkspace} loadRefreshWorkspace Validate and load a source-free enrichment workspace.
+ * @property {typeof prepareWorkspaces} prepareWorkspaces Prepare stable application workspaces from saved inventory and committed source.
+ * @property {typeof refreshSourceWorkspace} refreshSourceWorkspace Verify source identity and refresh a committed snapshot.
+ * @property {typeof checkHtmlSite} checkHtmlSite Check generated output deterministically without writes.
  * @property {typeof inventory} inventory Build a route inventory without security judgment.
  * @property {typeof discover} discover Find packages, supported apps, entries, and API-document sources.
  * @property {typeof reconcileDocumentation} reconcileDocumentation Merge authored API docs with route evidence.
@@ -108,6 +118,13 @@ const {
 
 /** @type {ExpressReconAPI} */
 module.exports = {
+  createGitHubTokenProvider,
+  loadSavedState,
+  loadOrganizationInventory,
+  loadRefreshWorkspace,
+  prepareWorkspaces,
+  refreshSourceWorkspace,
+  checkHtmlSite,
   inventory,
   discover,
   reconcileDocumentation,
