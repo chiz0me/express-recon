@@ -520,6 +520,19 @@ function collectBindings(program) {
       known.length === settings.length && new Set(known).size === 1 ? known[0] : null;
   }
 
+  // Imported factory calls can return an Express host. Keep their provenance;
+  // the graph must prove the returned value is an app/router before using it.
+  walk(program, (node, ancestors) => {
+    if (node.type !== "VariableDeclarator" || node.id.type !== "Identifier") return;
+    if (!ancestors.some((a) => a.type === "VariableDeclaration" && a.kind === "const")) return;
+    const init = unwrap(node.init);
+    if (init?.type !== "CallExpression" || routers.has(node.id.name) || bindings.has(node.id.name))
+      return;
+    const ref = refFromExpr(init.callee, { requires: bindings, routers, requireAliases });
+    if (ref.t === "module" && isLocalSource(ref.source))
+      bindings.set(node.id.name, { ...ref, factoryCall: true, start: node.start });
+  });
+
   return {
     requires: bindings,
     routers,
@@ -735,14 +748,14 @@ function collectValueBindings(program) {
   return bindings;
 }
 
-/** First top-level `return` argument of a function (skips nested fn scopes). */
+/** A single unconditional return; conditional factory selection stays unknown. */
 function factoryReturnNode(fn) {
   if (fn.type === "ArrowFunctionExpression" && fn.expression) return fn.body;
   const body = fn.body && fn.body.body;
   if (!Array.isArray(body)) return null;
-  let found = null;
+  const returned = [];
   const visit = (node) => {
-    if (!node || found) return;
+    if (!node) return;
     if (
       node.type === "FunctionDeclaration" ||
       node.type === "FunctionExpression" ||
@@ -752,7 +765,7 @@ function factoryReturnNode(fn) {
     )
       return;
     if (node.type === "ReturnStatement") {
-      found = node.argument || null;
+      returned.push({ node, value: node.argument || null });
       return;
     }
     for (const key of Object.keys(node)) {
@@ -763,7 +776,7 @@ function factoryReturnNode(fn) {
     }
   };
   body.forEach(visit);
-  return found;
+  return returned.length === 1 && body.includes(returned[0].node) ? returned[0].value : null;
 }
 
 /**
@@ -833,14 +846,17 @@ function refFromExpr(node, ctx) {
   if (n.type === "CallExpression") {
     const c = unwrap(n.callee);
     if (c.type === "Identifier" && ctx.requires.has(c.name)) return refFromExpr(c, ctx);
+    if (c.type === "MemberExpression" && !c.computed) return refFromExpr(c, ctx);
     return { t: "unknown" };
   }
   if (n.type === "ObjectExpression") {
     const props = new Map();
     for (const prop of n.properties) {
-      if (prop.type === "Property" && !prop.computed && prop.key.type === "Identifier") {
-        props.set(prop.key.name, refFromExpr(prop.value, ctx));
-      }
+      if (prop.type !== "Property" || prop.computed || prop.kind !== "init")
+        return { t: "unknown" };
+      const key = prop.key.name ?? prop.key.value;
+      if (typeof key !== "string") return { t: "unknown" };
+      props.set(key, refFromExpr(prop.value, ctx));
     }
     return { t: "object", props };
   }
@@ -1314,6 +1330,46 @@ function looksLikeOpaqueRouteProvider(item) {
   );
 }
 
+/** Recognize a bounded, straight-line Object.keys(map).forEach router mount. */
+function routeMapMount(node, ancestors, ctx, code) {
+  const target = unwrap(node.arguments.at(-1));
+  if (
+    target?.type !== "MemberExpression" ||
+    !target.computed ||
+    target.object.type !== "Identifier" ||
+    target.property.type !== "Identifier"
+  )
+    return null;
+  const fn = [...ancestors].reverse().find((a) => FN_TYPES.has(a.type));
+  if (!fn || fn.params.length !== 1 || fn.params[0].name !== target.property.name) return null;
+  const body = fn.body.type === "BlockStatement" ? fn.body.body : [{ expression: fn.body }];
+  if (body.length !== 1 || body[0].expression !== node || node.arguments.length < 2) return null;
+  const loop = ancestors.find((a) => a.type === "CallExpression" && a.arguments[0] === fn);
+  const keys = loop?.callee?.object;
+  if (
+    loop?.callee?.computed ||
+    loop?.callee?.property?.name !== "forEach" ||
+    keys?.type !== "CallExpression" ||
+    calleeName(keys.callee) !== "Object.keys" ||
+    ctx.declarations.has("Object") ||
+    keys.arguments[0]?.name !== target.object.name
+  )
+    return null;
+  if (ctx.mutatedNames.has(target.object.name)) return null;
+  return {
+    host: chainRootIdentifier(node.callee.object),
+    mapRef: refFromExpr(target.object, ctx),
+    key: target.property.name,
+    pathNode: node.arguments[0],
+    line: ctx.lineAt(node.start),
+    order: node.end,
+    context: executionContext(node, ancestors),
+    edgeMw: flattenLayers(node.arguments.slice(1, -1)).map((arg) => ({
+      mw: middlewareFromArg(arg, code),
+    })),
+  };
+}
+
 /** Collect `host.use(...)` mounts and host-level middleware into `out`. */
 function extractMounts(program, code, ctx, out) {
   walk(program, (node, ancestors) => {
@@ -1323,6 +1379,11 @@ function extractMounts(program, code, ctx, out) {
     if (!host || !isLocalHost(host, ctx)) return;
     const context = executionContext(node, ancestors);
     if (!context.reachable) return;
+    const loop = routeMapMount(node, ancestors, ctx, code);
+    if (loop) {
+      out.loopMounts.push(loop);
+      return;
+    }
     const hasPath = node.arguments.length > 0 && isPathLike(node.arguments[0], ctx.consts);
     const first = unwrap(node.arguments[0]);
     const firstRef = first ? refFromExpr(first, ctx) : { t: "unknown" };
@@ -1591,7 +1652,7 @@ function collectExports(program, ctx) {
     } else if (node.type === "ExportDefaultDeclaration") {
       exportRefs.set("default", refFromExpr(node.declaration, ctx));
     } else if (node.type === "ExportNamedDeclaration") {
-      collectNamedExport(node, exportRefs);
+      collectNamedExport(node, exportRefs, ctx);
     } else if (node.type === "ExportAllDeclaration" && !node.exported) {
       reExportAll.push(node.source.value);
     }
@@ -1599,7 +1660,7 @@ function collectExports(program, ctx) {
   return { exportRefs, reExportAll };
 }
 
-function collectNamedExport(node, exportRefs) {
+function collectNamedExport(node, exportRefs, ctx) {
   if (node.declaration?.id?.name && FN_TYPES.has(node.declaration.type)) {
     exportRefs.set(node.declaration.id.name, { t: "local", name: node.declaration.id.name });
   }
@@ -1617,7 +1678,7 @@ function collectNamedExport(node, exportRefs) {
         props: [],
         importKind: "import",
       });
-    else exportRefs.set(spec.exported.name, { t: "local", name: spec.local.name });
+    else exportRefs.set(spec.exported.name, refFromExpr(spec.local, ctx));
   }
 }
 
@@ -1638,6 +1699,20 @@ function analyzeFile(code, filePath, onParseError) {
   const valueBindings = collectValueBindings(program);
   const lineAt = lineCounter(code);
   const handlerIndex = collectHandlerIndex(program);
+  const mutatedNames = new Set();
+  let exportMutated = false;
+  let defaultAssignments = 0;
+  walk(program, (node) => {
+    if (!["AssignmentExpression", "UpdateExpression", "UnaryExpression"].includes(node.type))
+      return;
+    if (node.type === "UnaryExpression" && node.operator !== "delete") return;
+    const name = calleeName(node.left || node.argument) || "";
+    if (name === "module.exports") defaultAssignments++;
+    if (name.startsWith("module.exports.") || name.startsWith("exports.")) exportMutated = true;
+    let target = node.left || node.argument;
+    while (target?.type === "MemberExpression") target = target.object;
+    if (target?.type === "Identifier") mutatedNames.add(target.name);
+  });
   const handlerJSDoc = collectHandlerJSDoc(program, code);
   const handlerTypes = collectHandlerTypes(program);
   const typeResolver = createTypeResolver(program);
@@ -1651,6 +1726,7 @@ function analyzeFile(code, filePath, onParseError) {
     valueBindings,
     lineAt,
     handlerIndex,
+    mutatedNames,
     handlerJSDoc,
     handlerTypes,
     typeResolver,
@@ -1666,6 +1742,7 @@ function analyzeFile(code, filePath, onParseError) {
     routers,
     routes: [],
     edges: [],
+    loopMounts: [],
     registrarRoutes: [],
     registrars: new Map(),
     registrarInvocations: [],
@@ -1679,6 +1756,8 @@ function analyzeFile(code, filePath, onParseError) {
     consts,
     lineAt,
     frameworks,
+    mutatedNames,
+    exportMutated: exportMutated || defaultAssignments > 1,
   };
   extractRoutes(program, code, ctx, out);
   extractMounts(program, code, ctx, out);

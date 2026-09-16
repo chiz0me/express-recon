@@ -985,7 +985,7 @@ test("scan-org --update reuses durable unchanged artifacts and creates a delta",
     assert.equal(await run(true), 0);
     assert.equal(scans, 2);
     const refreshed = JSON.parse(fs.readFileSync(inventoryFile, "utf8"));
-    assert.equal(refreshed.evidenceCompatibilityVersion, "4");
+    assert.equal(refreshed.evidenceCompatibilityVersion, "5");
     assert.equal(refreshed.update.repositoriesReused, 0);
 
     fs.appendFileSync(path.join(output, "repositories", "api", "repo-scan.json"), "corrupt");

@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { execFileSync, spawnSync } = require("node:child_process");
 const api = require("../src");
 const { runScanOrganization } = require("../src/cli");
@@ -101,6 +102,37 @@ const app = {
   "app.js":
     'const express = require("express"); const app = express(); app.get("/health", (req, res) => res.json({ ok: true })); module.exports = app;\n',
 };
+
+test("older route evidence stays readable but update reanalyzes unchanged repositories", async (t) => {
+  const f = fixture(t, app);
+  assert.equal(await f.run(), 0);
+  const manifestFile = path.join(f.output, "organization-manifest.json");
+  const manifest = json(manifestFile);
+  for (const [name, key] of [
+    ["organization-inventory.json", "evidenceCompatibilityVersion"],
+    ["organization-checkpoint.json", "compatibilityVersion"],
+  ]) {
+    const file = path.join(f.output, name);
+    if (!fs.existsSync(file)) continue;
+    const value = json(file);
+    value[key] = "4";
+    const bytes = Buffer.from(JSON.stringify(value) + "\n");
+    fs.writeFileSync(file, bytes);
+    if (manifest.integrity[name])
+      manifest.integrity[name] = {
+        ...manifest.integrity[name],
+        bytes: bytes.length,
+        sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+      };
+  }
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest) + "\n");
+  const saved = api.loadOrganizationInventory(f.output);
+  assert.equal(saved.report.evidenceCompatibilityVersion, "4");
+  assert.equal(saved.validation.integrity, "verified");
+  assert.equal(await f.run({ update: true }), 0);
+  assert.equal(f.state.calls, 2);
+  assert.equal(api.loadOrganizationInventory(f.output).report.evidenceCompatibilityVersion, "5");
+});
 
 test("invalid retained references survive scan-org gates, offline validation, rendering, integrity checks and resume", async (t) => {
   const f = fixture(t, {

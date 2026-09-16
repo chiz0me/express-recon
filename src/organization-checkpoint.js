@@ -10,9 +10,9 @@ const CHECKPOINT_FILENAME = "organization-checkpoint.json";
 const CHECKPOINT_KIND = "github-organization-scan-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = "1.0";
 // Bump this whenever previously completed repository evidence is no longer safe
-// to reuse. Generation 4 invalidates evidence produced before conservative
-// Express scope/control-flow and structured-wrapper proof semantics.
-const CHECKPOINT_COMPATIBILITY_VERSION = "4";
+// to reuse. Generation 5 rescans earlier route-connection/provenance evidence.
+// Generation 4 remains readable for offline rendering, never scan reuse.
+const CHECKPOINT_COMPATIBILITY_VERSION = "5";
 const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
 
 function canonical(value, seen = new Set()) {
@@ -281,7 +281,7 @@ function readCheckpointFile(file) {
   }
 }
 
-function validateCheckpointShape(value, organization, identity) {
+function validateCheckpointShape(value, organization, identity, options = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Organization checkpoint must contain an object");
   }
@@ -300,7 +300,10 @@ function validateCheckpointShape(value, organization, identity) {
       `Organization checkpoint belongs to ${value.organization}, not ${organization}`,
     );
   }
-  if (value.compatibilityVersion !== CHECKPOINT_COMPATIBILITY_VERSION) {
+  if (
+    value.compatibilityVersion !== CHECKPOINT_COMPATIBILITY_VERSION &&
+    !(options.verifyOnly && value.compatibilityVersion === "4")
+  ) {
     const previousGeneration =
       value.compatibilityVersion === undefined ||
       (/^\d+$/.test(value.compatibilityVersion) &&
@@ -401,7 +404,7 @@ function resumableEntries(checkpoint, outDir, options = {}) {
 
 function loadCheckpoint(file, organization, identity, outDir, options = {}) {
   const source = readCheckpointFile(file);
-  const compatibility = validateCheckpointShape(source, organization, identity);
+  const compatibility = validateCheckpointShape(source, organization, identity, options);
   if (compatibility.obsolete) {
     return {
       checkpoint: initialCheckpoint(organization, identity),

@@ -160,6 +160,11 @@ inventory updates; existing checkpoint and compatibility checks decide which evi
 can be reused safely. Repository visibility restrictions remain explicit even when
 every accessible repository has been scanned.
 
+Version 0.19.0 advances route-analysis evidence to generation 5. Existing
+generation-4 reports remain integrity-checked and readable for offline rendering,
+but the next resume/update reanalyzes repositories even when their commits have
+not changed. Domain sidecars and accepted enrichment are preserved.
+
 Resume checkpoints every successfully processed repository with integrity-checked
 artifacts, including incomplete results caused by symlinks, submodules, parser
 errors, file limits, or invalid source specifications. Reuse preserves incomplete

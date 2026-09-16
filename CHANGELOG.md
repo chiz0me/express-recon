@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.19.0
+
+- Resolve declarative package `_moduleAliases`, import-then-export ESM barrels,
+  and bounded static `Object.keys(routes).forEach(...)` mounts. Keep unknown,
+  mutated, conditional, and oversized route maps fail-visible.
+- Connect imported factories returning Express apps to subsequent mounts, keep
+  separate factory instances isolated, and retain uncertainty for dynamic paths
+  and ambiguous factory returns.
+- Avoid false Fastify registration gaps from ordinary `.register()` methods
+  and unrelated callbacks whose parameter happens to be named `server`.
+- Select NestJS dynamic-module metadata from the called registration method,
+  including async variants, rather than merging unused factory methods.
+- Advance organization scan evidence to generation 5 so resume/update rescans
+  older results. Generation 4 remains readable and integrity-checked for offline
+  rendering; independent domain sidecars and accepted enrichment remain intact.
+- Cover new resolution paths and conservative failure behavior with synthetic
+  regression tests; no application source or organization-specific fixtures.
+
 ## 0.18.0
 
 - Redesign organization reports around route-level results. Related statistics

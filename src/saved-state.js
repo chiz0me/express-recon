@@ -129,7 +129,7 @@ function loadOrganizationInventory(input) {
     throw new Error("Unsupported saved organization inventory contract");
   if (
     report.evidenceCompatibilityVersion !== undefined &&
-    report.evidenceCompatibilityVersion !== CHECKPOINT_COMPATIBILITY_VERSION
+    !["4", CHECKPOINT_COMPATIBILITY_VERSION].includes(report.evidenceCompatibilityVersion)
   )
     throw new Error(
       "Unsupported organization evidence compatibility version; rescan before enrichment",
@@ -259,7 +259,7 @@ function loadOrganizationInventory(input) {
       checkpoint.organization?.toLowerCase() !== report.organization.login.toLowerCase()
     )
       throw new Error("Unsupported saved organization checkpoint");
-    if (checkpoint.compatibilityVersion !== CHECKPOINT_COMPATIBILITY_VERSION)
+    if (!["4", CHECKPOINT_COMPATIBILITY_VERSION].includes(checkpoint.compatibilityVersion))
       throw new Error("Unsupported saved checkpoint compatibility version");
     for (const key of [
       "configHash",

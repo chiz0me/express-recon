@@ -283,6 +283,27 @@ test("pre-generation and generation-3 checkpoints are rejected after proof chang
   }
 });
 
+test("generation-4 evidence is verified for offline reads but never reused for scanning", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-checkpoint-generation-"));
+  try {
+    const currentIdentity = identity();
+    const entry = checkpointEntry(payload("api"), writeArtifacts(root, "api"), root);
+    const checkpoint = withCompleted(initialCheckpoint("acme", currentIdentity), entry);
+    checkpoint.compatibilityVersion = "4";
+    atomicWriteJson(checkpointPath(root), checkpoint);
+    const verified = loadCheckpoint(checkpointPath(root), "acme", currentIdentity, root, {
+      verifyOnly: true,
+    });
+    assert.equal(verified.entries.length, 1);
+    assert.deepEqual(verified.diagnostics, []);
+    const resumed = loadCheckpoint(checkpointPath(root), "acme", currentIdentity, root);
+    assert.equal(resumed.entries.length, 0);
+    assert.match(resumed.diagnostics[0], /all repositories will be rescanned/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("organization checkpoints reject malformed or incompatible top-level state", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-checkpoint-invalid-"));
   const currentIdentity = identity();

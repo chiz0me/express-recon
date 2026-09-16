@@ -3,7 +3,8 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { analyzeFile } = require("./analyze-file");
+const { analyzeFile, refFromExpr } = require("./analyze-file");
+const { staticString } = require("./ast");
 const { STATIC_FRAMEWORK_ADAPTERS } = require("./adapters");
 const { extractIoHints } = require("./io-hints");
 const { createScopedResolver, EXTENSIONS } = require("./resolve");
@@ -391,13 +392,24 @@ function resolveExport(file, exportName, props, byPath, resolve, seen) {
 
 function resolveRefValue(file, ref, props, byPath, resolve, seen) {
   switch (ref.t) {
-    case "factory":
-      return resolveRefValue(file, ref.ret, props, byPath, resolve, seen);
+    case "factory": {
+      const found = resolveRefValue(file, ref.ret, props, byPath, resolve, seen);
+      return found ? { ...found, factory: true } : null;
+    }
     case "local":
       // Only a genuine router/app var is a mountable router. `module.exports =
       // redisClient` / a config object is a local export but not a router.
-      if (props.length !== 0 || !file.routers.has(ref.name)) return null;
-      return { kind: "router", file: file.filePath, var: ref.name };
+      if (file.routers.has(ref.name)) {
+        return props.length === 0 ? { kind: "router", file: file.filePath, var: ref.name } : null;
+      }
+      {
+        const key = `${file.filePath}#value:${ref.name}`;
+        const value = file.valueBindings.get(ref.name);
+        if (seen.has(key) || file.mutatedNames?.has(ref.name) || value?.type !== "ObjectExpression")
+          return null;
+        seen.add(key);
+        return resolveRefValue(file, refFromExpr(value, file), props, byPath, resolve, seen);
+      }
     case "object": {
       if (props.length === 0) return { kind: "object", file: file.filePath, props: ref.props };
       const next = ref.props.get(props[0]);
@@ -605,6 +617,7 @@ function resolveRegistrarExport(file, exportName, props, byPath, resolve, seen =
 function buildGraph(files, resolve, budget) {
   const byPath = new Map(files.map((f) => [f.filePath, f]));
   const nodes = new Map();
+  const factoryInstances = new Map();
   const stats = {
     dropped: 0,
     attachedRegistrars: new Set(),
@@ -634,7 +647,26 @@ function buildGraph(files, resolve, budget) {
       const target = resolve(file.filePath, b.source, b.importKind);
       const tf = target && byPath.get(target);
       const found = tf && resolveExport(tf, b.exportName, b.props, byPath, resolve, new Set());
-      if (found && found.kind === "router") return ensure(`${found.file}#${found.var}`, "router");
+      if (b.factoryCall && !found?.factory) return ensure(`${file.filePath}#${name}`, "unknown");
+      if (found && found.kind === "router") {
+        const declaration = byPath.get(found.file)?.routers.get(found.var);
+        if (b.factoryCall && declaration?.kind === "app") {
+          const instance = ensure(`${file.filePath}#${name}`, "app", {
+            file: file.filePath,
+            var: name,
+            line: file.lineAt(b.start),
+            caseSensitive: declaration.caseSensitive,
+          });
+          factoryInstances.set(instance.id, `${found.file}#${found.var}`);
+          return instance;
+        }
+        return ensure(`${found.file}#${found.var}`, declaration?.kind || "router", {
+          file: found.file,
+          var: found.var,
+          line: byPath.get(found.file)?.lineAt(declaration?.start || 0),
+          caseSensitive: declaration?.caseSensitive ?? null,
+        });
+      }
       return ensure(`external:${b.source}`, "external");
     }
     return ensure(`${file.filePath}#${name}`, "unknown");
@@ -701,6 +733,61 @@ function buildGraph(files, resolve, budget) {
         );
       }
     }
+    for (const loop of file.loopMounts || []) {
+      const object = resolveRefValue(file, loop.mapRef, [], byPath, resolve, new Set());
+      if (object?.kind !== "object" || object.props.size > 256) {
+        resolveLocal(file, loop.host).opaqueUses.push({
+          ...loop,
+          file: file.filePath,
+          mountPath: null,
+          pathConfidence: "unknown",
+          middlewares: ["Object.keys route map"],
+        });
+        continue;
+      }
+      const mapFile = byPath.get(object.file);
+      if (
+        mapFile.exportMutated ||
+        mapFile.mutatedNames.has("exports") ||
+        [...mapFile.mutatedNames].some(
+          (name) => name !== "module" && mapFile.valueBindings.has(name),
+        )
+      ) {
+        resolveLocal(file, loop.host).opaqueUses.push({
+          ...loop,
+          file: file.filePath,
+          mountPath: null,
+          pathConfidence: "unknown",
+          middlewares: ["mutated route map"],
+        });
+        continue;
+      }
+      for (const [key, ref] of object.props) {
+        if (!budget.graph()) break;
+        const found = resolveRefValue(mapFile, ref, [], byPath, resolve, new Set());
+        const host = resolveLocal(file, loop.host);
+        if (found?.kind !== "router") {
+          host.opaqueUses.push({
+            ...loop,
+            file: file.filePath,
+            mountPath: null,
+            pathConfidence: "unknown",
+            middlewares: [`route map key:${key}`],
+          });
+          continue;
+        }
+        const mountPath = staticString(loop.pathNode, {
+          resolve: (node) => (node.name === loop.key ? key : file.consts.resolve(node)),
+        });
+        host.edges.push({
+          ...loop,
+          mountPath: mountPath ?? "<dynamic>",
+          partial: mountPath === null,
+          targetId: ensure(`${found.file}#${found.var}`, "router").id,
+          file: file.filePath,
+        });
+      }
+    }
     for (const invocation of file.registrarInvocations || []) {
       const registrar = registrarFromRefValue(
         file,
@@ -719,6 +806,15 @@ function buildGraph(files, resolve, budget) {
         stats.attachedRegistrarSites.add(`${registrar.file}\0${route.line || 0}\0${route.method}`);
       }
     }
+  }
+  for (const [instanceId, templateId] of factoryInstances) {
+    const instance = nodes.get(instanceId);
+    const template = nodes.get(templateId);
+    if (!template) continue;
+    for (const key of ["routes", "globalMw", "edges", "opaqueUses"]) {
+      instance[key] = [...template[key], ...instance[key]];
+    }
+    template.kind = "factory-template";
   }
   return { nodes, stats };
 }

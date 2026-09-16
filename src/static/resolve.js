@@ -239,6 +239,26 @@ function loadImports(rootDir, stopDir, observe = () => {}) {
   return null;
 }
 
+/** Read declarative module-alias mappings from the nearest package scope only. */
+function loadModuleAliases(rootDir, stopDir, observe) {
+  let dir = path.resolve(rootDir);
+  for (let hops = 0; hops < 12; hops++) {
+    const file = path.join(dir, "package.json");
+    observe(file);
+    if (fs.existsSync(file)) {
+      const aliases = tolerantJsonParse(fs.readFileSync(file, "utf8"))?._moduleAliases;
+      return aliases && typeof aliases === "object" && !Array.isArray(aliases)
+        ? { dir, aliases }
+        : null;
+    }
+    if (dir === stopDir) break;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 function firstExistingFile(base) {
   if (fs.existsSync(base) && fs.statSync(base).isFile()) return base;
   // TypeScript's NodeNext/Node16 modes require emitted extensions in source
@@ -482,7 +502,7 @@ function importCandidates(source, pkgImports, importKind) {
  * @param {object|null} pkgImports  from `loadImports`
  * @returns {(fromFile: string, source: string) => string|null}
  */
-function createResolver(tsconfig, pkgImports, localPackages = new Map()) {
+function createResolver(tsconfig, pkgImports, localPackages = new Map(), moduleAliases = null) {
   const explain = (fromFile, source, importKind = "import") => {
     if (source.startsWith(".")) {
       const file = firstExistingFile(path.resolve(path.dirname(fromFile), source));
@@ -514,6 +534,26 @@ function createResolver(tsconfig, pkgImports, localPackages = new Map()) {
         heuristic: false,
         reason: "package-imports-target-not-found-or-blocked",
       };
+    }
+    if (moduleAliases) {
+      const alias = Object.keys(moduleAliases.aliases)
+        .filter((key) => key && (source === key || source.startsWith(key + "/")))
+        .sort((a, b) => b.length - a.length || a.localeCompare(b))[0];
+      if (alias) {
+        const target = moduleAliases.aliases[alias];
+        const file =
+          typeof target === "string" && target
+            ? firstExistingFile(
+                path.resolve(moduleAliases.dir, target, "." + source.slice(alias.length)),
+              )
+            : null;
+        return {
+          file,
+          strategy: "module-alias",
+          heuristic: false,
+          reason: file ? null : "module-alias-target-not-found",
+        };
+      }
     }
     if (tsconfig) {
       for (const candidate of aliasCandidates(source, tsconfig)) {
@@ -603,6 +643,7 @@ function createScopedResolver(rootDir, sourceFiles = []) {
         loadTsconfig(dir, root, observe),
         loadImports(dir, root, observe),
         localPackages,
+        loadModuleAliases(dir, root, observe),
       );
       cache.set(dir, resolve);
     }
@@ -618,7 +659,11 @@ function createScopedResolver(rootDir, sourceFiles = []) {
   const scoped = (fromFile, source, importKind = "import") => {
     const detail = explain(fromFile, source, importKind);
     if (
-      (detail.heuristic || (!detail.file && (source.startsWith(".") || source.startsWith("#")))) &&
+      (detail.heuristic ||
+        (!detail.file &&
+          (detail.strategy === "module-alias" ||
+            source.startsWith(".") ||
+            source.startsWith("#")))) &&
       traces.length < 128
     ) {
       const trace = {

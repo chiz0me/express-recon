@@ -646,7 +646,6 @@ function extractCalls(program, model, code, ctx) {
       return;
     }
     if (property === "register") {
-      owner.fastifySignal = true;
       const options = resolveObject(node.arguments[1], model.objects);
       const prefixProp = objectProperty(options, "prefix");
       const prefixNode = propertyValue(prefixProp);
@@ -1066,7 +1065,7 @@ function buildFastifyRegistry(files, resolve, root, options = {}) {
       const conventionalPlugin =
         plugin.fastifySignal ||
         /plugin$/i.test(plugin.name) ||
-        /^(fastify|server|instance)$/i.test(plugin.host || "");
+        (unclaimedRoutes.length > 0 && /^(fastify|server|instance)$/i.test(plugin.host || ""));
       if (
         assigned.has(plugin.id) ||
         !conventionalPlugin ||

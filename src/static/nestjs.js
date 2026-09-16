@@ -272,7 +272,10 @@ function expressionRef(node, model, ctx) {
       }
     }
     if (value.callee.type === "MemberExpression" && !value.callee.computed) {
-      return expressionRef(value.callee.object, model, ctx);
+      return {
+        ...expressionRef(value.callee.object, model, ctx),
+        factoryMethod: value.callee.property.name,
+      };
     }
   }
   return { type: "unknown", label: calleeName(value) || "dynamic reference" };
@@ -789,12 +792,22 @@ function dynamicModuleMetadata(node, model) {
       method.type === "MethodDefinition" &&
       method.static &&
       !method.computed &&
-      ["register", "forRoot", "forRootAsync"].includes(method.key?.name) &&
+      [
+        "register",
+        "registerAsync",
+        "forRoot",
+        "forRootAsync",
+        "forFeature",
+        "forFeatureAsync",
+      ].includes(method.key?.name) &&
       method.value,
   );
-  return methods.flatMap((method) =>
-    functionReturnExpressions(method.value).map((value) => resolveObject(value, model.objects)),
-  );
+  return methods.map((method) => ({
+    name: method.key.name,
+    metadata: functionReturnExpressions(method.value).map((value) =>
+      resolveObject(value, model.objects),
+    ),
+  }));
 }
 
 function collectModule(node, call, model, code, ctx) {
@@ -821,15 +834,29 @@ function collectModule(node, call, model, code, ctx) {
     if (!metadata) return module;
   }
   applyModuleMetadata(module, metadata, model, code, ctx);
-  const registeredMetadata = dynamicModuleMetadata(node, model);
-  for (const registered of registeredMetadata.filter(Boolean)) {
-    applyModuleMetadata(module, registered, model, code, ctx);
-  }
-  if (registeredMetadata.some((value) => !value) || registeredMetadata.length > 1) {
-    module.metadataDynamic = true;
-  }
   module.dynamicRouterMappings = model.dynamicRouterMappings - dynamicMappingsBefore;
   collectModuleMiddleware(node, module, model, code, ctx);
+  module.dynamicVariants = new Map();
+  for (const factory of dynamicModuleMetadata(node, model)) {
+    const variant = {
+      ...module,
+      id: `${module.id}#${factory.name}`,
+      baseId: module.id,
+      controllers: [...module.controllers],
+      imports: [...module.imports],
+      routerMappings: [...module.routerMappings],
+      globalMiddleware: [...module.globalMiddleware],
+    };
+    const before = model.dynamicRouterMappings;
+    for (const metadata of factory.metadata.filter(Boolean)) {
+      applyModuleMetadata(variant, metadata, model, code, ctx);
+      variant.metadataDynamic ||= Boolean(metadata.hasUnresolvedSpread);
+    }
+    variant.metadataDynamic ||=
+      factory.metadata.length !== 1 || factory.metadata.some((value) => !value);
+    variant.dynamicRouterMappings += model.dynamicRouterMappings - before;
+    module.dynamicVariants.set(factory.name, variant);
+  }
   return module;
 }
 
@@ -1027,6 +1054,11 @@ function normalizedModuleRef(ref) {
 
 function resolveClass(fromFile, ref, models, resolve, seen = new Set()) {
   if (!ref) return null;
+  if (ref.factoryMethod) {
+    const { factoryMethod, ...target } = ref;
+    const module = resolveClass(fromFile, target, models, resolve, seen);
+    return module?.dynamicVariants?.get(factoryMethod) || module;
+  }
   const current = models.get(fromFile);
   if (ref.type === "local") return current?.classes.get(ref.name) || null;
   if (ref.type !== "module") return null;
@@ -1092,6 +1124,9 @@ function modulePrefixes(state, models, resolve) {
     seen.add(module.id);
     if (!prefixes.has(module.id)) prefixes.set(module.id, new Set());
     prefixes.get(module.id).add(prefix);
+    for (const registered of state.modules.values()) {
+      if (registered.baseId === module.id) addPrefix(registered, prefix, seen);
+    }
     for (const ref of module.imports) {
       const imported = resolveClass(module.file, ref, models, resolve);
       if (imported?.kind === "module") addPrefix(imported, prefix, seen);

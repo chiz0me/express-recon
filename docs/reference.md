@@ -1332,10 +1332,18 @@ Express resolution includes:
   literal paths;
 - cross-file mounts, resolvable direct registrar calls, and middleware
   registration order;
+- imported factories returning an unambiguous Express app, with distinct
+  application identities for separate factory calls; runtime prefixes remain partial;
+- straight-line `Object.keys(routes).forEach(key => app.use(prefix + key, routes[key]))`
+  mounts from local or imported static objects (at most 256 keys); unresolved,
+  conditional, or mutated maps remain incomplete;
 - same-file string constants, concatenation, and template paths;
 - `require`, ESM import, package `#imports`, nearest-package `tsconfig` paths and
   `baseUrl`, NodeNext `.js` specifiers targeting TypeScript source, and common
-  barrel re-exports;
+  barrel re-exports, including `import router; export { router }` forwarding;
+- declarative package.json `_moduleAliases` with exact/segment-prefix matching,
+  longest-match precedence, nearest-package scope and scan-root containment;
+  alias registration code is never executed;
 - path-scoped middleware, configured transparent wrappers, and one-hop
   controller handler hints.
 
@@ -1363,7 +1371,8 @@ NestJS resolution includes:
   default or named module exports, module/controller graphs, NodeNext source
   resolution, and Express versus Fastify platform adapters;
 - repository-local workspace package imports and statically returned
-  `register()`/`forRoot()` dynamic-module metadata;
+  `register()`/`forRoot()`/`forFeature()` dynamic-module metadata and their async
+  variants, selected by the called method rather than merging unused factories;
 - controller and method paths, static arrays, global prefixes, and
   `RouterModule.register()` prefixes;
 - global/controller/method guards, interceptors, pipes, and filters, including
@@ -1399,7 +1408,8 @@ root are retained as partial evidence when the function uses a conventional
 `fastify`/`server`/`instance` parameter, a `*Plugin` name, or another
 Fastify-specific API; otherwise an ambiguous `(app) => app.get(...)` registrar
 keeps the legacy Express interpretation. A generic `.route()` call alone is not
-Fastify evidence, which avoids classifying browser-automation APIs such as
+Fastify evidence. Neither a generic `.register()` nor passing a variable named
+`server` to an ordinary helper is sufficient by itself. This avoids classifying APIs such as
 `page.route()` as server routes.
 
 ### Runtime mode
