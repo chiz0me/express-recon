@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.18.0
+
+- Redesign organization reports around route-level results. Related statistics
+  now combine raw counts and percentages, documentation overlap is attributed to
+  authored OpenAPI, Swagger, and JSDoc evidence, and invalid specifications move
+  into a collapsed section below the repository tables.
+- Sort repositories by descending route count by default, add independent
+  repository/domain/status/framework filters, and keep wide tables readable with
+  responsive labelled rows. Supported repositories with no discovered routes
+  are collapsed separately so incomplete scans with route evidence stay visible.
+- Load an independently maintained `domain-inventory.json` sidecar from an
+  organization scan folder. Reports include deduplicated deployment hosts,
+  repository evidence, a joined render artifact, and conservative OpenAPI server
+  enrichment without rewriting source scans or specifications.
+- Preserve domain inventory and reviewed binding sidecars across organization
+  update, resume, and overwrite workflows while keeping them outside the native
+  scan integrity manifest.
+
 ## 0.17.4
 
 - Separate retained invalid source specifications from saved-file access errors.

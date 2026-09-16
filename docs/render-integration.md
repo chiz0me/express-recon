@@ -5,6 +5,78 @@ Export data, not HTML or executable plugins. Express Recon reads a versioned
 or target repository. New framework identifiers require no scanner changes.
 Native Express/Fastify/NestJS outputs and the existing Gin importer still work.
 
+## Deployment domain sidecar
+
+Deployment evidence does not need a route-producer bundle. A standalone domain
+scanner can write `domain-inventory.json` directly beside the saved
+`organization-inventory.json`. Normal `express-recon render --input <output>`
+loads it automatically without calling the producer or contacting GitHub.
+
+The independent contract is `schemaVersion: 1` (number),
+`kind: "deployment-domain-inventory"`, `updatedAt`, and `repositories[]`. Each
+repository contains:
+
+- `repository`: `{ key: "github.com/owner/repo", fullName: "owner/repo", id }`;
+  key is lowercase, numeric GitHub ID is optional and checked when available.
+- `status`: `complete`, `partial`, or `error`; `sourceCommit`, `lastSuccessAt`.
+- `domains[]`: unique normalized `hostname` and `observations[]`.
+- Each observation has `hostname`, `scope` (`internal`/`external`), `environment`
+  (string or null), `scheme` (`http`/`https`/null), `port` (string or null),
+  `urlPath` (string or null), `paths[]`, and `source` with `file`, JSON `pointer`,
+  `documentIndex`, `commit` and ISO `observedAt`.
+
+The standalone `domain-recon` package emits this contract with
+`scan --org <owner> --express-output <existing-scan-output>`; it owns the sidecar.
+Daily `scan-org --update`, `--resume`, and `--overwrite` neither rewrite nor delete
+it. The domain file is not part of the scanner's hashed artifact manifest and is
+not added to `organization-inventory.json` artifact references. This allows its
+independent update cadence without invalidating daily scan integrity. If your
+automation deletes the entire output folder, it must preserve this file itself.
+
+Rendering adds a Domains column, repository evidence panels, `domains.html`, and
+`domain-merge.json`. The latter is a render-owned projection, not the persistent
+catalog. The original scan and source OpenAPI artifacts remain byte-for-byte
+unchanged; enriched specifications are embedded in their rendered API pages.
+`render --check` includes the sidecar-derived output; removing the sidecar removes
+the old domain pages on the next render. No sidecar means unchanged behavior.
+
+Single-application repositories can receive inferred root-ingress server URLs.
+Multiple applications across all producers require an explicit binding; domains
+are never guessed from similarly named services. Incomplete scans, unknown
+schemes, wildcard hosts, non-root ingress patterns, and evidence older than 30
+days remain visible but do not automatically become servers. Internal/external
+are configuration labels, not verified reachability. Authored servers, path-level
+overrides and route/documentation coverage are preserved. OpenAPI 3 appends unique
+servers; Swagger 2 receives a missing host only for a single compatible URL.
+
+An optional sibling `domain-bindings.json` provides reviewed mappings:
+
+```json
+{
+  "schemaVersion": 1,
+  "bindings": [
+    {
+      "repository": "acme/api",
+      "applicationId": "app:src/index.js#app",
+      "hostname": "api.example.com",
+      "environment": "production",
+      "scope": "external",
+      "scheme": "https",
+      "basePath": ""
+    }
+  ]
+}
+```
+
+A rule needs an `applicationId` and/or `specification` (original spec source
+path); environment/scope/scheme/basePath are optional. Once a repository has
+rules, only matching rules add servers. Rules select observed hosts, never
+invent them. Invalid/overlapping associations warn and leave source API pages
+available. Workspaces are not enriched. Imported Gin/producer specifications
+use the same conservative repository/app matching as native specifications.
+Domain files must be regular non-symlink files, at most 64 MiB. Malformed or
+unsupported optional sidecars are skipped with an artifact warning.
+
 ## Contracts and versions
 
 The [schema catalog](../schemas/README.md) separates native inventory/audit

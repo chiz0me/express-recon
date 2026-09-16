@@ -22,6 +22,9 @@ const { importRenderBundles } = require("./render-bundle");
 const isRenderableStatus = (status) =>
   isFrameworkStatus(status) || ["gin", "supported"].includes(status);
 const { OPENAPI_STYLES, SCRIPT, STYLES } = require("./html-assets");
+const { documentationCoverage } = require("./html-documentation");
+const { loadDomainInventory } = require("./domain-inventory");
+const { enrichOpenApi } = require("./domain-openapi");
 const {
   compareOrganizationReports,
   loadOrganizationSnapshot,
@@ -174,6 +177,38 @@ function metrics(items) {
   return `<div class="metrics">${items.map(([label, value]) => metric(label, value)).join("")}</div>`;
 }
 
+function percentage(value, total) {
+  if (!total) return "—";
+  return `${Number(((value / total) * 100).toFixed(1))}%`;
+}
+
+function ratio(value, total) {
+  return `${value} / ${total} · ${percentage(value, total)}`;
+}
+
+function summaryCard(label, value, description, items = []) {
+  return `<article class="metric metric--summary"><h2 class="metric__heading">${escapeHtml(label)}</h2><div class="metric__value">${escapeHtml(value)}</div><p class="metric__description">${escapeHtml(description)}</p><dl class="metric__details">${items.map(([name, detail]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(detail)}</dd></div>`).join("")}</dl></article>`;
+}
+
+function documentationSummary(coverage) {
+  if (!coverage?.total) return "No routes";
+  if (!coverage.checked) return "Not checked";
+  return ratio(coverage.matched, coverage.total);
+}
+
+function documentationDescription(coverage) {
+  return coverage.checked
+    ? `${coverage.matched} / ${coverage.total} discovered routes also in docs`
+    : coverage.total
+      ? "No comparable documentation evidence"
+      : "No discovered routes to compare";
+}
+
+function documentationCell(coverage) {
+  const remaining = count(coverage?.total) - count(coverage?.checked);
+  return `<div class="stack docs-coverage"><strong>${escapeHtml(documentationSummary(coverage))}</strong>${coverage?.checked ? `<span class="subtle">routes also in docs${remaining ? ` · ${remaining} not checked` : ""}</span>` : coverage?.total ? '<span class="subtle">No comparable documentation evidence</span>' : ""}</div>`;
+}
+
 function notice(title, message, kind = "info") {
   const modifier = kind === "info" ? "" : ` notice--${kind}`;
   return `<div class="notice${modifier}" role="status"><strong>${escapeHtml(title)}</strong>${escapeHtml(message)}</div>`;
@@ -231,19 +266,26 @@ function statusOptions(values) {
 
 function filterControls(id, placeholder, statuses = [], options = {}) {
   const frameworks = list(options.frameworks);
+  const sorts = list(options.sorts);
   return `<div class="filters" data-filter-controls="${id}">
     <div class="field"><label for="${id}-search">Search</label><input id="${id}-search" type="search" placeholder="${escapeHtml(placeholder)}" data-filter-search></div>
+    ${options.domainSearch ? `<div class="field field--domain"><label for="${id}-domain">Domain</label><input id="${id}-domain" type="search" placeholder="Domain or part of a hostname…" spellcheck="false" autocapitalize="none" data-filter-domain></div>` : ""}
     ${statuses.length ? `<div class="field field--compact"><label for="${id}-status">${escapeHtml(options.statusLabel || "Status")}</label><select id="${id}-status" data-filter-status><option value="">All statuses</option>${statusOptions(statuses)}</select></div>` : ""}
     ${frameworks.some((name) => name !== "not-reported") ? `<div class="field field--compact"><label for="${id}-framework">Framework</label><select id="${id}-framework" data-filter-framework><option value="">All frameworks</option>${statusOptions(frameworks)}</select></div>` : ""}
+    ${sorts.length ? `<div class="field field--compact"><label for="${id}-sort">Sort</label><select id="${id}-sort" data-sort="true">${sorts.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}</select></div>` : ""}
     <span class="result-count" data-result-count aria-live="polite"></span>
   </div>`;
 }
 
-function routeRows(report) {
+function routeRows(report, documentation) {
   const audit = report.command === "audit";
   return list(report.routes)
-    .map((routeValue) => {
+    .map((routeValue, index) => {
       const route = object(routeValue);
+      const docs = documentation.rows[index];
+      const docsLabel = { matched: "In API docs", unmatched: "No match", unchecked: "Not checked" }[
+        docs.status
+      ];
       const auth = audit ? display(route.authStatus, "unknown") : "";
       const search = [
         route.framework || "express",
@@ -254,6 +296,8 @@ function routeRows(report) {
         sourceLabel(route.source),
         middlewareLabel(route.middlewares),
         schemaEvidenceLabel(route.io),
+        docsLabel,
+        ...docs.sources,
         ...list(route.tags),
         ...list(route.roles),
         ...list(route.scopes),
@@ -267,6 +311,7 @@ function routeRows(report) {
         <td>${badge(route.framework || "express")}</td>
         <td><span class="method">${escapeHtml(display(route.method))}</span></td>
         <td class="route-path"><div class="stack"><code>${escapeHtml(display(route.path))}</code><span>${confidence}</span></div></td>
+        <td><div class="stack">${badge(docsLabel, docs.status === "matched" ? "good" : "neutral")}${docs.sources.length ? `<span class="subtle docs-source">${escapeHtml(docs.sources.join(", "))}</span>` : ""}</div></td>
         <td>${audit ? badge(auth) + accepted : badge("inventory", "info")}</td>
         <td><code>${escapeHtml(display(route.applicationId))}</code></td>
         <td class="source"><code>${escapeHtml(sourceLabel(route.source))}</code></td>
@@ -277,18 +322,18 @@ function routeRows(report) {
     .join("");
 }
 
-function routeTable(report) {
+function routeTable(report, documentation) {
   const routes = list(report.routes);
   const statuses = report.command === "audit" ? routes.map((route) => route.authStatus) : [];
   const body = routes.length
-    ? `<div class="table-wrap"><table id="routes-table"><thead><tr><th>Framework</th><th>Method</th><th>Path</th><th>Auth</th><th>Application</th><th>Source</th><th>Middleware chain</th><th>I/O schema evidence</th></tr></thead><tbody>${routeRows(report)}</tbody></table></div>`
+    ? `<div class="table-wrap"><table id="routes-table"><thead><tr><th>Framework</th><th>Method</th><th>Path</th><th>API docs</th><th>Auth</th><th>Application</th><th>Source</th><th>Middleware chain</th><th>I/O schema evidence</th></tr></thead><tbody>${routeRows(report, documentation)}</tbody></table></div>`
     : `<div class="panel__body"><p class="empty">No routes were recorded.</p></div>`;
   return panel(
     "Routes",
     routes.length
-      ? filterControls("routes-table", "Framework, path, middleware, application…", statuses) + body
+      ? filterControls("routes-table", "Path, API docs, framework, middleware…", statuses) + body
       : body,
-    `${routes.length} route${routes.length === 1 ? "" : "s"} in this report`,
+    `${routes.length} routes · ${documentation.matched} also in API docs · ${routes.length - documentation.checked} not checked. Matches use HTTP method and path; a route is counted once if any variant matches authored documentation.`,
   );
 }
 
@@ -496,7 +541,7 @@ function repositoryOverview(scan) {
   );
 }
 
-function reportSummary(report) {
+function reportSummary(report, documentation) {
   const summary = object(report.summary);
   const routes = list(report.routes);
   const coverage = object(report.scanCoverage);
@@ -505,31 +550,64 @@ function reportSummary(report) {
     (total, route) => total + list(object(object(object(route).io).schemas).conflicts).length,
     0,
   );
-  const base = [
-    ["Routes", routes.length],
-    [
-      report.mode === "imported"
-        ? "Application groups"
-        : report.tool === "gin-recon"
-          ? "Go modules"
-          : "Applications",
-      list(report.applications).length,
-    ],
-    ["Mode", display(report.mode)],
-    ["Coverage", completeness(coverage.complete)],
-    ["Typed I/O routes", typedRoutes],
-    ["Schema conflicts", schemaConflicts],
-  ];
-  if (report.command === "audit") {
-    base.splice(
-      1,
-      0,
-      ["Public", count(summary.public)],
-      ["Needs review", count(summary.unknown)],
-      ["Proven auth", count(summary.proven)],
-    );
-  }
-  return metrics(base);
+  const applicationsLabel =
+    report.mode === "imported"
+      ? "Application groups"
+      : report.tool === "gin-recon"
+        ? "Go modules"
+        : "Applications";
+  return `<div class="metrics metrics--summary">${[
+    summaryCard(
+      "Routes",
+      routes.length,
+      `${list(report.applications).length} ${applicationsLabel.toLowerCase()} · ${display(report.mode)} analysis`,
+      report.command === "audit"
+        ? [
+            ["Proven auth", ratio(count(summary.proven), routes.length)],
+            ["Public", ratio(count(summary.public), routes.length)],
+            ["Needs review", ratio(count(summary.unknown), routes.length)],
+          ]
+        : [],
+    ),
+    summaryCard(
+      "Also in API docs",
+      documentation.checked
+        ? percentage(documentation.matched, documentation.total)
+        : documentationSummary(documentation),
+      documentationDescription(documentation),
+      [
+        ["Checked", ratio(documentation.checked, routes.length)],
+        ["No match", documentation.checked - documentation.matched],
+        ["Not checked", routes.length - documentation.checked],
+      ],
+    ),
+    summaryCard(
+      "Typed I/O routes",
+      percentage(typedRoutes, routes.length),
+      `${typedRoutes} / ${routes.length} routes have schema evidence`,
+      [["Schema conflicts", schemaConflicts]],
+    ),
+    summaryCard(
+      "Scan coverage",
+      completeness(coverage.complete),
+      "Source analysis within the configured scope",
+      [
+        [
+          "Files analyzed",
+          coverage.discovered !== undefined || coverage.discoveredFiles !== undefined
+            ? ratio(
+                count(coverage.analyzed ?? coverage.analyzedFiles),
+                count(coverage.discovered ?? coverage.discoveredFiles),
+              )
+            : "Not reported",
+        ],
+        [
+          "Failed / skipped",
+          `${display(coverage.failed ?? coverage.failedFiles)} / ${display(coverage.skipped)}`,
+        ],
+      ],
+    ),
+  ].join("")}</div>`;
 }
 
 function scriptLiteral(value) {
@@ -636,14 +714,16 @@ function layout({ title, eyebrow, lede, body, assetPrefix = "", backHref = "" })
 }
 
 function routeReportPage(report, title, extras = {}) {
+  const documentation =
+    extras.documentationCoverage || documentationCoverage({ inventory: report });
   const body = [
     coverageNotice(report),
-    reportSummary(report),
+    reportSummary(report, documentation),
     extras.beforeRoutes || "",
     applicationsPanel(report.applications),
     routeGraphPanel(report.routeGraph),
     findingsPanel(report),
-    routeTable(report),
+    routeTable(report, documentation),
     diagnosticPanel(report.diagnostics),
     extras.afterRoutes || "",
   ].join("");
@@ -681,15 +761,19 @@ function repositoryPage(scan, fallback, navigation = {}) {
   }
   return routeReportPage(report, repositoryTitle(scan, fallback), {
     ...navigation,
+    documentationCoverage: navigation.documentationCoverage || documentationCoverage(scan),
     beforeRoutes:
-      repositoryOverview(scan) + discoveryPanel(scan.discovery) + routeDeltaPanel(navigation.delta),
+      repositoryOverview(scan) +
+      discoveryPanel(scan.discovery) +
+      routeDeltaPanel(navigation.delta) +
+      deploymentDomainsPanel(navigation.domains),
     afterRoutes:
       documentationPanel(scan.documentation, navigation.apiReferences) +
       diagnosticPanel(list(scan.repository?.acquisition?.diagnostics)) +
-      invalidSpecificationsPanel(navigation.diagnostics || []) +
       workspacePanel(navigation.workspaceReferences, navigation.assetPrefix) +
       ginEvidencePanel(scan.gin, navigation.assetPrefix) +
-      importedEvidencePanel(scan.imported, navigation.assetPrefix),
+      importedEvidencePanel(scan.imported, navigation.assetPrefix) +
+      invalidSpecificationsPanel(navigation.diagnostics || []),
   });
 }
 
@@ -953,11 +1037,13 @@ function repositoryApiDescriptors(entry, scan) {
     descriptors.push({
       reference: artifacts.openapi,
       label: "Reconciled API",
+      reconciled: true,
       format: "openapi",
     });
   } else {
     const document = embeddedOpenApi(scan);
-    if (document) descriptors.push({ document, label: "Reconciled API", format: "openapi" });
+    if (document)
+      descriptors.push({ document, label: "Reconciled API", format: "openapi", reconciled: true });
   }
   if (Object.hasOwn(artifacts, "specifications")) {
     if (!Array.isArray(artifacts.specifications)) {
@@ -986,6 +1072,7 @@ function repositoryApiDescriptors(entry, scan) {
       }
       descriptors.push({
         reference: specification.artifact,
+        applicationId: specification.applicationId,
         label: display(specification.title, specification.path),
         source: specification.path,
         format: specification.format,
@@ -995,6 +1082,8 @@ function repositoryApiDescriptors(entry, scan) {
       if (reconciliation.artifact) {
         descriptors.push({
           reference: reconciliation.artifact,
+          reconciled: true,
+          applicationId: reconciliation.applicationId || specification.applicationId,
           label: `${display(specification.title, specification.path)} (reconciled)`,
           source: specification.path,
           format: "openapi",
@@ -1023,6 +1112,7 @@ function repositoryApiDescriptors(entry, scan) {
             ? { reference: specification.artifact }
             : { document: specification.document }),
           label: display(specification.title, specification.path),
+          applicationId: specification.applicationId,
           source: specification.path,
           format: specification.format,
           version: specification.version,
@@ -1035,6 +1125,8 @@ function repositoryApiDescriptors(entry, scan) {
             ? { reference: reconciliation.artifact }
             : { document: reconciliation.document }),
           label: `${display(specification.title, specification.path)} (reconciled)`,
+          reconciled: true,
+          applicationId: reconciliation.applicationId || specification.applicationId,
           source: specification.path,
           format: "openapi",
           version: specification.version,
@@ -1110,12 +1202,7 @@ function invalidSpecificationsPanel(diagnostics) {
       return `<details class="invalid-specification-repository"><summary>${escapeHtml(repository)} — ${summarizeDiagnostics(items).invalidSpecifications} invalid specifications</summary>${content}</details>`;
     })
     .join("");
-  return panel(
-    "Invalid API specifications",
-    `<div class="panel__body"><p>${summary.invalidSpecifications} invalid specifications across ${summary.affectedRepositories} repositories.</p><p>The source documents are invalid; their retained raw copies remain available for review. They are excluded from API viewers. Retained raw copy paths are relative to the inventory folder, not GitHub Actions artifacts.</p>${groups}<p>${shown < invalid.length ? `Showing ${shown} of ${invalid.length} diagnostics. ` : ""}Complete structured diagnostics are available in render-manifest.json.</p></div>`,
-    "Grouped by repository and cause",
-    { id: "invalid-api-specifications" },
-  );
+  return `<details class="panel disclosure" id="invalid-api-specifications"><summary><span><strong>Invalid API specifications</strong><span class="subtle">${summary.invalidSpecifications} invalid specifications across ${summary.affectedRepositories} repositories · excluded from API viewers</span></span><span class="disclosure__action" aria-hidden="true"></span></summary><div class="panel__body"><p>The source documents are invalid; their retained raw copies remain available for review. They are excluded from API viewers. Retained raw copy paths are relative to the inventory folder, not GitHub Actions artifacts.</p>${groups}<p>${shown < invalid.length ? `Showing ${shown} of ${invalid.length} diagnostics. ` : ""}Complete structured diagnostics are available in render-manifest.json.</p></div></details>`;
 }
 
 function organizationDelta(input, warnings) {
@@ -1203,6 +1290,14 @@ function organizationStatus(entry) {
     : display(entry.status, "unknown");
 }
 
+function organizationTableGroup(entry) {
+  if (!isRenderableStatus(entry.status)) return "reference";
+  const evidence = Object.keys(object(entry.frameworks)).length
+    ? object(entry.frameworks)
+    : object(entry.express);
+  return count(evidence.routeCount) > 0 ? "routes" : "no-routes";
+}
+
 function organizationFrameworks(entry) {
   const evidence = object(entry.frameworks);
   const names = new Set(
@@ -1233,31 +1328,48 @@ function frameworkBadges(frameworks) {
     : `<span class="subtle">Not reported</span>`;
 }
 
-function organizationRows(report, detailPages, apiReferencePages, reference = false) {
+function organizationRows(
+  report,
+  detailPages,
+  apiReferencePages,
+  documentation,
+  tableGroup = "routes",
+  domains = null,
+) {
+  const reference = tableGroup === "reference";
   return list(report.repositories)
     .map((value, index) => ({ value, index }))
-    .filter(({ value }) => isRenderableStatus(value.status) !== reference)
-    .sort(
-      (a, b) =>
+    .filter(({ value }) => organizationTableGroup(value) === tableGroup)
+    .sort((a, b) => {
+      const aEvidence = Object.keys(object(a.value.frameworks)).length
+        ? object(a.value.frameworks)
+        : object(a.value.express);
+      const bEvidence = Object.keys(object(b.value.frameworks)).length
+        ? object(b.value.frameworks)
+        : object(b.value.express);
+      return (
         organizationStatus(a.value).localeCompare(organizationStatus(b.value)) ||
+        count(bEvidence.routeCount) - count(aEvidence.routeCount) ||
         String(a.value.repository?.fullName || "").localeCompare(
           String(b.value.repository?.fullName || ""),
-        ),
-    )
+        )
+      );
+    })
     .map(({ value, index }, position, sorted) => {
       const entry = object(value);
       const repository = object(entry.repository);
       const evidence = Object.keys(object(entry.frameworks)).length
         ? object(entry.frameworks)
         : object(entry.express);
-      const documentation = object(evidence.documentation);
+      const docs = object(evidence.documentation);
       const name = display(repository.fullName, repository.name);
       const status = display(entry.status, "unknown");
       const frameworks = organizationFrameworks(entry);
       const group = organizationStatus(entry);
+      const domainEvidence = domains?.matches[index];
       const heading =
         position === 0 || organizationStatus(sorted[position - 1].value) !== group
-          ? `<tr class="status-group" data-status="${escapeHtml(group)}" data-search="${escapeHtml(group)}"><th colspan="${reference ? 8 : 7}">${escapeHtml(group)}</th></tr>`
+          ? `<tr class="status-group" data-status="${escapeHtml(group)}" data-search="${escapeHtml(group)}"><th colspan="${(reference ? 8 : 7) + (domains ? 1 : 0)}">${escapeHtml(group)}</th></tr>`
           : "";
       const roles = list(evidence.items)
         .map((itemValue) => {
@@ -1266,7 +1378,7 @@ function organizationRows(report, detailPages, apiReferencePages, reference = fa
           return item.name && role ? `${item.name}: ${role}` : "";
         })
         .filter(Boolean);
-      const docsStatus = display(documentation.reconciliationStatus, "—");
+      const docsStatus = display(docs.reconciliationStatus, "—");
       const search = [
         name,
         status,
@@ -1278,6 +1390,7 @@ function organizationRows(report, detailPages, apiReferencePages, reference = fa
         ...roles,
         docsStatus,
         entry.error,
+        ...list(domainEvidence?.domains).map((domain) => domain.hostname),
       ]
         .filter(Boolean)
         .join(" ")
@@ -1308,15 +1421,21 @@ function organizationRows(report, detailPages, apiReferencePages, reference = fa
       const detail = links.length
         ? `<div class="stack">${links.join("")}</div>`
         : `<span class="subtle">${organizationNoDetailLabel(entry.status)}</span>`;
-      return `${heading}<tr data-search="${escapeHtml(search)}" data-status="${escapeHtml(group)}" data-frameworks="${escapeHtml(frameworks.join(" "))}">
-        <td><div class="stack"><strong>${escapeHtml(name)}</strong>${entry.resumed ? `<span>${badge("resumed", "info")}</span>` : ""}${entry.error ? `<span class="subtle">${escapeHtml(entry.error)}</span>` : ""}</div></td>
-        <td class="repository-status">${badge(group, group === "incomplete" ? "warn" : undefined)}</td>
-        <td class="repository-framework"><div class="stack">${frameworkBadges(frameworks)}${roles.length ? `<span class="subtle framework-role">${escapeHtml(roles.join(", "))}</span>` : ""}</div></td>
-        <td>${count(evidence.applicationCount)}</td>
-        <td>${count(evidence.routeCount)}</td>
-        <td>${escapeHtml(docsStatus)}</td>
-        ${reference ? `<td>${badge(completeness(entry.coverageComplete === true && entry.routeGraphComplete !== false))}</td>` : ""}
-        <td>${detail}</td>
+      return `${heading}<tr data-search="${escapeHtml(search)}" data-domains="${escapeHtml(
+        list(domainEvidence?.domains)
+          .map((domain) => domain.hostname)
+          .join(" ")
+          .toLowerCase(),
+      )}" data-status="${escapeHtml(group)}" data-frameworks="${escapeHtml(frameworks.join(" "))}" data-sort-apps="${count(evidence.applicationCount)}" data-sort-routes="${count(evidence.routeCount)}" data-sort-name="${escapeHtml(name.toLowerCase())}">
+        <td data-label="Repository"><div class="stack"><strong>${escapeHtml(name)}</strong>${entry.resumed ? `<span>${badge("resumed", "info")}</span>` : ""}${entry.error ? `<span class="subtle">${escapeHtml(entry.error)}</span>` : ""}</div></td>
+        <td class="repository-status" data-label="${reference ? "Status" : "Completion"}">${badge(group, group === "incomplete" ? "warn" : undefined)}</td>
+        <td class="repository-framework" data-label="Framework"><div class="stack">${frameworkBadges(frameworks)}${roles.length ? `<span class="subtle framework-role">${escapeHtml(roles.join(", "))}</span>` : ""}</div></td>
+        <td data-label="Apps / modules">${count(evidence.applicationCount)}</td>
+        <td data-label="Routes">${count(evidence.routeCount)}</td>
+        ${domains ? `<td data-label="Domains">${domainEvidence ? `<div class="stack"><a href="domains.html#repository-${index}">${domainEvidence.domains.length} hosts</a><span class="subtle">${escapeHtml(domainEvidence.status)}</span></div>` : '<span class="subtle">Not scanned</span>'}</td>` : ""}
+        <td data-label="Also in API docs">${documentationCell(documentation[index])}<span class="subtle">${escapeHtml(docsStatus)}</span></td>
+        ${reference ? `<td data-label="Coverage">${badge(completeness(entry.coverageComplete === true && entry.routeGraphComplete !== false))}</td>` : ""}
+        <td data-label="Details">${detail}</td>
       </tr>`;
     })
     .join("");
@@ -1508,12 +1627,54 @@ function organizationScopePanel(report) {
   );
 }
 
-function organizationPage(report, detailPages, apiReferencePages, diagnostics, delta) {
+function deploymentDomainsPanel(repository) {
+  if (!repository) return "";
+  const rows = repository.domains
+    .map(
+      (domain) =>
+        `<tr><td><code>${escapeHtml(domain.hostname)}</code></td><td>${escapeHtml(domain.scopes.join(", "))}</td><td>${escapeHtml(domain.environments.join(", ") || "Unknown")}</td><td><details><summary>${domain.observations.length} observation(s)</summary>${domain.observations.map((observation) => `<p><code>${escapeHtml(observation.source.file)}</code> · <code>${escapeHtml(observation.source.pointer)}</code><br>${escapeHtml(observation.source.observedAt)} · commit ${escapeHtml(observation.source.commit || "unknown")}</p>`).join("")}</details></td></tr>`,
+    )
+    .join("");
+  return panel(
+    "Deployment domains",
+    `<div class="panel__body"><p>${repository.domains.length} unique hosts · ${escapeHtml(repository.status)} domain scan · last successful scan: ${escapeHtml(repository.lastSuccessAt || "none")}</p><p class="subtle">Internal/external are deployment configuration labels, not verified network reachability. Incomplete, ambiguous or older-than-30-day evidence is not automatically added as an OpenAPI server.</p></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>Host</th><th>Scope</th><th>Environment</th><th>YAML evidence</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel__body"><p>No hosts recorded. Check the domain scan status before treating this as an absence of deployments.</p></div>'}`,
+  );
+}
+
+function deploymentDomainsPage(domains) {
+  return layout({
+    title: "Deployment domains",
+    eyebrow: "Independent deployment inventory",
+    lede: `${domains.summary.uniqueHosts} unique hosts across ${domains.summary.matchedRepositories} matched repositories.`,
+    backHref: "index.html",
+    body:
+      `<p><a href="domain-merge.json" download>Download joined domain evidence</a></p><p>Catalog repositories not in this report: ${domains.summary.unmatchedCatalogRepositories.length}. The input domain-inventory.json remains owned by the standalone scanner.</p>` +
+      domains.matches
+        .map((repo, index) =>
+          repo
+            ? `<section id="repository-${index}"><h2>${escapeHtml(repo.repository.fullName)}</h2>${deploymentDomainsPanel(repo)}</section>`
+            : "",
+        )
+        .join(""),
+  });
+}
+
+function organizationPage(
+  report,
+  detailPages,
+  apiReferencePages,
+  diagnostics,
+  delta,
+  documentation,
+  domains = null,
+) {
   const summary = object(report.summary);
   const coverage = object(report.coverage);
   const organization = object(report.organization);
   const entries = list(report.repositories);
   const supportedEntries = entries.filter((entry) => isRenderableStatus(entry.status));
+  const routedCount = entries.filter((entry) => organizationTableGroup(entry) === "routes").length;
+  const noRoutesCount = supportedEntries.length - routedCount;
   const derivedApplicationRepositories = supportedEntries.filter((entry) => {
     const evidence = Object.keys(object(entry.frameworks)).length
       ? object(entry.frameworks)
@@ -1545,15 +1706,125 @@ function organizationPage(report, detailPages, apiReferencePages, diagnostics, d
         "warn",
       )
     : "";
-  const tableFor = (reference) => {
-    const selected = entries.filter((entry) => isRenderableStatus(entry.status) !== reference);
-    const id = reference ? "reference-repositories-table" : "repositories-table";
+  const tableFor = (tableGroup) => {
+    const reference = tableGroup === "reference";
+    const selected = entries.filter((entry) => organizationTableGroup(entry) === tableGroup);
+    const id = tableGroup === "routes" ? "repositories-table" : `${tableGroup}-repositories-table`;
     return selected.length
-      ? `${filterControls(id, "Repository, framework, status, error…", selected.map(organizationStatus), { frameworks: selected.flatMap(organizationFrameworks), statusLabel: reference ? "Status" : "Completion" })}<div class="table-wrap"><table id="${id}"><thead><tr><th>Repository</th><th>${reference ? "Status" : "Completion"}</th><th>Framework</th><th>Apps / modules</th><th>Routes</th><th>Docs</th>${reference ? "<th>Coverage</th>" : ""}<th>Details</th></tr></thead><tbody>${organizationRows(report, detailPages, apiReferencePages, reference)}</tbody></table></div>`
-      : `<div class="panel__body"><p class="empty">No repositories were recorded in this group.</p></div>`;
+      ? `${filterControls(
+          id,
+          "Repository, framework, status, error…",
+          selected.map(organizationStatus),
+          {
+            frameworks: selected.flatMap(organizationFrameworks),
+            domainSearch: domains?.summary.uniqueHosts > 0,
+            statusLabel: reference ? "Status" : "Completion",
+            sorts: [
+              ["routes-desc", "Routes: high to low"],
+              ["routes-asc", "Routes: low to high"],
+              ["apps-desc", "Apps / modules: high to low"],
+              ["name-asc", "Repository name: A to Z"],
+            ],
+          },
+        )}<div class="table-wrap repository-table-wrap${reference ? " repository-table-wrap--reference" : ""}${domains ? " repository-table-wrap--domains" : ""}"><table id="${id}"><colgroup><col class="repository-col-name"><col class="repository-col-status"><col class="repository-col-framework"><col class="repository-col-apps"><col class="repository-col-routes">${domains ? '<col class="repository-col-domains">' : ""}<col class="repository-col-docs">${reference ? '<col class="repository-col-coverage">' : ""}<col></colgroup><thead><tr><th>Repository</th><th>${reference ? "Status" : "Completion"}</th><th>Framework</th><th>Apps / modules</th><th>Routes</th>${domains ? "<th>Domains</th>" : ""}<th>Also in API docs</th>${reference ? "<th>Coverage</th>" : ""}<th>Details</th></tr></thead><tbody>${organizationRows(report, detailPages, apiReferencePages, documentation, tableGroup, domains)}</tbody></table></div>`
+      : `<div class="panel__body"><p class="empty">${tableGroup === "routes" ? "No supported repositories have discovered routes. Expand the sections below to inspect other saved evidence." : "No repositories were recorded in this group."}</p></div>`;
   };
   const referenceCount = entries.length - supportedEntries.length;
+  const completeCount = supportedEntries.filter(
+    (entry) => organizationStatus(entry) === "complete",
+  ).length;
+  const docsTotals = entries.reduce(
+    (total, entry, index) => {
+      if (!isRenderableStatus(entry.status)) return total;
+      const item = documentation[index];
+      return {
+        total: total.total + count(item?.total),
+        matched: total.matched + count(item?.matched),
+        checked: total.checked + count(item?.checked),
+      };
+    },
+    { total: 0, matched: 0, checked: 0 },
+  );
+  const frameworkCounts = [...new Set(supportedEntries.flatMap(organizationFrameworks))]
+    .filter((name) => !["not-reported", "multi-framework"].includes(name))
+    .map((name) => [
+      name,
+      supportedEntries.filter((entry) => organizationFrameworks(entry).includes(name)).length,
+    ]);
   const body = [
+    `<div class="metrics metrics--summary">${[
+      summaryCard(
+        "Repositories",
+        entries.length,
+        `${count(summary.repositoriesDiscovered) || entries.length} discovered in the configured scope`,
+        [
+          ["Scanned", ratio(count(summary.repositoriesScanned), entries.length)],
+          ["Supported", ratio(supportedEntries.length, entries.length)],
+          ["Reference / other", referenceCount],
+        ],
+      ),
+      summaryCard(
+        "Scan completion",
+        percentage(completeCount, supportedEntries.length),
+        `${completeCount} / ${supportedEntries.length} supported repositories complete`,
+        [
+          ["Incomplete", supportedEntries.length - completeCount],
+          [
+            "Failed / inconclusive",
+            `${count(summary.failedRepositories)} / ${count(summary.inconclusiveRepositories)}`,
+          ],
+          ["Incomplete route graphs", count(summary.incompleteRouteGraphs)],
+          ["Overall coverage", completeness(coverage.complete)],
+        ],
+      ),
+      summaryCard(
+        report.imports ? "Route observations" : "Routes",
+        count(summary.routes),
+        `${count(summary.applications)} ${report.imports ? "application groups / observations" : report.gin ? "apps / Go modules" : "applications"}`,
+        [
+          ["Repositories with routes", routedCount],
+          ...(!report.gin && !report.imports
+            ? [["Dependency-only repositories", dependencyOnlyRepositories]]
+            : []),
+          [
+            "Framework repositories",
+            frameworkCounts.map(([name, value]) => `${name} ${value}`).join(" · ") || "None",
+          ],
+        ],
+      ),
+      summaryCard(
+        "Also in API docs",
+        docsTotals.checked
+          ? percentage(docsTotals.matched, docsTotals.total)
+          : documentationSummary(docsTotals),
+        documentationDescription(docsTotals),
+        [
+          ["Checked", ratio(docsTotals.checked, docsTotals.total)],
+          [
+            "No match / not checked",
+            `${docsTotals.checked - docsTotals.matched} / ${docsTotals.total - docsTotals.checked}`,
+          ],
+          ["API specifications", count(summary.apiSpecifications)],
+          ["Specification repositories", count(summary.specificationRepositories)],
+        ],
+      ),
+      ...(domains
+        ? [
+            summaryCard(
+              "Deployment domains",
+              domains.summary.uniqueHosts,
+              `${domains.summary.matchedRepositories} repositories have domain scan results`,
+              [
+                ["Incomplete domain scans", domains.summary.incompleteRepositories],
+                ["Catalog updated", domains.summary.catalogUpdatedAt || "Unknown"],
+              ],
+            ),
+          ]
+        : []),
+    ].join("")}</div>`,
+    domains
+      ? '<p><a href="domains.html">View deployment domains and YAML evidence</a> · Separate inventory; configuration labels do not verify live or public reachability.</p>'
+      : "",
     incomplete,
     coverage.enumeration?.organizationAccessComplete === false
       ? notice(
@@ -1563,7 +1834,6 @@ function organizationPage(report, detailPages, apiReferencePages, diagnostics, d
         )
       : "",
     warningNotice,
-    invalidSpecificationsPanel(diagnostics),
     artifactWarnings.length
       ? panel(
           "Artifact warnings",
@@ -1587,84 +1857,20 @@ function organizationPage(report, detailPages, apiReferencePages, diagnostics, d
             .join("")}</ul></div>`,
         )
       : "",
-    metrics([
-      ["Repositories", entries.length],
-      [
-        "Complete",
-        supportedEntries.filter((entry) => organizationStatus(entry) === "complete").length,
-      ],
-      [
-        "Incomplete",
-        supportedEntries.filter((entry) => organizationStatus(entry) === "incomplete").length,
-      ],
-      ["Reference", referenceCount],
-      [report.imports ? "Route observations" : "Routes", count(summary.routes)],
-    ]),
-    metrics([
-      ["Repositories discovered", count(summary.repositoriesDiscovered) || entries.length],
-      ["Repositories scanned", count(summary.repositoriesScanned)],
-      [
-        "Supported repositories",
-        count(summary.supportedRepositories ?? summary.expressRepositories),
-      ],
-      [
-        report.gin || report.imports ? "Repositories with routes" : "Application repositories",
-        applicationRepositories,
-      ],
-      ...(report.gin || report.imports
-        ? []
-        : [["Dependency-only repositories", dependencyOnlyRepositories]]),
-      ["Express", count(summary.expressRepositories)],
-      ["Fastify", count(summary.fastifyRepositories)],
-      ["NestJS", count(summary.nestjsRepositories)],
-      ...(report.imports
-        ? [...new Set(entries.flatMap(organizationFrameworks))]
-            .filter(
-              (name) =>
-                !["express", "fastify", "nestjs", "multi-framework", "not-reported"].includes(
-                  name,
-                ) && !(name === "gin" && report.gin),
-            )
-            .map((name) => [
-              `${name} repositories`,
-              entries.filter((entry) => organizationFrameworks(entry).includes(name)).length,
-            ])
-        : []),
-      ...(report.gin
-        ? [
-            [
-              "Gin repositories",
-              entries.filter((entry) => entry.ginScan && isRenderableStatus(entry.status)).length,
-            ],
-          ]
-        : []),
-      [
-        report.imports
-          ? "Application groups / observations"
-          : report.gin
-            ? "Apps / Go modules"
-            : "Applications",
-        count(summary.applications),
-      ],
-      [report.imports ? "Route observations" : "Routes", count(summary.routes)],
-      ["API specifications", count(summary.apiSpecifications)],
-      ["Specification repositories", count(summary.specificationRepositories)],
-      ["Cataloged repositories", count(summary.catalogedRepositories)],
-      ["Failed", count(summary.failedRepositories)],
-      ["Inconclusive", count(summary.inconclusiveRepositories)],
-      ["Incomplete route graphs", count(summary.incompleteRouteGraphs)],
-      ["Coverage", completeness(coverage.complete)],
-    ]),
     ginEvidencePanel(report.gin),
     ...list(report.imports).map((source) => importedEvidencePanel(source)),
     organizationDeltaPanel(delta),
     organizationScopePanel(report),
     panel(
       "Repositories",
-      tableFor(false),
-      "Grouped by completion status, then repository name. Filters apply to this table only.",
+      tableFor("routes"),
+      "Repositories with discovered routes, sorted from high to low within each completion group. Repositories with no discovered routes are collapsed below, including complete scans. Documentation overlap shows matched routes / all routes and a percentage. OpenAPI, Swagger and JSDoc matches count each route once; missing or ambiguous evidence stays not checked. Filters and sorting apply to this table only.",
     ),
-    `<details class="reference-section" id="reference-repositories"><summary>Reference repositories (${referenceCount}) — other statuses</summary>${tableFor(true)}</details>`,
+    noRoutesCount
+      ? `<details class="reference-section" id="no-routes-repositories"><summary>No routes discovered (${noRoutesCount}) — complete and incomplete scans</summary><div class="panel__body"><p>These supported repositories have no discovered routes in the saved results. Incomplete scans may still contain undiscovered routes; expand their reports to review the evidence. Filters and sorting apply to this section only.</p></div>${tableFor("no-routes")}</details>`
+      : "",
+    `<details class="reference-section" id="reference-repositories"><summary>Reference repositories (${referenceCount}) — other statuses</summary>${tableFor("reference")}</details>`,
+    invalidSpecificationsPanel(diagnostics),
   ].join("");
   return layout({
     title: display(organization.login, "Organization inventory"),
@@ -1925,6 +2131,8 @@ function ownedOutputReference(reference) {
   return (
     reference === "index.html" ||
     reference === "render-manifest.json" ||
+    reference === "domains.html" ||
+    reference === "domain-merge.json" ||
     reference === ORGANIZATION_DELTA_FILENAME ||
     REPORT_ASSETS.includes(reference) ||
     OPENAPI_ASSETS.includes(reference) ||
@@ -2053,6 +2261,7 @@ function prepareOutput(output, kind) {
 
 function renderRepository(input, output, warnings, pages, assets, diagnostics) {
   const references = [];
+  const documents = [];
   let descriptors = [];
   try {
     descriptors = repositoryApiDescriptors(input.value, input.value);
@@ -2071,6 +2280,7 @@ function renderRepository(input, output, warnings, pages, assets, diagnostics) {
       if (recordInvalidSpecification(input.root, descriptor, title, diagnostics)) continue;
       const document = descriptorDocument(input.root, descriptor);
       const description = describeRenderableSpecification(document);
+      documents.push({ ...descriptor, document });
       if (!swaggerUiWritten) {
         copySwaggerUiAssets(output);
         assets.push(...SWAGGER_UI_ASSETS);
@@ -2120,6 +2330,7 @@ function renderRepository(input, output, warnings, pages, assets, diagnostics) {
     path.join(output, "index.html"),
     repositoryPage(input.value, "Repository report", {
       apiReferences: references,
+      documentationCoverage: documentationCoverage(input.value, documents),
       diagnostics: diagnostics.diagnostics,
     }),
   );
@@ -2136,6 +2347,7 @@ function renderOrganization(
   options = {},
   diagnostics = createDiagnosticCollector(warnings),
 ) {
+  const domains = loadDomainInventory(input.root, list(input.value.repositories), diagnostics);
   const delta =
     suppliedDelta ||
     (input.sourceKind === "render-bundle" ? null : organizationDelta(input, warnings));
@@ -2147,6 +2359,7 @@ function renderOrganization(
   );
   const detailPages = [];
   const apiReferencePages = [];
+  const repositoryDocumentation = [];
   const usedDetails = new Set();
   const usedOpenApi = new Set();
   const sharedDocuments = {};
@@ -2207,6 +2420,13 @@ function renderOrganization(
     if (!scan && importedScans.length) scan = importedScans[0];
     for (const importedScan of new Set([scan, ...importedScans]))
       writeImportedFiles(importedScan?.imported, output, data);
+    const domainEvidence = domains?.matches[index];
+    // Count all producer applications before inferring a single-app association.
+    // A mixed Express/Gin repository must not assign every host to both apps.
+    const applicationIds = [...new Set([scan, ginScan, ...importedScans])]
+      .filter(Boolean)
+      .flatMap((item) => list(item.inventory?.applications).map((app) => app.id));
+    const documentsByScan = new Map();
 
     if (
       isRenderableStatus(entry.status) ||
@@ -2220,7 +2440,13 @@ function renderOrganization(
       try {
         descriptors = repositoryApiDescriptors(entry, scan);
         descriptors.push(...workspaceDescriptors);
-        if (ginScan && scan !== ginScan) descriptors.push(...repositoryApiDescriptors({}, ginScan));
+        if (ginScan && scan !== ginScan)
+          descriptors.push(
+            ...repositoryApiDescriptors({}, ginScan).map((descriptor) => ({
+              ...descriptor,
+              ownerScan: ginScan,
+            })),
+          );
         for (const importedScan of importedScans) {
           if (scan !== importedScan)
             descriptors.push(
@@ -2244,7 +2470,29 @@ function renderOrganization(
       for (const [descriptorIndex, descriptor] of descriptors.entries()) {
         try {
           if (recordInvalidSpecification(input.root, descriptor, name, diagnostics)) continue;
-          const document = descriptorDocument(input.root, descriptor);
+          let document = descriptorDocument(input.root, descriptor);
+          if (!descriptor.workspace) {
+            const owner = descriptor.ownerScan || descriptor.importedScan || scan;
+            if (!documentsByScan.has(owner)) documentsByScan.set(owner, []);
+            documentsByScan.get(owner).push({ ...descriptor, document });
+          }
+          if (domainEvidence && !descriptor.workspace) {
+            try {
+              document = enrichOpenApi(document, domainEvidence, {
+                applicationIds,
+                applicationId: descriptor.applicationId,
+                specification: descriptor.source,
+                bindings: domains.bindings,
+              }).document;
+            } catch (error) {
+              diagnostics.add({
+                code: "render-warning",
+                category: "render",
+                repository: name,
+                message: `Domain server enrichment skipped: ${safeError(error)}`,
+              });
+            }
+          }
           if (!swaggerUiWritten) {
             copySwaggerUiAssets(output);
             assets.push(...SWAGGER_UI_ASSETS);
@@ -2303,6 +2551,21 @@ function renderOrganization(
       }
     }
 
+    const coverages = new Map(
+      [...new Set([scan, ginScan, ...importedScans])]
+        .filter(Boolean)
+        .map((item) => [item, documentationCoverage(item, documentsByScan.get(item))]),
+    );
+    const combined = [...coverages.values()].reduce(
+      (total, item) => ({
+        total: total.total + item.total,
+        matched: total.matched + item.matched,
+        checked: total.checked + item.checked,
+      }),
+      { total: 0, matched: 0, checked: 0 },
+    );
+    combined.total = Math.max(combined.total, count(evidence.routeCount));
+    repositoryDocumentation[index] = combined;
     if (!scan) continue;
     const base = slug(repository.name || repository.fullName, `repository-${index + 1}`);
     let filename = `${base}.html`;
@@ -2315,9 +2578,11 @@ function renderOrganization(
     writeFile(
       path.join(output, "repositories", filename),
       repositoryPage(scan, display(repository.fullName, repository.name), {
+        domains: domainEvidence,
         assetPrefix: "../",
         backHref: "../index.html",
         delta: change,
+        documentationCoverage: coverages.get(scan),
         diagnostics: diagnostics.diagnostics.filter((item) => item.repository === name),
         workspaceReferences: workspaceDescriptors.map((descriptor) => descriptor.workspace),
         apiReferences: list(apiReferencePages[index])
@@ -2342,6 +2607,8 @@ function renderOrganization(
       writeFile(
         path.join(output, href),
         repositoryPage(importedScan, name, {
+          domains: domainEvidence,
+          documentationCoverage: coverages.get(importedScan),
           assetPrefix: "../",
           backHref: "../index.html",
           apiReferences: list(apiReferencePages[index])
@@ -2361,6 +2628,8 @@ function renderOrganization(
       writeFile(
         path.join(output, entry.ginDetailPage),
         repositoryPage(ginScan, name, {
+          domains: domainEvidence,
+          documentationCoverage: coverages.get(ginScan),
           assetPrefix: "../",
           backHref: "../index.html",
           apiReferences: list(apiReferencePages[index]).map((reference) => ({
@@ -2397,8 +2666,25 @@ function renderOrganization(
   }
   writeFile(
     path.join(output, "index.html"),
-    organizationPage(input.value, detailPages, apiReferencePages, diagnostics.diagnostics, delta),
+    organizationPage(
+      input.value,
+      detailPages,
+      apiReferencePages,
+      diagnostics.diagnostics,
+      delta,
+      repositoryDocumentation,
+      domains,
+    ),
   );
+  if (domains) {
+    pages.push("domains.html");
+    data.push("domain-merge.json");
+    writeFile(path.join(output, "domains.html"), deploymentDomainsPage(domains));
+    writeFile(
+      path.join(output, "domain-merge.json"),
+      JSON.stringify(domains.summary, null, 2) + "\n",
+    );
+  }
   if (delta) {
     writeFile(
       path.join(output, ORGANIZATION_DELTA_FILENAME),

@@ -685,6 +685,15 @@ Conventional files from one input folder share the same derived site; use
 `render` never scans source, acquires a repository, executes target code,
 contacts the network, or invokes a model.
 
+An optional `domain-inventory.json` in the organization input folder is loaded
+automatically at render time. It provides a Domains column, deployment evidence
+pages, and conservatively associated OpenAPI servers without modifying saved
+scan/specification artifacts. Optional `domain-bindings.json` holds explicit
+app/specification mappings. Both files are independently owned and preserved by
+daily organization scans, including update/resume/overwrite. See the
+[sidecar contract](render-integration.md#deployment-domain-sidecar) for freshness,
+validation, matching rules, and generated `domains.html` / `domain-merge.json`.
+
 Optional Gin output support is confined to rendering. A saved `gin-recon`
 `fleet.json` can be rendered directly, from its output directory, or from a bundle
 whose immediate child contains the fleet. With an organization inventory, a fleet
@@ -696,16 +705,29 @@ fleet inputs fail clearly. The importer does not read `.clones`, run Go tooling,
 load configuration/checkpoint files, or copy the other tool's HTML.
 
 The main organization table contains complete and incomplete supported scan
-entries, grouped by status and then repository name. Other statuses (including
+entries with discovered routes, grouped by status and then descending route count.
+Supported repositories with zero discovered routes (including complete scans)
+appear below in a collapsed **No routes discovered** section, so they do not push
+incomplete repositories with routes out of view. This is a display grouping only:
+statistics, scan status, and evidence remain unchanged, and zero discovered routes
+in an incomplete scan do not prove that the repository has no routes.
+Other statuses (including
 failed, inconclusive, not-express, and not-go-module) are grouped in a separate
 reference table, collapsed by default. Each table has independent search,
 completion/status and framework filters, and result counts. These filters combine
-with one another. Framework choices come from saved metadata; a mixed-framework
-repository matches each of its frameworks and the multi-framework option.
+with one another. When the domain catalog contains hostnames, a separate Domain
+filter matches any part of any observed hostname, ignoring case and surrounding
+spaces. It combines with the other filters and excludes repositories without a
+matching hostname; clearing it restores those repositories. Framework choices
+come from saved metadata; a mixed-framework repository matches each of its
+frameworks and the multi-framework option.
 Inventory statistics, imported Gin statistics, and scope remain visible above the
 repository tables; they are not hidden inside the collapsed reference section.
 Completion/status and framework have separate columns with content-sized badges;
 mixed-framework labels wrap without stretching the status badge across the cell.
+Repository tables use wrapping, fixed-layout columns on wide screens and labelled
+two-column rows at screen widths of 1,000 pixels or less. All fields and links
+remain available without horizontal scrolling, including in the reference table.
 
 Gin module route reports are normalized only for display. Duplicate module report
 references are counted once, and missing/invalid route reports make that imported

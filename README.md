@@ -376,10 +376,27 @@ npx --no-install express-recon render \
 
 With no paths, `render` looks only at the current directory, `.express-recon/`, and its immediate child directories. The default output is a sibling named `<input>-html`.
 
-Organization pages group **complete** and **incomplete** repositories in the main
-table. Other statuses are grouped in a collapsed reference table, with independent
+Organization pages show repositories with discovered routes in the main table,
+grouped as **complete** and **incomplete**. Repositories with zero discovered
+routes, including complete scans, are collapsed below under **No routes discovered**.
+Other statuses are grouped in a collapsed reference table. Each table has independent
 search, completion/status, and framework filters. Framework choices reflect the
 saved evidence; mixed-framework repositories match each included framework.
+When saved domain data includes hostnames, a separate **Domain** filter searches
+any part of a hostname, ignoring case, and combines with the other filters.
+Repository tables wrap long values on wide screens and use labelled rows on
+narrow screens so all columns remain visible without horizontal scrolling.
+The overview groups related totals into summary cards, with percentages alongside
+raw counts. **Also in API docs** shows how many discovered routes match authored
+OpenAPI, Swagger, or JSDoc evidence, and route details identify their documentation
+sources. Each route counts once, even if multiple specifications or path variants
+match. Missing evidence, uncertain paths, and ambiguous application ownership stay
+**Not checked** rather than implying zero overlap. Generated-only operations do
+not count as authored documentation. Invalid API specifications appear in a
+collapsed **Show details** section below the repository tables.
+Repository tables sort each completion group by route count from high to low by
+default. The **Sort** control can reverse that order, sort by app/module count,
+or sort repository names alphabetically without changing the active filters.
 
 Optional saved `gin-recon` outputs are supported by the renderer only—no Gin
 scanner or changes to the scan architecture are required. Point `--input` at a
@@ -389,6 +406,17 @@ below), its routes, per-module OpenAPI references, middleware suggestions, and
 producer statistics are included automatically. Original JSON evidence is linked
 for download. Existing Express scans and Gin scans retain separate detail pages.
 See the [render reference](docs/reference.md#render) for limits and trust boundaries.
+
+Deployment domains can be scanned independently and saved as
+`domain-inventory.json` beside `organization-inventory.json`. Plain
+`express-recon render --input <scan-output>` automatically reads this optional
+sidecar: it adds repository domain counts, `domains.html`, joined evidence in
+`domain-merge.json`, and safe OpenAPI server enrichment. The original route
+artifacts and domain catalog are not rewritten. `scan-org --update`, `--resume`
+and `--overwrite` leave this producer-owned sidecar (and optional
+`domain-bindings.json`) untouched. The separate `domain-recon` package can write
+it directly with `scan --org <owner> --express-output <scan-output>`.
+See the [domain sidecar contract](docs/render-integration.md#deployment-domain-sidecar).
 
 Other tools can export a versioned `render-bundle.json` with routes, OpenAPI,
 statistics, and JSON evidence. Matching bundles alongside an organization output

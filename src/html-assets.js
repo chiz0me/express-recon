@@ -140,6 +140,24 @@ h3 { margin: 0; font-size: 16px; }
 .metric { padding: 16px; }
 .metric__value { display: block; font-size: 25px; font-weight: 750; line-height: 1.1; }
 .metric__label { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.metrics--summary { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.metric--summary { padding: 20px; box-shadow: none; }
+.metric__heading { margin: 0 0 14px; font-size: 13px; font-weight: 650; color: var(--muted); letter-spacing: 0; }
+.metric--summary .metric__value { font-size: clamp(24px, 2.4vw, 32px); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.metric__description { margin: 8px 0 18px; color: var(--muted); font-size: 12px; }
+.metric__details { display: grid; gap: 9px; padding-top: 14px; margin: 0; border-top: 1px solid var(--border); font-size: 12px; }
+.metric__details > div { display: flex; justify-content: space-between; gap: 12px; }
+.metric__details dt { color: var(--muted); }
+.metric__details dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.docs-coverage { min-width: 165px; font-variant-numeric: tabular-nums; }
+.docs-source { max-width: 240px; overflow-wrap: anywhere; }
+.disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; cursor: pointer; list-style: none; }
+.disclosure > summary::-webkit-details-marker { display: none; }
+.disclosure > summary > span:first-child { display: grid; gap: 5px; }
+.disclosure__action { color: var(--link); font-size: 13px; white-space: nowrap; }
+.disclosure__action::after { content: "Show details +"; }
+.disclosure[open] .disclosure__action::after { content: "Hide details −"; }
+.disclosure[open] > summary { border-bottom: 1px solid var(--border); }
 
 .panel { margin-top: 18px; overflow: hidden; }
 .panel__head {
@@ -195,8 +213,9 @@ h3 { margin: 0; font-size: 16px; }
   border-bottom: 1px solid var(--border);
   background: var(--panel-muted);
 }
-.field { display: grid; gap: 5px; min-width: min(320px, 100%); }
-.field--compact { min-width: 180px; }
+.field { display: grid; gap: 5px; flex: 1 1 250px; min-width: 0; }
+.field--domain { flex-basis: 220px; }
+.field--compact { flex: 0 1 180px; min-width: 0; }
 .field label { color: var(--muted); font-size: 12px; font-weight: 650; }
 input, select {
   min-height: 38px;
@@ -206,6 +225,8 @@ input, select {
   color: var(--ink);
   background: var(--panel);
   font: inherit;
+  width: 100%;
+  min-width: 0;
 }
 .result-count { margin-left: auto; padding-bottom: 8px; color: var(--muted); font-size: 13px; }
 
@@ -227,6 +248,31 @@ tr[hidden] { display: none; }
 .framework-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .framework-role { max-width: 260px; overflow-wrap: anywhere; }
 
+/* Keep the repository summary within its panel even for very long repo names. */
+.repository-table-wrap > table { table-layout: fixed; }
+.repository-table-wrap th, .repository-table-wrap td { padding: 12px 10px; overflow-wrap: anywhere; }
+.repository-table-wrap td { font-size: 13px; }
+.repository-table-wrap .stack, .repository-table-wrap .docs-coverage { min-width: 0; }
+.repository-table-wrap .repository-status { width: auto; white-space: normal; }
+.repository-table-wrap .repository-framework { min-width: 0; }
+.repository-table-wrap .badge { max-width: 100%; white-space: normal; }
+.repository-col-name { width: 28%; }
+.repository-col-status { width: 11%; }
+.repository-col-framework { width: 12%; }
+.repository-col-apps { width: 6%; }
+.repository-col-routes { width: 7%; }
+.repository-col-domains { width: 12%; }
+.repository-col-docs { width: 17%; }
+.repository-table-wrap--domains .repository-col-name { width: 22%; }
+.repository-table-wrap--reference .repository-col-name { width: 23%; }
+.repository-table-wrap--reference.repository-table-wrap--domains .repository-col-name { width: 20%; }
+.repository-table-wrap--reference .repository-col-framework { width: 10%; }
+.repository-table-wrap--reference .repository-col-apps { width: 5%; }
+.repository-table-wrap--reference .repository-col-routes { width: 6%; }
+.repository-table-wrap--reference .repository-col-domains { width: 11%; }
+.repository-table-wrap--reference .repository-col-docs { width: 14%; }
+.repository-table-wrap--reference .repository-col-coverage { width: 10%; }
+
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 12px; }
 .card { padding: 15px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-muted); }
 .card p { margin: 7px 0 0; color: var(--muted); }
@@ -246,6 +292,24 @@ tr[hidden] { display: none; }
 
 .site-footer { padding: 24px 0 42px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 
+@media (max-width: 1100px) {
+  .metrics--summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media screen and (max-width: 1000px) {
+  .repository-table-wrap > table, .repository-table-wrap tbody { display: block; width: 100%; }
+  .repository-table-wrap colgroup { display: none; }
+  .repository-table-wrap thead { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+  .repository-table-wrap tbody tr:not(.status-group) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; padding: 18px; border-bottom: 1px solid var(--border); }
+  .repository-table-wrap td { display: block; padding: 0; border: 0; min-width: 0; }
+  .repository-table-wrap td:first-child, .repository-table-wrap td:last-child { grid-column: 1 / -1; }
+  .repository-table-wrap td::before { content: attr(data-label); display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
+  .repository-table-wrap td:first-child::before { display: none; }
+  .repository-table-wrap td:first-child strong { font-size: 15px; }
+  .repository-table-wrap .status-group, .repository-table-wrap .status-group th { display: block; width: 100%; }
+  .repository-table-wrap tbody tr[hidden] { display: none; }
+}
+
 @media (max-width: 720px) {
   .shell { width: min(100% - 20px, 1440px); }
   main { padding-top: 28px; }
@@ -253,10 +317,14 @@ tr[hidden] { display: none; }
   .header-meta { max-width: 50%; }
   .panel__head { display: block; }
   .filters { align-items: stretch; }
-  .field, .field--compact { min-width: 100%; }
+  .field, .field--compact { flex-basis: 100%; min-width: 0; }
   .result-count { margin-left: 0; }
   .key-values { grid-template-columns: 1fr; gap: 2px; }
   .key-values dd + dt { margin-top: 10px; }
+}
+
+@media (max-width: 440px) {
+  .metrics--summary { grid-template-columns: 1fr; }
 }
 
 @media print {
@@ -330,18 +398,50 @@ for (const controls of document.querySelectorAll("[data-filter-controls]")) {
   const search = controls.querySelector("[data-filter-search]");
   const status = controls.querySelector("[data-filter-status]");
   const framework = controls.querySelector("[data-filter-framework]");
+  const domain = controls.querySelector("[data-filter-domain]");
+  const sortCandidate = controls.querySelector("[data-sort]");
+  const sorter = sortCandidate?.dataset.sort === "true" ? sortCandidate : null;
   const count = controls.querySelector("[data-result-count]");
 
+  const sortRows = () => {
+    if (!sorter) return;
+    const tbody = table.querySelector("tbody");
+    if (!tbody) return;
+    const groups = [...table.querySelectorAll("tbody tr.status-group")];
+    const groupOrder = new Map(groups.map((group, index) => [group.dataset.status, index]));
+    const mode = sorter.value;
+    const sorted = rows.slice().sort((left, right) => {
+      const byGroup = (groupOrder.get(left.dataset.status) ?? 0) - (groupOrder.get(right.dataset.status) ?? 0);
+      if (byGroup) return byGroup;
+      if (mode === "name-asc") return (left.dataset.sortName || "").localeCompare(right.dataset.sortName || "");
+      const field = mode.startsWith("apps-") ? "sortApps" : "sortRoutes";
+      const difference = Number(left.dataset[field] || 0) - Number(right.dataset[field] || 0);
+      if (difference) return mode.endsWith("-asc") ? difference : -difference;
+      return (left.dataset.sortName || "").localeCompare(right.dataset.sortName || "");
+    });
+    if (!groups.length) {
+      for (const row of sorted) tbody.append(row);
+      return;
+    }
+    for (const group of groups) {
+      tbody.append(group);
+      for (const row of sorted) if (row.dataset.status === group.dataset.status) tbody.append(row);
+    }
+  };
+
   const update = () => {
+    sortRows();
     const query = (search?.value || "").trim().toLowerCase();
     const selected = status?.value || "";
     const selectedFramework = framework?.value || "";
+    const domainQuery = (domain?.value || "").trim().toLowerCase();
     let visible = 0;
     for (const row of rows) {
       const matchesQuery = !query || row.dataset.search.includes(query);
       const matchesStatus = !selected || row.dataset.status === selected;
       const matchesFramework = !selectedFramework || (row.dataset.frameworks || "").split(" ").includes(selectedFramework);
-      row.hidden = !(matchesQuery && matchesStatus && matchesFramework);
+      const matchesDomain = !domainQuery || (row.dataset.domains || "").includes(domainQuery);
+      row.hidden = !(matchesQuery && matchesStatus && matchesFramework && matchesDomain);
       if (!row.hidden) visible++;
     }
     if (count) count.textContent = visible + " of " + rows.length;
@@ -353,6 +453,8 @@ for (const controls of document.querySelectorAll("[data-filter-controls]")) {
   search?.addEventListener("input", update);
   status?.addEventListener("change", update);
   framework?.addEventListener("change", update);
+  domain?.addEventListener("input", update);
+  sorter?.addEventListener("change", update);
   update();
 }
 `;

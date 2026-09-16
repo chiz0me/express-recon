@@ -463,6 +463,10 @@ test("scan-org interactive overwrite starts fresh without deleting unrelated fil
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "express-recon-org-overwrite-"));
   const existing = path.join(output, "keep.txt");
   fs.writeFileSync(existing, "keep me");
+  const domains = path.join(output, "domain-inventory.json");
+  const bindings = path.join(output, "domain-bindings.json");
+  fs.writeFileSync(domains, '{"producer":"domain-recon"}\n');
+  fs.writeFileSync(bindings, '{"schemaVersion":1,"bindings":[]}\n');
   let prompts = 0;
   let scans = 0;
   try {
@@ -472,7 +476,7 @@ test("scan-org interactive overwrite starts fresh without deleting unrelated fil
         environment: {},
         outputConflictPrompt(state) {
           prompts++;
-          assert.equal(state.entries, 1);
+          assert.equal(state.entries, 3);
           assert.equal(state.hasCheckpoint, false);
           assert.equal(state.hasInventory, false);
           return "overwrite";
@@ -487,6 +491,7 @@ test("scan-org interactive overwrite starts fresh without deleting unrelated fil
     assert.equal(prompts, 1);
     assert.equal(scans, 1);
     assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+    assert.equal(fs.readFileSync(domains, "utf8"), '{"producer":"domain-recon"}\n');
     assert.ok(fs.existsSync(path.join(output, "organization-inventory.json")));
     fs.writeFileSync(path.join(output, "organization-delta.json"), "stale\n");
 
@@ -512,6 +517,8 @@ test("scan-org interactive overwrite starts fresh without deleting unrelated fil
     assert.equal(overwritten, 0);
     assert.equal(scans, 2);
     assert.equal(fs.readFileSync(existing, "utf8"), "keep me");
+    assert.equal(fs.readFileSync(domains, "utf8"), '{"producer":"domain-recon"}\n');
+    assert.equal(fs.readFileSync(bindings, "utf8"), '{"schemaVersion":1,"bindings":[]}\n');
     assert.equal(fs.existsSync(path.join(output, "organization-delta.json")), false);
   } finally {
     fs.rmSync(output, { recursive: true, force: true });
@@ -960,6 +967,8 @@ test("scan-org --update reuses durable unchanged artifacts and creates a delta",
   try {
     assert.equal(await run(), 0);
     assert.equal(scans, 1);
+    const sidecar = path.join(output, "domain-inventory.json");
+    fs.writeFileSync(sidecar, '{"independentDomainEvidence":true}\n');
     assert.equal(await run(true), 0);
     assert.equal(scans, 1);
     const inventoryFile = path.join(output, "organization-inventory.json");
@@ -990,6 +999,11 @@ test("scan-org --update reuses durable unchanged artifacts and creates a delta",
     );
     assert.equal(removed.delta.summary.repositoriesRemoved, 1);
     assert.equal(fs.existsSync(path.join(output, "repositories", "api")), false);
+    assert.equal(fs.readFileSync(sidecar, "utf8"), '{"independentDomainEvidence":true}\n');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(output, "organization-manifest.json"), "utf8"),
+    );
+    assert.equal(Object.hasOwn(manifest.integrity, "domain-inventory.json"), false);
   } finally {
     fs.rmSync(output, { recursive: true, force: true });
   }

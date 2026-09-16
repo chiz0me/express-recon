@@ -117,7 +117,7 @@ function assertVisibleStatisticsAboveRepositories(html) {
   let disclosureDepth = 0;
   let metrics = 0;
   for (const token of html.matchAll(
-    /<details\b[^>]*>|<\/details>|<span class="metric__label">([^<]+)<\/span>/g,
+    /<details\b[^>]*>|<\/details>|<(?:span class="metric__label"|h2 class="metric__heading")>([^<]+)<\/(?:span|h2)>/g,
   )) {
     if (token[1]) {
       assert.equal(disclosureDepth, 0, `${token[1]} must not be collapsed`);
@@ -125,7 +125,8 @@ function assertVisibleStatisticsAboveRepositories(html) {
       metrics++;
     } else disclosureDepth += token[0].startsWith("</") ? -1 : 1;
   }
-  assert.ok(metrics > 5, "detailed statistics must remain present");
+  assert.ok(metrics >= 4, "grouped statistics must remain present");
+  assert.equal((html.match(/<article class="metric metric--summary">/g) || []).length, 4);
   assert.ok(html.indexOf("<h2>Inventory scope</h2>") < tableIndex);
   assert.match(html, /<details class="reference-section" id="reference-repositories">/);
   assert.match(html, /id="repositories-table-framework"/);
@@ -144,9 +145,12 @@ test("Gin bundle import retains module evidence, statistics, downloads and actua
     const html = text(output);
     assertVisibleStatisticsAboveRepositories(html);
     const main = html.match(/<table id="repositories-table">([\s\S]*?)<\/table>/)[1];
+    const noRoutes = html.match(/<table id="no-routes-repositories-table">([\s\S]*?)<\/table>/)[1];
     const reference = html.match(/<table id="reference-repositories-table">([\s\S]*?)<\/table>/)[1];
-    assert.ok(main.indexOf("acme/z-go") < main.indexOf("acme/a-incomplete"));
-    assert.doesNotMatch(main, /acme\/a-other|acme\/b-failed/);
+    assert.match(main, /acme\/z-go/);
+    assert.match(noRoutes, /acme\/a-incomplete/);
+    assert.doesNotMatch(main, /acme\/a-incomplete|acme\/a-other|acme\/b-failed/);
+    assert.match(html, /<details class="reference-section" id="no-routes-repositories">/);
     assert.match(reference, /acme\/a-other/);
     assert.match(reference, /<strong>acme\/a-other<\/strong>[\s\S]*?badge--good">complete/);
     assert.ok(reference.indexOf("acme/b-failed") < reference.indexOf("acme/c-inconclusive"));
@@ -216,10 +220,7 @@ test("optional Gin companions combine repository listing but keep scanner report
     assert.equal((html.match(/<strong>ACME\/Z-GO<\/strong>/g) || []).length, 1);
     assert.match(html, /Gin report/);
     assert.match(html, /data-frameworks="express gin multi-framework"/);
-    assert.match(
-      html,
-      /<span class="metric__value">2<\/span><span class="metric__label">Repositories scanned<\/span>/,
-    );
+    assert.match(html, /<dt>Scanned<\/dt><dd>2 \/ \d+ · [\d.]+%<\/dd>/);
     assert.match(html, /<dt>Enumeration coverage<\/dt><dd>complete<\/dd>/);
     assert.match(html, /<dt>API pages fetched<\/dt><dd>2<\/dd>/);
     assert.match(text(output, "repositories/z-go.html"), /express-only/);
@@ -339,12 +340,20 @@ test("Gin references reject traversal, escaping symlinks, oversize and wrong Ope
   }));
 
 test("framework and completion filters intersect, retain groups and keep tables independent", () => {
-  function control(statuses) {
+  function control(statuses, sortable = false) {
     const rows = statuses.map((status, index) => ({
-      dataset: { status, search: `repo${index} ${status}` },
+      dataset: {
+        status,
+        search: `repo${index} ${status}`,
+        sortApps: String(index),
+        sortRoutes: String([4, 9, 2][index]),
+        sortName: `repo${index}`,
+      },
       hidden: false,
     }));
     const groups = [...new Set(statuses)].map((status) => ({ dataset: { status }, hidden: false }));
+    const appended = [];
+    const tbody = { append: (row) => appended.push(row) };
     const search = {
       value: "",
       addEventListener: (_, callback) => {
@@ -364,14 +373,35 @@ test("framework and completion filters intersect, retain groups and keep tables 
         framework.update = callback;
       },
     };
+    const domain = {
+      value: "",
+      addEventListener: (_, callback) => {
+        domain.update = callback;
+      },
+    };
+    const sort = sortable
+      ? {
+          value: "routes-desc",
+          dataset: { sort: "true" },
+          addEventListener: (_, callback) => {
+            sort.update = callback;
+          },
+        }
+      : null;
     return {
       rows,
       groups,
       search,
       status,
       framework,
+      domain,
+      sort,
       count,
-      table: { querySelectorAll: (selector) => (selector.includes(":not") ? rows : groups) },
+      appended,
+      table: {
+        querySelectorAll: (selector) => (selector.includes(":not") ? rows : groups),
+        querySelector: (selector) => (selector === "tbody" ? tbody : null),
+      },
       querySelector: (selector) =>
         selector.includes("search")
           ? search
@@ -379,23 +409,68 @@ test("framework and completion filters intersect, retain groups and keep tables 
             ? status
             : selector.includes("framework")
               ? framework
-              : count,
+              : selector.includes("domain")
+                ? domain
+                : selector.includes("data-sort")
+                  ? sort
+                  : count,
     };
   }
-  const main = control(["complete", "complete", "incomplete"]),
+  const main = control(["complete", "complete", "incomplete"], true),
+    noRoutes = control(["complete", "incomplete"], true),
     reference = control(["failed", "not-go-module"]);
   main.dataset = { filterControls: "main" };
+  noRoutes.dataset = { filterControls: "noRoutes" };
+  for (const row of noRoutes.rows) row.dataset.sortRoutes = "0";
   reference.dataset = { filterControls: "reference" };
   main.rows[0].dataset.frameworks = "express";
   main.rows[1].dataset.frameworks = "express fastify multi-framework";
   main.rows[2].dataset.frameworks = "gin";
+  main.rows[0].dataset.domains = "payments.internal.example.com api.example.com";
+  main.rows[1].dataset.domains = "public.example.com api.example.com";
   vm.runInNewContext(SCRIPT, {
     document: {
-      querySelectorAll: () => [main, reference],
-      getElementById: (id) => (id === "main" ? main : reference).table,
+      querySelectorAll: () => [main, noRoutes, reference],
+      getElementById: (id) => ({ main, noRoutes, reference })[id].table,
     },
   });
+  assert.deepEqual(
+    main.appended,
+    [main.groups[0], main.rows[1], main.rows[0], main.groups[1], main.rows[2]],
+    "route sort defaults to descending inside status groups",
+  );
+  main.appended.length = 0;
+  main.sort.value = "routes-asc";
+  main.sort.update();
+  assert.deepEqual(main.appended, [
+    main.groups[0],
+    main.rows[0],
+    main.rows[1],
+    main.groups[1],
+    main.rows[2],
+  ]);
   assert.equal(main.count.textContent, "3 of 3");
+  main.domain.value = "  API.EXAMPLE.COM  ";
+  main.domain.update();
+  assert.equal(
+    main.count.textContent,
+    "2 of 3",
+    "domain search trims and matches case-insensitively",
+  );
+  assert.equal(main.rows[2].hidden, true, "unscanned repositories do not match domain searches");
+  assert.equal(main.groups[1].hidden, true);
+  assert.equal(reference.count.textContent, "2 of 2", "domain filters stay local to their table");
+  main.search.value = "repo0";
+  main.search.update();
+  assert.equal(main.count.textContent, "1 of 3", "domain and general search intersect");
+  main.search.value = "";
+  main.domain.value = "payments";
+  main.domain.update();
+  main.framework.value = "fastify";
+  main.framework.update();
+  assert.equal(main.count.textContent, "0 of 3", "domain and framework filters intersect");
+  main.domain.value = "";
+  main.domain.update();
   main.framework.value = "fastify";
   main.framework.update();
   assert.equal(main.count.textContent, "1 of 3");
@@ -422,22 +497,111 @@ test("framework and completion filters intersect, retain groups and keep tables 
   main.framework.value = "gi";
   main.framework.update();
   assert.equal(main.count.textContent, "0 of 3", "framework matching must use exact tokens");
+  assert.equal(noRoutes.count.textContent, "2 of 2");
+  noRoutes.status.value = "incomplete";
+  noRoutes.status.update();
+  assert.equal(noRoutes.count.textContent, "1 of 2");
+  assert.equal(noRoutes.rows[0].hidden, true);
+  assert.equal(noRoutes.rows[1].hidden, false);
+  assert.equal(
+    main.count.textContent,
+    "0 of 3",
+    "collapsed-table filters do not affect routed rows",
+  );
+  assert.equal(reference.count.textContent, "2 of 2");
 });
+
+test("zero-route repositories collapse regardless of completion without hiding incomplete routes", () =>
+  temporary((root) => {
+    const entry = (name, routeCount, complete, modern = false) => ({
+      repository: { fullName: `acme/${name}`, name },
+      status: "express",
+      coverageComplete: complete,
+      [modern ? "frameworks" : "express"]: { applicationCount: 1, routeCount },
+    });
+    const noRoutes = entry("complete-zero", 0, true, true);
+    noRoutes.scan = { kind: "repository-scan", inventory: { routes: [] } };
+    const entries = [
+      noRoutes,
+      entry("incomplete-zero", 0, false),
+      entry("complete-low", 6, true),
+      entry("incomplete-high", 78, false, true),
+      entry("complete-high", 12, true),
+      entry("incomplete-low", 2, false),
+      { repository: { fullName: "acme/unknown-routes" }, status: "express" },
+      { repository: { fullName: "acme/other" }, status: "not-express" },
+    ];
+    organization(root, entries);
+    const output = path.join(root, "html");
+    renderHtmlSite(root, output);
+    const html = text(output);
+    const main = html.match(/<table id="repositories-table">([\s\S]*?)<\/table>/)[1];
+    const collapsed = html.match(
+      /<details class="reference-section" id="no-routes-repositories">([\s\S]*?)<\/details>/,
+    )[1];
+    assert.match(collapsed, /No routes discovered \(3\)/);
+    assert.match(collapsed, /acme\/complete-zero/);
+    assert.match(collapsed, /acme\/incomplete-zero/);
+    assert.match(collapsed, /acme\/unknown-routes/);
+    assert.match(collapsed, /href="repositories\/complete-zero.html"/);
+    assert.match(collapsed, /id="no-routes-repositories-table-search"/);
+    assert.match(collapsed, /id="no-routes-repositories-table-framework"/);
+    assert.match(collapsed, /data-sort="true"/);
+    assert.match(collapsed, /Incomplete scans may still contain undiscovered routes/);
+    assert.doesNotMatch(main, /acme\/(?:complete-zero|incomplete-zero|unknown-routes|other)/);
+    assert.doesNotMatch(main, /data-sort-routes="0"/);
+    assert.deepEqual(
+      [...main.matchAll(/data-sort-name="([^"]+)"/g)].map((match) => match[1]),
+      ["acme/complete-high", "acme/complete-low", "acme/incomplete-high", "acme/incomplete-low"],
+    );
+    assert.ok(
+      html.indexOf('id="repositories-table"') < html.indexOf('id="no-routes-repositories"'),
+    );
+    assert.ok(
+      html.indexOf('id="no-routes-repositories"') < html.indexOf('id="reference-repositories"'),
+    );
+    assert.match(html, /<dt>Repositories with routes<\/dt><dd>4<\/dd>/);
+    assert.match(html, /3 \/ 7 supported repositories complete/);
+    assert.equal((html.match(/data-sort-name=/g) || []).length, entries.length);
+
+    organization(root, [noRoutes]);
+    renderHtmlSite(root, output);
+    const empty = text(output);
+    assert.match(empty, /No supported repositories have discovered routes/);
+    assert.match(empty, /<details class="reference-section" id="no-routes-repositories">/);
+    assert.doesNotMatch(empty, /<table id="repositories-table">/);
+
+    organization(root, [entry("only-routes", 1, false)]);
+    renderHtmlSite(root, output);
+    assert.doesNotMatch(text(output), /id="no-routes-repositories"/);
+    assert.match(text(output), /<table id="repositories-table">/);
+  }));
 
 test("organization framework choices retain legacy, mixed-framework and imported Gin identities", () =>
   temporary((root) => {
     organization(root, [
-      { repository: { fullName: "acme/legacy" }, status: "express", coverageComplete: true },
+      {
+        repository: { fullName: "acme/legacy" },
+        status: "express",
+        coverageComplete: true,
+        express: { routeCount: 1 },
+      },
       {
         repository: { fullName: "acme/mixed" },
         status: "multi-framework",
         coverageComplete: false,
         frameworks: {
+          routeCount: 2,
           names: ["express", "fastify"],
           items: [{ name: "nestjs" }, { name: "<script>" }],
         },
       },
-      { repository: { fullName: "acme/gin" }, status: "gin", coverageComplete: true },
+      {
+        repository: { fullName: "acme/gin" },
+        status: "gin",
+        coverageComplete: true,
+        frameworks: { routeCount: 3 },
+      },
       { repository: { fullName: "acme/unknown-mix" }, status: "multi-framework" },
       {
         repository: { fullName: "acme/failed" },
@@ -461,7 +625,10 @@ test("organization framework choices retain legacy, mixed-framework and imported
     assert.match(html, /<th>Completion<\/th><th>Framework<\/th>/);
     assert.match(html, /<th>Status<\/th><th>Framework<\/th>/);
     assert.doesNotMatch(html, /Status \/ framework/);
-    assert.match(html, /class="repository-status"><span class="badge badge--warn">incomplete/);
+    assert.match(
+      html,
+      /class="repository-status" data-label="Completion"><span class="badge badge--warn">incomplete/,
+    );
     assert.match(
       html,
       /class="framework-badges"><span class="badge badge--neutral">Express<\/span><span class="badge badge--neutral">Fastify<\/span><span class="badge badge--neutral">NestJS/,

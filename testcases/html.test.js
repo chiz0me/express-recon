@@ -642,6 +642,96 @@ test("repository reports without package target metadata use repository identity
   });
 });
 
+test("route and organization tables show deduplicated documentation overlap with explicit unknowns", () => {
+  temporary("html-documentation-overlap", (root) => {
+    const document = openApiDocument({
+      paths: { "/accounts": { get: { responses: { 200: { description: "OK" } } } } },
+    });
+    const inventory = routeReport({
+      routes: [
+        routeReport().routes[0],
+        { ...routeReport().routes[1], path: "/accounts", pathConfidence: "full" },
+      ],
+    });
+    const scan = repositoryScan({
+      inventory,
+      documentation: {
+        status: "cataloged",
+        specifications: [
+          { status: "available", path: "openapi.yaml", document },
+          {
+            status: "available",
+            path: "swagger.json",
+            document: { ...document, openapi: undefined, swagger: "2.0" },
+          },
+        ],
+      },
+    });
+    writeJson(path.join(root, "repo-scan.json"), scan);
+    const single = renderHtmlSite(path.join(root, "repo-scan.json"), path.join(root, "single"));
+    const detail = fs.readFileSync(single.output, "utf8");
+    assert.match(detail, /1 \/ 2 discovered routes also in docs/);
+    assert.match(detail, /class="metric__value">50%/);
+    assert.match(detail, /<th>API docs<\/th>/);
+    assert.match(detail, /In API docs/);
+    assert.match(detail, /No match/);
+    assert.match(detail, /openapi.yaml, swagger.json/);
+    assert.equal((detail.match(/<article class="metric metric--summary">/g) || []).length, 4);
+
+    writeJson(path.join(root, "spec.json"), document);
+    writeJson(path.join(root, "organization-inventory.json"), {
+      kind: "github-organization-inventory",
+      organization: { login: "acme" },
+      summary: {
+        repositoriesScanned: 2,
+        routes: 4,
+        applications: 2,
+        apiSpecifications: 1,
+        specificationRepositories: 1,
+      },
+      coverage: { complete: true },
+      repositories: [
+        {
+          repository: { name: "payments", fullName: "acme/payments" },
+          status: "express",
+          coverageComplete: true,
+          frameworks: { names: ["express"], applicationCount: 1, routeCount: 2 },
+          scan,
+          artifacts: {
+            specifications: [
+              { path: "external.yaml", artifact: "spec.json", applicationId: "app:src/app.js#app" },
+            ],
+          },
+        },
+        {
+          repository: { name: "unknown", fullName: "acme/unknown" },
+          status: "express",
+          coverageComplete: true,
+          frameworks: { names: ["express"], applicationCount: 1, routeCount: 2 },
+          scan: repositoryScan({ inventory, documentation: { status: "needs-input" } }),
+        },
+      ],
+    });
+    const organization = renderHtmlSite(
+      path.join(root, "organization-inventory.json"),
+      path.join(root, "organization"),
+    );
+    const overview = fs.readFileSync(organization.output, "utf8");
+    assert.match(overview, /1 \/ 4 discovered routes also in docs/);
+    assert.match(overview, /class="metric__value">25%/);
+    assert.match(overview, /<th>Also in API docs<\/th>/);
+    const table = overview.slice(overview.indexOf('<table id="repositories-table"'));
+    assert.match(table, /1 \/ 2 · 50%/);
+    assert.match(table, /Not checked/);
+    assert.doesNotMatch(table, /0 \/ 2 · 0%/);
+    assert.match(
+      fs.readFileSync(path.join(root, "organization/repositories/payments.html"), "utf8"),
+      /external.yaml/,
+    );
+    assert.doesNotMatch(overview, /NaN|Infinity/);
+  });
+});
+
 test("repository folders render their retained specification catalog", () => {
   temporary("html-repository-spec-catalog", (root) => {
     const specification = openApiDocument({ info: { title: "Catalog API", version: "1" } });
@@ -769,7 +859,7 @@ test("organization rendering writes per-repository pages and contains unsafe art
             status: "express",
             scanned: true,
             coverageComplete: true,
-            express: { applicationCount: 1, routeCount: 2, documentation: {} },
+            express: { applicationCount: 3, routeCount: 7, documentation: {} },
             scan: repositoryScan({ repository: { source: "acme/payments-copy" } }),
           },
           {
@@ -821,6 +911,18 @@ test("organization rendering writes per-repository pages and contains unsafe art
       assert.doesNotMatch(html, /must-not-be-rendered/);
       assert.match(html, /acme&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
       assert.doesNotMatch(html, /must-not-be-read/);
+      assert.match(html, /data-sort="true"/);
+      assert.match(html, /Routes: high to low/);
+      assert.match(
+        html,
+        /data-sort-apps="3" data-sort-routes="7" data-sort-name="acme\/payments-copy"/,
+      );
+      const repositoriesTable = html.match(/<table id="repositories-table">([\s\S]*?)<\/table>/)[1];
+      assert.ok(
+        repositoriesTable.indexOf("<strong>acme/payments-copy</strong>") <
+          repositoriesTable.indexOf("<strong>acme/payments</strong>"),
+        "repositories default to descending route count within a completion group",
+      );
       assert.ok(fs.existsSync(path.join(root, "site", "repositories", "payments.html")));
       assert.ok(fs.existsSync(path.join(root, "site", "repositories", "payments-2.html")));
     } finally {
@@ -1457,10 +1559,15 @@ test("invalid specification diagnostics are grouped and deduplicated separately 
     assert.ok(html.includes("Application ID"));
     assert.ok(html.includes("Artifact warnings"));
     assert.ok(!html.includes("unavailable or unsafe"));
-    const warningSection = html.slice(html.indexOf("Artifact warnings"));
+    const warningStart = html.indexOf("Artifact warnings");
+    const warningSection = html.slice(warningStart, html.indexOf("</section>", warningStart));
     assert.ok(
       !warningSection.includes("ForbiddenResponse"),
       "invalid source diagnostics do not appear under artifact warnings",
+    );
+    assert.match(html, /<details class="panel disclosure" id="invalid-api-specifications">/);
+    assert.ok(
+      html.indexOf('id="invalid-api-specifications"') > html.indexOf('id="reference-repositories"'),
     );
     assert.ok(
       result.diagnostics.some((item) => item.sourcePath === "source/api-109.yaml"),
