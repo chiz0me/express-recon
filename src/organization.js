@@ -655,6 +655,20 @@ function safeFailure(err, token) {
 
 function scanInWorker(source, options, onProgress) {
   return new Promise((resolve, reject) => {
+    // Each bounded pipeline phase has its own scan deadline. Acquisition must
+    // not consume the time reserved for analysis/documentation on a slow runner.
+    const configuredScan = { ...options.config?.scan, ...options.scan };
+    const timeoutMs = scanLimits(configuredScan).timeoutMs;
+    const watchdogMs = timeoutMs + 5_000;
+    const phases = [
+      "acquiring",
+      "analyzing",
+      "discovering",
+      "inventorying",
+      "cataloging",
+      "documenting",
+      "cleaning-up",
+    ];
     const environment = credentialFreeEnvironment();
     const worker = new Worker(path.join(__dirname, "organization-worker.js"), {
       workerData: { source, options },
@@ -662,12 +676,8 @@ function scanInWorker(source, options, onProgress) {
       resourceLimits: { maxOldGenerationSizeMb: 512, stackSizeMb: 8 },
     });
     let settled = false;
-    const configuredScan = { ...options.config?.scan, ...options.scan };
-    const watchdogMs = scanLimits(configuredScan).timeoutMs + 5_000;
-    const watchdog = setTimeout(() => {
-      finish(new Error(`Organization scan worker exceeded its ${watchdogMs}ms watchdog`));
-    }, watchdogMs);
-    watchdog.unref?.();
+    let phaseIndex = 0;
+    let watchdog;
     const finish = (err, result) => {
       if (settled) return;
       settled = true;
@@ -680,8 +690,30 @@ function scanInWorker(source, options, onProgress) {
           else resolve(result);
         });
     };
+    const armWatchdog = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        finish(
+          new Error(
+            `Organization scan worker exceeded its ${watchdogMs}ms watchdog during ${phases[phaseIndex]} ` +
+              `(scan.timeoutMs=${timeoutMs}ms plus 5000ms grace per phase)`,
+          ),
+        );
+      }, watchdogMs);
+      watchdog.unref?.();
+    };
+    armWatchdog();
     worker.on("message", (message) => {
+      if (settled) return;
       if (message?.type === "progress") {
+        const nextPhase = phases.indexOf(message.progress?.phase);
+        // Only a new forward phase renews the deadline. Repeated heartbeats,
+        // unknown phases and backward transitions cannot keep a worker alive.
+        // Seven phases also put a finite bound on the whole attempt.
+        if (nextPhase > phaseIndex) {
+          phaseIndex = nextPhase;
+          armWatchdog();
+        }
         try {
           onProgress?.(message.progress);
         } catch {

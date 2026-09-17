@@ -479,16 +479,16 @@ repository identity, selected `index`, `processed`/`total`, `active`, `failed`,
 `concurrency`, phase, status, duration, route/application counts, or safe error
 text. Event names are:
 
-| Event                                                                                    | Meaning                                                                                           |
-| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `enumeration-started`, `enumeration-page`, `enumeration-completed`, `enumeration-failed` | GitHub listing lifecycle, API-page visibility, and selected/resumed/pending totals                |
-| `repository-skipped`, `repository-resumed`, `repository-reused`                          | Work intentionally omitted, resumed, or reused from an unchanged completed inventory              |
-| `repository-retry`                                                                       | A failed isolated repository attempt will be retried within its configured bound                  |
-| `repository-started`, `repository-phase`                                                 | Active work and `acquiring`, `discovering`, `inventorying`, `documenting`, or `cleaning-up` phase |
-| `repository-completed`, `repository-failed`                                              | Terminal result with monotonic processed/failure counters                                         |
-| `checkpoint-written`                                                                     | CLI output artifacts and the atomically replaced checkpoint are durable                           |
-| `resume-warning`, `gate-triggered`                                                       | Damaged resume work was rejected, or `--fail-on incomplete` matched                               |
-| `scan-finished`, `scan-failed`                                                           | Aggregate terminal state or fatal command failure                                                 |
+| Event                                                                                    | Meaning                                                                                                                      |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `enumeration-started`, `enumeration-page`, `enumeration-completed`, `enumeration-failed` | GitHub listing lifecycle, API-page visibility, and selected/resumed/pending totals                                           |
+| `repository-skipped`, `repository-resumed`, `repository-reused`                          | Work intentionally omitted, resumed, or reused from an unchanged completed inventory                                         |
+| `repository-retry`                                                                       | A failed isolated repository attempt will be retried within its configured bound                                             |
+| `repository-started`, `repository-phase`                                                 | Active work and `acquiring`, `analyzing`, `discovering`, `inventorying`, `cataloging`, `documenting`, or `cleaning-up` phase |
+| `repository-completed`, `repository-failed`                                              | Terminal result with monotonic processed/failure counters                                                                    |
+| `checkpoint-written`                                                                     | CLI output artifacts and the atomically replaced checkpoint are durable                                                      |
+| `resume-warning`, `gate-triggered`                                                       | Damaged resume work was rejected, or `--fail-on incomplete` matched                                                          |
+| `scan-finished`, `scan-failed`                                                           | Aggregate terminal state or fatal command failure                                                                            |
 
 The phase stream is honest boundary progress, not transfer-byte progress or an
 ETA. In particular, a slow Git fetch stays at `acquiring` until Git finishes or
@@ -1131,6 +1131,16 @@ resolver hops, 500,000 post-parse graph expansions, 100,000 emitted route
 registrations, 64 MiB of serialized route evidence, and 120 seconds. Exhausting
 any post-parse budget preserves bounded partial evidence, sets coverage and the
 route graph incomplete, and adds an `analysis-budget-exhausted` gap.
+Organization workers apply the configured timeout plus five seconds of grace
+independently to each of the seven forward-only repository phases listed above.
+Acquisition time does not consume the analysis budget. Repeated or unknown
+progress events do not extend deadlines; a stalled worker is terminated and its
+error names the phase and configured timeout. The entire attempt is therefore
+bounded by seven phase budgets (875 seconds at the default), not unlimited
+heartbeats. Successful scans normally finish well below that ceiling.
+Git acquisition reads blobs in batches of at most 64 files / 8 MiB, except that
+one allowed larger file is read alone. Existing file/count/total-byte limits,
+scoped authentication, no-symlink and no-submodule rules still apply.
 CLI `--include`/`--exclude` values are repeatable and are combined with config.
 `--no-ignore-file` overrides both the default and a configured ignore file.
 An explicit `--ignore-file` may be absolute (useful for one trusted CI policy

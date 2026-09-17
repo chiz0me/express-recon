@@ -82,7 +82,15 @@ test("scans a Git ref through a bounded non-executing source snapshot", () => {
     ]);
     assert.deepEqual(
       progress.map((event) => event.phase),
-      ["acquiring", "discovering", "inventorying", "documenting", "cleaning-up"],
+      [
+        "acquiring",
+        "analyzing",
+        "discovering",
+        "inventorying",
+        "cataloging",
+        "documenting",
+        "cleaning-up",
+      ],
     );
     assert.ok(progress.every((event) => event.kind === "repository-scan-progress"));
     assert.equal(progress.find((event) => event.phase === "inventorying").applications, 1);
@@ -338,7 +346,13 @@ if (args.includes("rev-parse")) process.stdout.write("${"a".repeat(40)}\\n");
 if (args.includes("ls-tree")) {
   process.stdout.write("100644 blob ${"b".repeat(40)} 3\\tapp.js\\0");
 }
-if (args.includes("cat-file")) process.stdout.write("abc");
+if (args.includes("cat-file")) {
+  if (args.includes("--batch")) {
+    for (const object of fs.readFileSync(0, "utf8").trim().split("\\n")) {
+      process.stdout.write(object + " blob 3\\nabc\\n");
+    }
+  } else process.stdout.write("abc");
+}
 `,
     { mode: 0o755 },
   );
@@ -379,11 +393,55 @@ if (args.includes("cat-file")) process.stdout.write("abc");
     }
     assert.deepEqual(call("init").config, []);
     assert.deepEqual(call("remote").config, []);
+    assert.ok(call("cat-file").args.includes("--batch"));
     assert.ok(calls.every((item) => item.hasRawTokenVariables === false));
     assert.doesNotMatch(JSON.stringify(calls.map((item) => item.args)), /token-for-test/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("batched snapshot reads preserve binary bytes, unusual paths and acquisition limits", () => {
+  withRepository((root) => {
+    const body = Buffer.from([0, 10, 13, 255, 195, 169, 10]);
+    for (let index = 0; index < 130; index++) {
+      fs.writeFileSync(path.join(root, `batch-${String(index).padStart(3, "0")}.json`), body);
+    }
+    const special = "spaced é\nname.json";
+    fs.writeFileSync(path.join(root, special), body);
+    fs.writeFileSync(path.join(root, "empty.json"), "");
+    fs.writeFileSync(path.join(root, "large.json"), Buffer.alloc(9 * 1024 * 1024, 65));
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "batch fixture"]);
+    const acquired = acquireRepository(root, { scan: { maxFileBytes: 10 * 1024 * 1024 } });
+    try {
+      assert.deepEqual(fs.readFileSync(path.join(acquired.snapshot, special)), body);
+      assert.deepEqual(fs.readFileSync(path.join(acquired.snapshot, "batch-129.json")), body);
+      assert.equal(fs.statSync(path.join(acquired.snapshot, "empty.json")).size, 0);
+      assert.deepEqual(
+        fs.readFileSync(path.join(acquired.snapshot, "large.json")),
+        Buffer.alloc(9 * 1024 * 1024, 65),
+      );
+      assert.equal(fs.existsSync(path.join(acquired.snapshot, "linked-app.js")), false);
+      assert.equal(acquired.provenance.acquisition.skippedFiles, 0);
+    } finally {
+      acquired.cleanup();
+    }
+    for (const scan of [{ maxFiles: 3 }, { maxTotalBytes: 1024 }, { maxFileBytes: 1024 }]) {
+      const limited = acquireRepository(root, { scan });
+      try {
+        const evidence = limited.provenance.acquisition;
+        assert.equal(evidence.complete, false);
+        assert.ok(evidence.skippedFiles > 0);
+        if (scan.maxFiles) assert.equal(evidence.materializedFiles, 3);
+        if (scan.maxTotalBytes) assert.ok(evidence.materializedBytes <= 1024);
+        if (scan.maxFileBytes)
+          assert.equal(fs.existsSync(path.join(limited.snapshot, "large.json")), false);
+      } finally {
+        limited.cleanup();
+      }
+    }
+  });
 });
 
 test("repository acquisition timeout reports the configured budget and phase", () => {

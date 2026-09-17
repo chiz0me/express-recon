@@ -341,6 +341,11 @@ runtime, peer, development, or dependency-only package signals. The CLI owns
 durable checkpoints; library callers using `resumeEntries` must provide
 equivalent integrity validation.
 
+`scan.timeoutMs` bounds each repository phase, not the sum of acquisition and
+analysis. The worker watchdog allows five seconds of grace per phase, renews
+only on a new forward phase, and reports which phase stalled. Acquisition uses
+bounded Git blob batches while preserving all snapshot limits and isolation.
+
 ## Rendering and formatting
 
 ### `renderHtmlSite(inputPath, outputPath, options)`

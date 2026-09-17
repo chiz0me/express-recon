@@ -40,6 +40,8 @@ const SKIP_DIRS = new Set([
   "out",
 ]);
 const MAX_TREE_OUTPUT = 64 * 1024 * 1024;
+const MAX_BLOB_BATCH_FILES = 64;
+const MAX_BLOB_BATCH_BYTES = 8 * 1024 * 1024;
 const ACTIVE_TEMP_DIRS = new Set();
 
 function registerTempDir(dir) {
@@ -183,6 +185,7 @@ function git(args, opts = {}) {
     cwd: opts.cwd,
     env: gitEnvironment(opts.gitConfig),
     encoding: opts.encoding === undefined ? "utf8" : opts.encoding,
+    input: opts.input,
     timeout: opts.timeoutMs,
     maxBuffer: opts.maxBuffer || 8 * 1024 * 1024,
     windowsHide: true,
@@ -284,6 +287,41 @@ function parseTree(output) {
     .filter(Boolean);
 }
 
+function readBlobBatch(objectRepo, entries, repository, limits, deadline, gitConfig) {
+  const bytes = entries.reduce((total, entry) => total + entry.size, 0);
+  const output = git(gitArgs(repository, ["-C", objectRepo, "cat-file", "--batch"]), {
+    input: entries.map((entry) => entry.object).join("\n") + "\n",
+    timeoutMs: remaining(deadline),
+    // Payload plus bounded SHA-1/SHA-256/type/size headers and separators.
+    maxBuffer: bytes + entries.length * 128,
+    encoding: null,
+    gitConfig,
+  });
+  let offset = 0;
+  const bodies = [];
+  for (const entry of entries) {
+    const newline = output.indexOf(10, offset);
+    const expected = `${entry.object} blob ${entry.size}`;
+    if (
+      newline < offset ||
+      newline - offset > 126 ||
+      output.toString("ascii", offset, newline) !== expected
+    ) {
+      throw new Error("Repository blob batch returned invalid object metadata");
+    }
+    const start = newline + 1;
+    const end = start + entry.size;
+    if (entry.size > limits.maxFileBytes || end >= output.length || output[end] !== 10) {
+      throw new Error("Repository blob batch returned a truncated or oversized object");
+    }
+    bodies.push(output.subarray(start, end));
+    offset = end + 1;
+  }
+  if (offset !== output.length)
+    throw new Error("Repository blob batch returned unexpected trailing data");
+  return bodies;
+}
+
 function writeSnapshot(
   objectRepo,
   commit,
@@ -309,6 +347,8 @@ function writeSnapshot(
   const oversizedFiles = [];
   let oversizedFileCount = 0;
   let limited = false;
+  const selected = [];
+  let selectedBytes = 0;
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
     if (Date.now() >= deadline) {
@@ -350,10 +390,7 @@ function writeSnapshot(
       }
       continue;
     }
-    if (
-      materializedFiles >= limits.maxFiles ||
-      materializedBytes + entry.size > limits.maxTotalBytes
-    ) {
+    if (selected.length >= limits.maxFiles || selectedBytes + entry.size > limits.maxTotalBytes) {
       skippedFiles++;
       skippedBytes += entry.size;
       limited = true;
@@ -365,23 +402,36 @@ function writeSnapshot(
       skippedFiles++;
       continue;
     }
-    const body = git(gitArgs(repository, ["-C", objectRepo, "cat-file", "blob", entry.object]), {
-      timeoutMs: remaining(deadline),
-      maxBuffer: limits.maxFileBytes + 1024,
-      encoding: null,
-      gitConfig,
-    });
-    if (body.length !== entry.size) {
-      diagnostics.push(
-        `repository: blob size changed for ${entry.path} (tree ${entry.size}, read ${body.length})`,
-      );
-      skippedFiles++;
-      continue;
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entry.object)) {
+      throw new Error("Repository tree contains an invalid blob object id");
     }
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, body, { mode: 0o600 });
-    materializedFiles++;
-    materializedBytes += entry.size;
+    selected.push({ ...entry, destination });
+    selectedBytes += entry.size;
+  }
+  for (let index = 0; index < selected.length; ) {
+    if (Date.now() >= deadline) {
+      limited = true;
+      skippedFiles += selected.length - index;
+      skippedBytes += selected.slice(index).reduce((total, entry) => total + entry.size, 0);
+      diagnostics.push("repository: source materialization stopped at scan.timeoutMs");
+      break;
+    }
+    const batch = [];
+    let batchBytes = 0;
+    while (index < selected.length && batch.length < MAX_BLOB_BATCH_FILES) {
+      const entry = selected[index];
+      if (batch.length && batchBytes + entry.size > MAX_BLOB_BATCH_BYTES) break;
+      batch.push(entry);
+      batchBytes += entry.size;
+      index++;
+    }
+    const bodies = readBlobBatch(objectRepo, batch, repository, limits, deadline, gitConfig);
+    for (const [bodyIndex, entry] of batch.entries()) {
+      fs.mkdirSync(path.dirname(entry.destination), { recursive: true });
+      fs.writeFileSync(entry.destination, bodies[bodyIndex], { mode: 0o600 });
+      materializedFiles++;
+      materializedBytes += entry.size;
+    }
   }
   if (skippedFiles) {
     diagnostics.push(
@@ -740,11 +790,12 @@ function scanRepository(source, opts = {}) {
   try {
     const root = fs.realpathSync(acquired.snapshot);
     progress({
-      phase: "discovering",
+      phase: "analyzing",
       commit: acquired.provenance.commit,
       materializedFiles: acquired.provenance.acquisition.materializedFiles,
     });
     const session = createAnalysisSession(root, scan);
+    progress({ phase: "discovering" });
     const discovery = session.discover();
     const config = opts.config || {};
     const command =
@@ -771,7 +822,7 @@ function scanRepository(source, opts = {}) {
       config,
     });
     progress({
-      phase: "documenting",
+      phase: "cataloging",
       command,
       routes: inventoryReport.routes.length,
     });
@@ -783,6 +834,7 @@ function scanRepository(source, opts = {}) {
       retainDocuments,
       acquired.provenance.source,
     );
+    progress({ phase: "documenting", command, routes: inventoryReport.routes.length });
     let documentation;
     const selected = opts.applicationId;
     const discoveredOpenApiCandidates = discovery.documentation.specifications.filter((item) =>

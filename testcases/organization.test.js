@@ -1029,8 +1029,10 @@ test("the real concurrency worker scans and returns a cleaned repository result"
     assert.ok(result.inventory.routes.some((route) => route.path === "/health"));
     assert.deepEqual(phases, [
       "acquiring",
+      "analyzing",
       "discovering",
       "inventorying",
+      "cataloging",
       "documenting",
       "cleaning-up",
     ]);

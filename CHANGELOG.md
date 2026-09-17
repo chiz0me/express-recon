@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.1
+
+- Give organization scan phases independent bounded watchdog budgets so slow
+  acquisition does not prematurely terminate healthy analysis or documentation.
+  Report the stalled phase and timeout; repeated progress cannot extend a deadline.
+- Materialize source snapshots with bounded Git blob batches instead of spawning
+  Git once per file. Preserve byte/count/deadline limits, authentication isolation,
+  exact binary content, and conservative partial-coverage reporting.
+- Add synthetic slow-worker, stuck-worker, batched-read and malformed-output
+  regression tests without internal source or organization-specific fixtures.
+
 ## 0.19.0
 
 - Resolve declarative package `_moduleAliases`, import-then-export ESM barrels,
