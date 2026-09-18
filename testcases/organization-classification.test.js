@@ -144,25 +144,40 @@ test("warm caches check each HEAD and survive fresh route scans; changed commits
   assert.equal(catalog.metrics.invalidations.identity, 1);
 });
 
-test("truncated, unreadable and linked trees remain eligible and incomplete entries are retried", async (t) => {
+test("stable uncertainty is cached without excluding candidates; transient failures are retried", async (t) => {
   const f = fixture(t);
   f.state.truncated = true;
   let catalog = await classifyOrganization("acme", f.options);
   assert.equal(catalog.coverage.complete, false);
   assert.equal(buildScanPlan(catalog).gin.length, 3);
   catalog = await classifyOrganization("acme", f.options);
-  assert.equal(catalog.metrics.invalidations.incomplete, 3);
+  assert.equal(catalog.metrics.cacheHits, 3);
+  assert.equal(catalog.metrics.apiRequests, 3);
+  assert.equal(catalog.coverage.complete, false);
+  assert.equal(buildScanPlan(catalog).gin.length, 3);
   f.state.truncated = false;
   f.state.extra = [{ path: "submodule", type: "commit", mode: "160000" }];
+  f.state.commit = "b".repeat(40);
   catalog = await classifyOrganization("acme", f.options);
   assert.equal(buildScanPlan(catalog).javascript.length, 3);
+  catalog = await classifyOrganization("acme", f.options);
+  assert.equal(catalog.metrics.cacheHits, 3);
+  catalog = await classifyOrganization("acme", { ...f.options, reclassify: true });
+  assert.equal(catalog.metrics.invalidations.forced, 3);
   f.state.extra = [];
   f.state.failBlob = true;
+  f.state.commit = "c".repeat(40);
   catalog = await classifyOrganization("acme", f.options);
   assert.equal(
     catalog.repositories.find((entry) => entry.repository.name === "go").classification.complete,
     false,
   );
+  catalog = await classifyOrganization("acme", f.options);
+  assert.equal(catalog.metrics.invalidations.incomplete, 2);
+  f.state.failBlob = false;
+  catalog = await classifyOrganization("acme", f.options);
+  assert.equal(catalog.metrics.invalidations.incomplete, 2);
+  assert.equal(catalog.coverage.complete, true);
   f.state.failHead = true;
   catalog = await classifyOrganization("acme", f.options);
   assert.equal(catalog.metrics.invalidations["head-unavailable"], 3);

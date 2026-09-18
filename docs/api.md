@@ -499,6 +499,11 @@ classification events. Persistence failures throw; probe failures produce
 incomplete, eligible entries. The returned catalog includes framework/module
 evidence, per-scanner decisions, explicit scope exclusions, coverage and metrics.
 
+Unchanged structural uncertainty (submodules, links or probe limits) can be reused
+while remaining incomplete and eligible. Transient probe failures are retried.
+Use `reclassify: true` for a scheduled or manual full refresh; live commit and
+classifier checks continue invalidating changed evidence on normal runs.
+
 ### `loadRepositoryClassification(file)`
 
 Read-only bounded loader for `repository-classification.json`. Validates identities,

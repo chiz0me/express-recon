@@ -31,6 +31,24 @@ const SELECTIONS = new Set([
   "skipped-limit",
 ]);
 const SETTINGS = { maxManifestBytes: MAX_MANIFEST_BYTES, maxManifests: MAX_MANIFESTS };
+// These limits belong to the immutable source tree. Reusing them is safe:
+// incomplete classifications cannot exclude either scanner. Transport/decoding
+// failures are deliberately absent so the next run can retry them.
+const STABLE_UNCERTAINTY = new Set([
+  "submodule-or-symbolic-link",
+  "truncated-tree",
+  "invalid-tree-entry",
+  "manifest-count-limit",
+  "manifest-size-or-identity",
+]);
+
+function reusableClassification(data) {
+  return (
+    data.complete ||
+    (data.diagnostics.length > 0 &&
+      data.diagnostics.every((reason) => STABLE_UNCERTAINTY.has(reason)))
+  );
+}
 
 function digest(value) {
   function stable(item) {
@@ -518,7 +536,7 @@ async function classifyListing(organization, listing, opts = {}) {
           )
             reason = "classifier";
           else if (prior.classification.commit !== commit) reason = "commit";
-          else if (!prior.classification.complete) reason = "incomplete";
+          else if (!reusableClassification(prior.classification)) reason = "incomplete";
           else {
             entry.classification = prior.classification;
             entry.reused = true;

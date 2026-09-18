@@ -336,6 +336,12 @@ route evidence separately. Persist this catalog in Git or recovery storage even
 when later scanners fail. It contains paths and framework evidence, not source
 contents or credentials.
 
+Refresh incrementally on normal runs: enumerate repositories and verify live
+commits, then probe only new or changed sources, incompatible classifiers, or
+transient failures. Stable incomplete results remain reusable and eligible.
+A weekly `--reclassify` pass can force full detection without coupling route
+scan mode or checkpoints to the classification refresh cadence.
+
 Within one pipeline run, classify once and pass the completed catalog through
 `scan-org --classification-snapshot <path>`. This scans the recorded commits
 without repeating classification requests. Use the same catalog's Gin target

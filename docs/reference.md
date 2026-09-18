@@ -350,6 +350,12 @@ results: `--overwrite` reruns route analysis while preserving classification;
 add `--reclassify` for a cold run. The cache reports hits, misses, API requests,
 bytes, duration and invalidation reasons. Cache corruption causes reclassification.
 
+Unchanged structural uncertainty, such as submodules, symbolic links, truncated
+trees or manifest limits, is reusable too. These entries stay incomplete and
+eligible for scanning. Transport failures, unreadable responses and unavailable
+heads are retried. Use `--reclassify` for periodic full refreshes or manual diagnosis;
+changing a source commit or classifier identity always invalidates cached evidence.
+
 For a pipeline that already completed classification, use
 `--classification-snapshot` with the catalog path in `scan-org` to consume that pass without repeating
 enumeration, HEAD checks or manifest probes. It scans the recorded commits and

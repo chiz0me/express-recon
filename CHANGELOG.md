@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.1
+
+- Reuse unchanged framework classifications with structural uncertainty, including
+  submodules, symlinks and bounded-tree or manifest limits. They remain incomplete
+  and eligible for scanning; transient probe failures are still retried.
+- Preserve live commit checks and explicit `--reclassify` full refreshes, avoiding
+  repeated expensive probes that cannot resolve an unchanged source limitation.
+
 ## 0.21.0
 
 - Add `scan-org --classification-snapshot` and the `classificationSnapshot` API
