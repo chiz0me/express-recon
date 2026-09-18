@@ -881,6 +881,10 @@ function aggregateSummary(entries, auditMode) {
  */
 async function scanOrganization(organization, opts = {}) {
   const login = validateOrganization(organization);
+  if (opts.classificationSnapshot && (opts.classificationCache || opts.reclassify))
+    throw new Error(
+      "classificationSnapshot cannot be combined with classificationCache or reclassify",
+    );
   const token = opts.tokenProvider || createGitHubTokenProvider(opts);
   if (opts.onProgress !== undefined && typeof opts.onProgress !== "function") {
     throw new Error("onProgress must be a function");
@@ -939,17 +943,32 @@ async function scanOrganization(organization, opts = {}) {
     repositoryExclude,
   });
   const progress = createProgressEmitter(login, opts.onProgress, token);
+  let classification = opts.classificationSnapshot
+    ? require("./organization-classification").loadClassificationSnapshot(
+        opts.classificationSnapshot,
+        login,
+        opts,
+      )
+    : null;
   progress.emit({ event: "enumeration-started" });
   let listing;
   try {
-    listing = await listOrganizationRepositories(login, {
-      tokenProvider: token,
-      fetchImpl: opts.fetchImpl,
-      apiTimeoutMs: opts.apiTimeoutMs,
-      onPage(event) {
-        progress.emit({ event: "enumeration-page", ...event });
-      },
-    });
+    listing = classification
+      ? {
+          organization: classification.organization,
+          repositories: classification.repositories.map((entry) => entry.repository),
+          coverage: classification.coverage.enumeration,
+          rateLimit: null,
+          diagnostics: classification.diagnostics || [],
+        }
+      : await listOrganizationRepositories(login, {
+          tokenProvider: token,
+          fetchImpl: opts.fetchImpl,
+          apiTimeoutMs: opts.apiTimeoutMs,
+          onPage(event) {
+            progress.emit({ event: "enumeration-page", ...event });
+          },
+        });
   } catch (err) {
     progress.emit({ event: "enumeration-failed", error: safeFailure(err, token) });
     throw err;
@@ -961,7 +980,6 @@ async function scanOrganization(organization, opts = {}) {
   const eligible = entries.filter((entry) => entry.status === "eligible");
   for (const entry of eligible.slice(maxRepositories)) entry.status = "skipped-limit";
   let selected = eligible.slice(0, maxRepositories);
-  let classification = null;
   if (opts.classificationCache) {
     classification = await require("./organization-classification").classifyListing(
       login,
@@ -972,6 +990,27 @@ async function scanOrganization(organization, opts = {}) {
         onProgress: (event) => progress.emit(event),
       },
     );
+  }
+  if (classification) {
+    if (opts.classificationSnapshot) {
+      classification = {
+        ...classification,
+        metrics: {
+          repositories: selected.length,
+          cacheHits: selected.length,
+          cacheMisses: 0,
+          apiRequests: 0,
+          bytesRead: 0,
+          durationMs: 0,
+          invalidations: {},
+        },
+      };
+      progress.emit({
+        event: "classification-finished",
+        snapshot: true,
+        ...classification.metrics,
+      });
+    }
     const classified = new Map(
       classification.repositories.map((entry) => [entry.repository.fullName.toLowerCase(), entry]),
     );
@@ -1289,7 +1328,13 @@ async function scanOrganization(organization, opts = {}) {
     rateLimit: listing.rateLimit,
     summary,
     ...(classification
-      ? { classification: { metrics: classification.metrics, coverage: classification.coverage } }
+      ? {
+          classification: {
+            mode: opts.classificationSnapshot ? "snapshot" : "cache",
+            metrics: classification.metrics,
+            coverage: classification.coverage,
+          },
+        }
       : {}),
     repositories: entries,
     diagnostics: [],

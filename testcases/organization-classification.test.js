@@ -299,6 +299,109 @@ test("classify-org writes separate catalogs and plans with no route artifacts", 
   );
 });
 
+test("explicit snapshots reuse one classification pass without GitHub probes and pin old commits", async (t) => {
+  const f = fixture(t);
+  await classifyOrganization("acme", f.options);
+  const before = fs.readFileSync(f.options.classificationCache, "utf8");
+  f.state.commit = "c".repeat(40);
+  f.calls.length = 0;
+  const scanned = [];
+  const result = await scanOrganization("acme", {
+    classificationSnapshot: f.options.classificationCache,
+    fetchImpl: async () => assert.fail("Snapshot must not enumerate or probe GitHub"),
+    scanRepositoryImpl: async (name, options) => {
+      scanned.push([name, options.ref]);
+      return emptyScan(options.ref);
+    },
+  });
+  assert.deepEqual(scanned, [["acme/app", SHA]]);
+  assert.equal(result.summary.skippedByClassification, 2);
+  assert.equal(result.classification.mode, "snapshot");
+  assert.equal(result.classification.metrics.apiRequests, 0);
+  assert.equal(fs.readFileSync(f.options.classificationCache, "utf8"), before);
+});
+
+test("snapshots retain unknown candidates and incomplete enumeration but reject pending or incompatible scope", async (t) => {
+  const f = fixture(t, { plain: { "README.md": "hello" } });
+  f.state.truncated = true;
+  const saved = await classifyOrganization("acme", f.options);
+  saved.coverage.enumeration.complete = false;
+  const snapshot = f.options.classificationCache;
+  const write = (value) => fs.writeFileSync(snapshot, JSON.stringify(value));
+  write(saved);
+  const options = {
+    classificationSnapshot: snapshot,
+    scanRepositoryImpl: async () => emptyScan(SHA),
+  };
+  const result = await scanOrganization("acme", options);
+  assert.equal(result.summary.skippedByClassification, 0);
+  assert.equal(result.coverage.complete, false);
+  assert.equal(result.repositories[0].classification.complete, false);
+  for (const mutate of [
+    (x) => {
+      x.repositories[0].checked = false;
+    },
+    (x) => {
+      x.repositories[0].classification = null;
+    },
+    (x) => {
+      x.classifierVersion = "old";
+    },
+    (x) => {
+      x.settings.maxManifests = 1;
+    },
+    (x) => {
+      delete x.coverage.enumeration;
+    },
+  ]) {
+    const damaged = structuredClone(saved);
+    mutate(damaged);
+    write(damaged);
+    await assert.rejects(scanOrganization("acme", options), /snapshot/i);
+  }
+  write(saved);
+  await assert.rejects(scanOrganization("other", options), /organization/);
+  await assert.rejects(
+    scanOrganization("acme", { ...options, repositoryExclude: ["plain"] }),
+    /scope/,
+  );
+  await assert.rejects(
+    scanOrganization("acme", { ...options, classificationCache: snapshot }),
+    /cannot be combined/,
+  );
+  await assert.rejects(
+    scanOrganization("acme", { ...options, reclassify: true }),
+    /cannot be combined/,
+  );
+});
+
+test("fresh CLI snapshots preserve classification and pass explicit snapshot selection", async (t) => {
+  const f = fixture(t);
+  await classifyOrganization("acme", f.options);
+  const before = fs.readFileSync(f.options.classificationCache, "utf8");
+  await assert.rejects(
+    runScanOrganization(
+      {
+        org: "acme",
+        out: f.root,
+        overwrite: true,
+        progress: "none",
+        classificationSnapshot: f.options.classificationCache,
+      },
+      {
+        environment: {},
+        scanOrganization: async (org, options) => {
+          assert.equal(options.classificationSnapshot, f.options.classificationCache);
+          assert.equal(options.classificationCache, undefined);
+          assert.equal(fs.readFileSync(f.options.classificationCache, "utf8"), before);
+          throw new Error("stop after snapshot reset");
+        },
+      },
+    ),
+    /stop after snapshot reset/,
+  );
+});
+
 test("fresh CLI scans preserve classification and pass cache selection to the scanner", async (t) => {
   const f = fixture(t);
   await classifyOrganization("acme", f.options);
@@ -334,6 +437,23 @@ test("new CLI options validate scope and command combinations", () => {
     [["classify-org", "--org", "acme", "--format", "md"], /only --format json/],
     [["scan-org", "--org", "acme", "--reclassify"], /requires classify-org/],
     [["inventory", "--classification-cache", "x"], /does not accept/],
+    [["classify-org", "--org", "acme", "--classification-snapshot", "x"], /requires scan-org/],
+    [
+      [
+        "scan-org",
+        "--org",
+        "acme",
+        "--classification-snapshot",
+        "x",
+        "--classification-cache",
+        "x",
+      ],
+      /cannot be combined/,
+    ],
+    [
+      ["scan-org", "--org", "acme", "--classification-snapshot", "x", "--reclassify"],
+      /cannot be combined/,
+    ],
   ]) {
     const result = spawnSync(process.execPath, [path.join(__dirname, "../src/cli.js"), ...args], {
       encoding: "utf8",
@@ -403,6 +523,22 @@ test("classified exclusions persist as valid native organization inventory", asy
   const saved = require("../src").loadOrganizationInventory(f.root);
   assert.equal(saved.report.repositories[0].status, "skipped-classification");
   assert.equal(saved.scans.size, 0);
+  assert.equal(
+    await runScanOrganization(
+      {
+        org: "acme",
+        out: f.root,
+        overwrite: true,
+        progress: "none",
+        classificationSnapshot: f.options.classificationCache,
+      },
+      { environment: {}, fetchImpl: () => assert.fail("Snapshot must not fetch GitHub") },
+    ),
+    0,
+  );
+  const snapshot = require("../src").loadOrganizationInventory(f.root);
+  assert.equal(snapshot.report.classification.mode, "snapshot");
+  assert.equal(snapshot.report.repositories[0].status, "skipped-classification");
 });
 
 test("a failed checkpoint write drains active probes before releasing its writer lock", async (t) => {

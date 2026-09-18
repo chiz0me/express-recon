@@ -518,3 +518,12 @@ or refresh stale observations.
 It refreshes classification before route scans, pins source refs, includes
 `skipped-classification` rows, and reports classification metrics. Route/audit
 checkpoint identity and policy invalidation remain independent of classification.
+
+Alternatively, `classificationSnapshot` names a completed catalog for an explicit
+point-in-time scan. No enumeration or classification probes are repeated; candidate
+refs are pinned to recorded commits. The organization, selected scope, classifier
+and limits must match, and pending entries are rejected. Incomplete probes remain
+eligible and incomplete enumeration remains visible. Mutually exclusive with
+`classificationCache` and `reclassify`. The result records `classification.mode`
+as `snapshot` and zero new classification API requests. Refresh the catalog at the
+start of each new pipeline run; this mode does not check live repository heads.

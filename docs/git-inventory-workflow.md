@@ -336,6 +336,15 @@ route evidence separately. Persist this catalog in Git or recovery storage even
 when later scanners fail. It contains paths and framework evidence, not source
 contents or credentials.
 
+Within one pipeline run, classify once and pass the completed catalog through
+`scan-org --classification-snapshot <path>`. This scans the recorded commits
+without repeating classification requests. Use the same catalog's Gin target
+manifest for the Gin pass. Refresh classification on every new run, then publish
+the catalog before routes and validated scanner output after each completed pass.
+Keep each scanner's source identity and incomplete coverage visible when later
+passes fail. Snapshot mode requires the same selected scope and classifier and
+rejects pending entries; it cannot be combined with the cache or reclassify flags.
+
 `gin-targets.json` is compatible with gin-recon's native target manifest. Targets
 include exact commits and GitHub repository identity; integrations that require
 native organization enumeration may instead use the Gin candidate names as

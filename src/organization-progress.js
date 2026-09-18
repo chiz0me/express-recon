@@ -56,7 +56,7 @@ function formatPlainProgress(event) {
     case "classification-completed":
       return `${prefix} CLASSIFY ${repository} ${event.event === "classification-reused" ? "cached" : cleanLine(event.reason)}`;
     case "classification-finished":
-      return `${prefix} CLASSIFIED ${event.repositories ?? 0} repositories · ${event.cacheHits ?? 0} cached · ${event.apiRequests ?? 0} API requests · ${elapsed}`;
+      return `${prefix} ${event.snapshot ? "SNAPSHOT" : "CLASSIFIED"} ${event.repositories ?? 0} repositories · ${event.cacheHits ?? 0} cached · ${event.apiRequests ?? 0} API requests · ${elapsed}`;
     case "enumeration-started":
       return `${prefix} ENUMERATE ${cleanLine(event.organization)}`;
     case "enumeration-completed":

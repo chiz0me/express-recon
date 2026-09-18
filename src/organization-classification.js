@@ -118,6 +118,52 @@ function loadRepositoryClassification(file) {
   return validateCatalog(JSON.parse(fs.readFileSync(resolved, "utf8")));
 }
 
+// An explicit snapshot describes one point in time. Unlike a persistent cache,
+// it must never refresh repositories or silently widen/narrow the saved scope.
+function loadClassificationSnapshot(file, organization, opts) {
+  const catalog = loadRepositoryClassification(file);
+  const {
+    initialStatus,
+    repositoryPatterns,
+    repositoryGlob,
+    positiveInteger,
+  } = require("./organization");
+  if (
+    catalog.organization.toLowerCase() !== organization.toLowerCase() ||
+    catalog.classifierVersion !== CLASSIFIER_VERSION ||
+    digest(catalog.settings) !== digest(SETTINGS) ||
+    typeof catalog.coverage.enumeration?.complete !== "boolean"
+  )
+    throw new Error(
+      "Classification snapshot organization, classifier or enumeration is incompatible",
+    );
+  const include = repositoryPatterns(opts.repositoryInclude, "repositoryInclude").map(
+    repositoryGlob,
+  );
+  const exclude = repositoryPatterns(opts.repositoryExclude, "repositoryExclude").map(
+    repositoryGlob,
+  );
+  const maximum = positiveInteger(opts.maxRepositories, 100, "maxRepositories", 10000);
+  let selected = 0;
+  for (const entry of catalog.repositories) {
+    let status = initialStatus(entry.repository, opts, include, exclude);
+    if (status === "eligible" && selected++ >= maximum) status = "skipped-limit";
+    if (status !== entry.status)
+      throw new Error("Classification snapshot scope differs from scan scope");
+    if (
+      status === "eligible" &&
+      (!entry.checked ||
+        !entry.classification ||
+        entry.classification.classifierVersion !== CLASSIFIER_VERSION ||
+        entry.classification.settingsFingerprint !== digest(SETTINGS))
+    )
+      throw new Error(
+        "Classification snapshot contains pending or incompatible entries; finish classification first",
+      );
+  }
+  return catalog;
+}
+
 /** Build conservative JavaScript/Gin scanner selections and native Gin targets. */
 function buildScanPlan(catalog) {
   validateCatalog(catalog);
@@ -557,5 +603,6 @@ module.exports = {
   classifyListing,
   classifyOrganization,
   loadRepositoryClassification,
+  loadClassificationSnapshot,
   buildScanPlan,
 };

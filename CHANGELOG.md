@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.0
+
+- Add `scan-org --classification-snapshot` and the `classificationSnapshot` API
+  option to share one completed classification pass across a pipeline. Scan the
+  recorded commits without repeating enumeration or classification requests.
+- Validate snapshot scope and classifier compatibility, retain uncertain candidates
+  and partial coverage, and reject unfinished snapshots before resetting scan output.
+
 ## 0.20.0
 
 - Add persistent, commit-verified organization framework classification and

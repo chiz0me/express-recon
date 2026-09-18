@@ -343,12 +343,21 @@ as `skipped-classification`. Scans use the classified commit. Without this flag,
 existing scan behavior is unchanged. `--reclassify` forces new probes in
 `classify-org`, or in `scan-org` with `--classification-cache`.
 
-Every run enumerates the current scope and verifies default-branch commit SHAs.
+Classification and cache-based runs enumerate the current scope and verify default-branch commit SHAs.
 Reuse requires the same repository ID, branch, commit, classifier version and
 classification limits. Cache entries are independent of auth policies and route
 results: `--overwrite` reruns route analysis while preserving classification;
 add `--reclassify` for a cold run. The cache reports hits, misses, API requests,
 bytes, duration and invalidation reasons. Cache corruption causes reclassification.
+
+For a pipeline that already completed classification, use
+`--classification-snapshot` with the catalog path in `scan-org` to consume that pass without repeating
+enumeration, HEAD checks or manifest probes. It scans the recorded commits and
+retains unknown candidates and incomplete coverage. The snapshot must match the
+organization, selected scope, classifier version and limits, with no pending
+entries. This explicit point-in-time mode does not discover subsequent repository
+changes; run classification again at the start of the next pipeline run. It cannot
+be combined with `--classification-cache` or `--reclassify`.
 
 The bounded probe reads the complete Git tree and up to 100 manifests of at most
 256 KiB each. It recognizes Express, Fastify, NestJS and Gin dependencies in

@@ -154,6 +154,8 @@ Options:
   --repo-exclude <glob> skip matching repository names/full names (repeatable).
   --classification-cache <path>  scan-org: classify before scanning; reuse exact-commit
                         framework evidence independently from route/audit artifacts.
+  --classification-snapshot <path>  scan-org: use a completed classification pass
+                        and its recorded commits without repeating GitHub probes.
   --reclassify          ignore cached classification (classify-org, or scan-org
                         with --classification-cache); still checks current commits.
   --resume              resume a scan-org run from the checkpoint in its output.
@@ -414,6 +416,7 @@ function parseArgs(argv) {
     else if (arg === "--repo-include") (out.repoInclude ||= []).push(takeValue(arg, i++));
     else if (arg === "--repo-exclude") (out.repoExclude ||= []).push(takeValue(arg, i++));
     else if (arg === "--classification-cache") out.classificationCache = takeValue(arg, i++);
+    else if (arg === "--classification-snapshot") out.classificationSnapshot = takeValue(arg, i++);
     else if (arg === "--org") out.org = takeValue(arg, i++);
     else if (arg === "--ref") out.ref = takeValue(arg, i++);
     else if (arg === "--max-repos") out.maxRepos = takeValue(arg, i++);
@@ -824,6 +827,12 @@ function validateArgs(args) {
   }
   if (args.classificationCache && args.command !== "scan-org")
     throw new Error("--classification-cache requires scan-org");
+  if (args.classificationSnapshot && args.command !== "scan-org")
+    throw new Error("--classification-snapshot requires scan-org");
+  if (args.classificationSnapshot && (args.classificationCache || args.reclassify))
+    throw new Error(
+      "--classification-snapshot cannot be combined with --classification-cache or --reclassify",
+    );
   if (
     args.reclassify &&
     args.command !== "classify-org" &&
@@ -870,6 +879,7 @@ function validateArgs(args) {
       "--concurrency",
       "--baseline",
       "--classification-cache",
+      "--classification-snapshot",
       "--reclassify",
       "--config",
       "--exclude",
@@ -2558,6 +2568,19 @@ async function executeScanOrganization(args, dependencies, reporter) {
     repositoryExclude: args.repoExclude,
   });
   ensureOrganizationOutputDirectory(outDir);
+  if (args.classificationSnapshot) {
+    require("./organization-classification").loadClassificationSnapshot(
+      resolvePath(args.classificationSnapshot),
+      args.org,
+      {
+        maxRepositories,
+        includeArchived: args.includeArchived,
+        includeForks: args.includeForks,
+        repositoryInclude: args.repoInclude,
+        repositoryExclude: args.repoExclude,
+      },
+    );
+  }
   const internalBaseline = path.join(outDir, ORGANIZATION_BASELINE_DIRECTORY);
   const baselineInput = args.update
     ? outDir
@@ -2668,6 +2691,9 @@ async function executeScanOrganization(args, dependencies, reporter) {
     reuseUnchanged: args.update === true,
     classificationCache: args.classificationCache
       ? resolvePath(args.classificationCache)
+      : undefined,
+    classificationSnapshot: args.classificationSnapshot
+      ? resolvePath(args.classificationSnapshot)
       : undefined,
     reclassify: args.reclassify,
     retainScans: false,
