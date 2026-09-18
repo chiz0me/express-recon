@@ -27,6 +27,11 @@ const {
 } = require("./review");
 const { acquireRepository, releaseRepository, scanRepository } = require("./repository");
 const { listOrganizationRepositories, scanOrganization } = require("./organization");
+const {
+  classifyOrganization,
+  loadRepositoryClassification,
+  buildScanPlan,
+} = require("./organization-classification");
 const { renderHtmlSite, checkHtmlSite } = require("./html");
 const {
   buildNotificationEvents,
@@ -92,6 +97,9 @@ const {
  * @property {typeof releaseRepository} releaseRepository Clean up an acquired repository snapshot.
  * @property {typeof scanRepository} scanRepository Scan one Git ref and clean up its source snapshot.
  * @property {typeof listOrganizationRepositories} listOrganizationRepositories Enumerate API-visible organization repositories.
+ * @property {typeof classifyOrganization} classifyOrganization Classify current repository commits with a persistent independent cache.
+ * @property {typeof loadRepositoryClassification} loadRepositoryClassification Validate a saved classification catalog offline.
+ * @property {typeof buildScanPlan} buildScanPlan Select conservative JavaScript and Gin candidates from a classification catalog.
  * @property {typeof scanOrganization} scanOrganization Build a bounded organization inventory.
  * @property {typeof renderHtmlSite} renderHtmlSite Render saved reports as an offline site.
  * @property {typeof buildNotificationEvents} buildNotificationEvents Build bounded webhook events from report deltas.
@@ -139,6 +147,9 @@ module.exports = {
   scanRepository,
   listOrganizationRepositories,
   scanOrganization,
+  classifyOrganization,
+  loadRepositoryClassification,
+  buildScanPlan,
   renderHtmlSite,
   buildNotificationEvents,
   deliverWebhook,

@@ -20,6 +20,8 @@ const {
   applyMiddlewareAssessments,
   scanRepository,
   scanOrganization,
+  classifyOrganization,
+  buildScanPlan,
   renderHtmlSite,
   buildNotificationEvents,
   deliverWebhook,
@@ -98,6 +100,7 @@ Commands:
   scan-repo     Fetch a GitHub/HTTPS/local Git ref without checkout, materialize
                 bounded source/docs files, then discover, inventory/audit, and
                 reconcile documentation when possible. Never executes target code.
+  classify-org  Cache repository framework evidence and export JavaScript/Gin targets.
   scan-org      Enumerate API-visible repositories in one GitHub organization,
                 scan them statically, and build a framework-aware HTTP inventory.
   render        Generate a browsable offline HTML site from an existing report,
@@ -149,6 +152,10 @@ Options:
                         (default 2; maximum 3).
   --repo-include <glob> scan only matching repository names/full names (repeatable).
   --repo-exclude <glob> skip matching repository names/full names (repeatable).
+  --classification-cache <path>  scan-org: classify before scanning; reuse exact-commit
+                        framework evidence independently from route/audit artifacts.
+  --reclassify          ignore cached classification (classify-org, or scan-org
+                        with --classification-cache); still checks current commits.
   --resume              resume a scan-org run from the checkpoint in its output.
   --update              incrementally update a completed scan: unchanged repository
                         artifacts are reused and the previous inventory is the baseline.
@@ -310,6 +317,7 @@ const COMMANDS = new Set([
   "review-middleware",
   "render",
   "scan-org",
+  "classify-org",
   "scan-repo",
   "schema",
   "suggest-auth",
@@ -405,6 +413,7 @@ function parseArgs(argv) {
     else if (arg === "--repo-attempts") out.repoAttempts = takeValue(arg, i++);
     else if (arg === "--repo-include") (out.repoInclude ||= []).push(takeValue(arg, i++));
     else if (arg === "--repo-exclude") (out.repoExclude ||= []).push(takeValue(arg, i++));
+    else if (arg === "--classification-cache") out.classificationCache = takeValue(arg, i++);
     else if (arg === "--org") out.org = takeValue(arg, i++);
     else if (arg === "--ref") out.ref = takeValue(arg, i++);
     else if (arg === "--max-repos") out.maxRepos = takeValue(arg, i++);
@@ -448,6 +457,10 @@ function parseArgs(argv) {
       provided.add(arg);
       if (arg === "--include-archived") out.includeArchived = true;
       else out.includeForks = true;
+    } else if (arg === "--reclassify") {
+      if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
+      provided.add(arg);
+      out.reclassify = true;
     } else if (arg === "--resume") {
       if (provided.has(arg)) throw new Error(`${arg} may only be specified once`);
       provided.add(arg);
@@ -809,11 +822,55 @@ function validateArgs(args) {
       }
     }
   }
+  if (args.classificationCache && args.command !== "scan-org")
+    throw new Error("--classification-cache requires scan-org");
+  if (
+    args.reclassify &&
+    args.command !== "classify-org" &&
+    !(args.command === "scan-org" && args.classificationCache)
+  )
+    throw new Error("--reclassify requires classify-org or scan-org --classification-cache");
+  if (args.command === "classify-org") {
+    const supported = new Set([
+      "--org",
+      "--auth",
+      "--out",
+      "--max-repos",
+      "--concurrency",
+      "--include-archived",
+      "--include-forks",
+      "--repo-include",
+      "--repo-exclude",
+      "--reclassify",
+      "--format",
+      "--progress",
+      "--no-progress",
+    ]);
+    const unsupported = [...args.provided].filter((option) => !supported.has(option));
+    if (unsupported.length)
+      throw new Error(`classify-org does not accept ${unsupported.join(", ")}`);
+    if (!args.org) throw new Error("classify-org requires --org <name>");
+    validateOrganization(args.org);
+    for (const [option, value, maximum] of [
+      ["--max-repos", args.maxRepos, 10000],
+      ["--concurrency", args.concurrency, 8],
+    ]) {
+      if (
+        value !== undefined &&
+        (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > maximum)
+      )
+        throw new Error(`${option} must be an integer from 1 to ${maximum}`);
+    }
+    if (args.provided.has("--format") && args.format !== "json")
+      throw new Error("classify-org supports only --format json");
+  }
   if (args.command === "scan-org") {
     const supported = new Set([
       "--auth",
       "--concurrency",
       "--baseline",
+      "--classification-cache",
+      "--reclassify",
       "--config",
       "--exclude",
       "--fail-on",
@@ -2609,6 +2666,10 @@ async function executeScanOrganization(args, dependencies, reporter) {
     includeForks: args.includeForks,
     resumeEntries,
     reuseUnchanged: args.update === true,
+    classificationCache: args.classificationCache
+      ? resolvePath(args.classificationCache)
+      : undefined,
+    reclassify: args.reclassify,
     retainScans: false,
     onProgress: reportProgress,
     onReuse: args.update
@@ -2779,6 +2840,51 @@ async function executeScanOrganization(args, dependencies, reporter) {
   return 0;
 }
 
+async function runClassifyOrganization(args, dependencies = {}) {
+  const output = path.resolve(
+    args.out || defaultOrganizationOutput(args.org, dependencies.cwd || process.cwd()),
+  );
+  ensureOrganizationOutputDirectory(output);
+  const release = acquireArtifactLock(output);
+  const reporter = createOrganizationProgressReporter({
+    mode: args.progress || "plain",
+    stream: dependencies.stderr || process.stderr,
+  });
+  try {
+    const catalog = await classifyOrganization(args.org, {
+      auth: args.auth,
+      environment: dependencies.environment || process.env,
+      fetchImpl: dependencies.fetchImpl,
+      classificationCache: path.join(output, "repository-classification.json"),
+      reclassify: args.reclassify,
+      maxRepositories: args.maxRepos === undefined ? undefined : Number(args.maxRepos),
+      concurrency: args.concurrency === undefined ? undefined : Number(args.concurrency),
+      includeArchived: args.includeArchived,
+      includeForks: args.includeForks,
+      repositoryInclude: args.repoInclude,
+      repositoryExclude: args.repoExclude,
+      onProgress: (event) => reporter.emit(event),
+    });
+    const plan = buildScanPlan(catalog);
+    for (const [name, value] of [
+      ["scan-plan.json", plan],
+      ["gin-targets.json", plan.ginTargets],
+    ]) {
+      const file = path.join(output, name);
+      if (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())
+        throw new Error(`Classification output must not be a symbolic link: ${name}`);
+      atomicWriteJson(file, value);
+    }
+    (dependencies.stdout || process.stdout).write(
+      `${JSON.stringify({ output, complete: catalog.coverage.complete, ...catalog.metrics, javascriptTargets: plan.javascript.length, ginTargets: plan.gin.length })}\n`,
+    );
+    return catalog.coverage.complete ? 0 : 2;
+  } finally {
+    release();
+    reporter.close?.();
+  }
+}
+
 async function runScanOrganization(args, dependencies = {}) {
   validateOrganization(args.org);
   const environment = dependencies.environment || process.env;
@@ -2891,6 +2997,7 @@ async function main(argv) {
   if (args.command === "render") return runRender(args);
   if (args.command === "notify") return runNotify(args);
   if (args.command === "scan-org") return runScanOrganization(args);
+  if (args.command === "classify-org") return runClassifyOrganization(args);
   if (args.command === "scan-repo") return runScanRepository(args);
   if (args.command === "suggest-auth") return runSuggestAuth(args);
   if (args.command === "inventory" || args.command === "audit")
@@ -2925,5 +3032,6 @@ module.exports = {
   resolveOrganizationOutputArgs,
   resolveOrganizationProgressMode,
   runScanOrganization,
+  runClassifyOrganization,
   writeRepositoryArtifacts,
 };

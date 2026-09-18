@@ -274,3 +274,11 @@ EXPRESS_RECON_CONTEXT=agent express-recon scan-org \
   modules without executing them. Do not bypass an incomplete-module diagnostic
   by importing repository code. Treat unverified docs-only operations as
   incomplete evidence, not confirmed stale documentation.
+
+- For large organizations, `classify-org --org <name> --out <dir>` saves a
+  framework catalog and JavaScript/Gin targets without source snapshots. Use
+  `scan-org --classification-cache <dir>/repository-classification.json` with
+  the same scope. Fresh `--overwrite` scans retain classification; add
+  `--reclassify` for a cold run. Unknown, failed and truncated classifications
+  stay eligible. A `skipped-classification` entry is a framework selection
+  decision, not a completed route scan or an authentication conclusion.

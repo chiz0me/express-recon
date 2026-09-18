@@ -1,0 +1,133 @@
+"use strict";
+
+const decision = { enum: ["candidate", "not-applicable", "unknown"] };
+const strings = { type: "array", maxItems: 1000, items: { type: "string", maxLength: 4096 } };
+const sha = { type: "string", pattern: "^[a-f0-9]{64}$" };
+const CLASSIFICATION_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  required: [
+    "schemaVersion",
+    "kind",
+    "organization",
+    "classifierVersion",
+    "settings",
+    "coverage",
+    "metrics",
+    "repositories",
+  ],
+  properties: {
+    schemaVersion: { const: "1.0" },
+    kind: { const: "repository-classification" },
+    organization: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9-]*$", maxLength: 100 },
+    classifierVersion: { type: "string", maxLength: 100 },
+    settings: { type: "object" },
+    metrics: { type: "object" },
+    coverage: {
+      type: "object",
+      required: ["complete"],
+      properties: { complete: { type: "boolean" } },
+    },
+    repositories: {
+      type: "array",
+      maxItems: 10000,
+      items: {
+        type: "object",
+        required: ["repository", "status", "checked", "classification"],
+        properties: {
+          status: {
+            enum: [
+              "eligible",
+              "empty",
+              "skipped-disabled",
+              "skipped-archived",
+              "skipped-fork",
+              "skipped-filter",
+              "skipped-limit",
+            ],
+          },
+          checked: { type: "boolean" },
+          reused: { type: "boolean" },
+          repository: {
+            type: "object",
+            required: ["fullName", "id", "defaultBranch"],
+            properties: {
+              fullName: {
+                type: "string",
+                pattern: "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$",
+                maxLength: 300,
+              },
+              id: { type: ["integer", "null"] },
+              defaultBranch: { type: ["string", "null"], maxLength: 255 },
+            },
+          },
+          classification: {
+            anyOf: [
+              { type: "null" },
+              {
+                type: "object",
+                required: [
+                  "classifierVersion",
+                  "settingsFingerprint",
+                  "commit",
+                  "complete",
+                  "javascript",
+                  "gin",
+                  "frameworks",
+                  "modules",
+                  "evidence",
+                  "diagnostics",
+                  "fingerprint",
+                ],
+                properties: {
+                  classifierVersion: { type: "string", maxLength: 100 },
+                  settingsFingerprint: sha,
+                  fingerprint: sha,
+                  commit: {
+                    anyOf: [{ type: "null" }, { type: "string", pattern: "^[a-f0-9]{40,64}$" }],
+                  },
+                  complete: { type: "boolean" },
+                  javascript: decision,
+                  gin: decision,
+                  frameworks: {
+                    type: "array",
+                    uniqueItems: true,
+                    maxItems: 4,
+                    items: { enum: ["express", "fastify", "nestjs", "gin"] },
+                  },
+                  modules: {
+                    type: "array",
+                    maxItems: 100,
+                    items: {
+                      type: "object",
+                      required: ["path", "manifest"],
+                      properties: {
+                        path: { type: "string", maxLength: 4096 },
+                        manifest: { type: "string", maxLength: 4096 },
+                      },
+                    },
+                  },
+                  evidence: {
+                    type: "array",
+                    maxItems: 400,
+                    items: {
+                      type: "object",
+                      required: ["path", "framework", "kind"],
+                      properties: {
+                        path: { type: "string", maxLength: 4096 },
+                        framework: { enum: ["express", "fastify", "nestjs", "gin"] },
+                        kind: { const: "manifest-dependency" },
+                      },
+                    },
+                  },
+                  diagnostics: strings,
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
+};
+module.exports = { CLASSIFICATION_SCHEMA };

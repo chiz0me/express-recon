@@ -319,3 +319,26 @@ and refresh report. Only intentional editor/acceptance integrations should use i
 `checkHtmlSite(input, output, options)` is the read-only equivalent of
 `renderHtmlSite(input, output, { ...options, check: true })`. Both return `current`
 and `changedFiles` in check mode.
+
+## Persistent framework classification
+
+Before route scans, run `classify-org` with the same organization scope and save
+`repository-classification.json` alongside the current inventory. Its atomic
+per-repository checkpoints are independent of route/audit checkpoints. Rebuild
+plans using `buildScanPlan(loadRepositoryClassification(file))` after interruption,
+and revalidate live repository commits before using saved selections. Current
+scope enumeration prevents removed repositories from lingering in a new plan.
+
+Pass the catalog path with `scan-org --classification-cache`. A fresh
+`--overwrite` scan preserves it and reruns route analysis. Add `--reclassify` to
+invalidate classifier reuse. Route/auth configuration changes still invalidate
+route evidence separately. Persist this catalog in Git or recovery storage even
+when later scanners fail. It contains paths and framework evidence, not source
+contents or credentials.
+
+`gin-targets.json` is compatible with gin-recon's native target manifest. Targets
+include exact commits and GitHub repository identity; integrations that require
+native organization enumeration may instead use the Gin candidate names as
+repository filters. Preserve scanner-specific coverage and source identities.
+Skip Gin when the candidate list is empty; do not fall back to an unfiltered run.
+See the [CLI reference](reference.md#classify-org) for probe limits and semantics.

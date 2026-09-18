@@ -314,6 +314,51 @@ submodule traversal.
 otherwise those security gates fail before acquisition rather than treating an
 inventory as an audit.
 
+### `classify-org`
+
+Classify repository frameworks before acquiring source snapshots. Uses the same
+GitHub authentication and organization scope flags as `scan-org`: `--org`,
+`--auth`, `--max-repos`, `--concurrency`, `--include-archived`, `--include-forks`,
+`--repo-include`, and `--repo-exclude`. Supports `--out`, `--format json`,
+`--progress`, and `--no-progress`. No source execution or dependency installation.
+
+```sh
+express-recon classify-org --org acme --max-repos 10000 --concurrency 4 --out .express-recon/acme
+express-recon scan-org --org acme --max-repos 10000 --concurrency 4 \
+  --classification-cache .express-recon/acme/repository-classification.json \
+  --out .express-recon/acme --overwrite
+```
+
+Writes `repository-classification.json` atomically after every repository, plus
+`scan-plan.json` and native `gin-targets.json` after classification finishes.
+An interrupted catalog keeps pending repositories eligible. Plans are derived
+outputs; rebuild them from the current catalog after interruption. Exit `2`
+means classification or enumeration is incomplete; unknown repositories remain
+in both relevant scan selections. An empty Gin targets list means skip Gin:
+gin-recon requires a nonempty target manifest.
+
+`--classification-cache <path>` enables classification in `scan-org` and selects
+JavaScript/API-document candidates while keeping excluded repositories visible
+as `skipped-classification`. Scans use the classified commit. Without this flag,
+existing scan behavior is unchanged. `--reclassify` forces new probes in
+`classify-org`, or in `scan-org` with `--classification-cache`.
+
+Every run enumerates the current scope and verifies default-branch commit SHAs.
+Reuse requires the same repository ID, branch, commit, classifier version and
+classification limits. Cache entries are independent of auth policies and route
+results: `--overwrite` reruns route analysis while preserving classification;
+add `--reclassify` for a cold run. The cache reports hits, misses, API requests,
+bytes, duration and invalidation reasons. Cache corruption causes reclassification.
+
+The bounded probe reads the complete Git tree and up to 100 manifests of at most
+256 KiB each. It recognizes Express, Fastify, NestJS and Gin dependencies in
+nested modules. A complete tree without Go inputs excludes Gin. JavaScript,
+TypeScript, JSON or YAML files keep the JavaScript/document scanner eligible.
+Unrecognized dependencies, source-only frameworks, Go wrappers, failed reads,
+submodules, symlinks and truncated trees never become negative evidence.
+Classification identifies candidates, not routes or authentication guarantees.
+Catalog timestamps and progress durations use UTC/elapsed milliseconds.
+
 ### `scan-org`
 
 Enumerate API-visible repositories in a GitHub organization and build a static,

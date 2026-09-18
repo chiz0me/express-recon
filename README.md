@@ -672,3 +672,13 @@ Once listed, `audit` knows this route is intentionally open to the public and wi
 
 MIT licensed. Security issues should be reported privately as described in
 [SECURITY.md](./SECURITY.md).
+
+### Classify before organization scans
+
+Use `classify-org --org acme --out .express-recon/acme` to build a persistent
+framework catalog and JavaScript/Gin scan plan without cloning every repository.
+Pass `--classification-cache .express-recon/acme/repository-classification.json`
+to `scan-org` to use it. Exact-commit classifications survive `--overwrite` fresh
+route scans; `--reclassify` forces fresh classification. Unknown repositories stay
+eligible, and mixed-framework repositories can run both scanners. See the
+[classification reference](docs/reference.md#classify-org).

@@ -486,3 +486,35 @@ process.stdout.write(recon.formatters.markdown.format(report));
 See the [CLI and configuration reference](./reference.md),
 [OpenAPI guide](./openapi.md), and [security model](../SECURITY.md) for the
 behavior shared by CLI and library use.
+
+### `classifyOrganization(organization, options)`
+
+Asynchronously enumerate current repositories and classify their immutable Git
+commits without cloning. Accepts the same `tokenProvider`, `auth`, `environment`,
+`fetchImpl`, `apiTimeoutMs`, `maxRepositories`, `concurrency`, `includeArchived`,
+`includeForks`, `repositoryInclude`, and `repositoryExclude` options as organization
+scanning. `classificationCache` names an optional persistent JSON file;
+`reclassify: true` ignores reusable classifications. `onProgress` observes
+classification events. Persistence failures throw; probe failures produce
+incomplete, eligible entries. The returned catalog includes framework/module
+evidence, per-scanner decisions, explicit scope exclusions, coverage and metrics.
+
+### `loadRepositoryClassification(file)`
+
+Read-only bounded loader for `repository-classification.json`. Validates identities,
+entry fingerprints and decision consistency; rejects symbolic paths. A saved
+catalog describes its recorded commits. Revalidate with `classifyOrganization`
+before using it to select a new live scan.
+
+### `buildScanPlan(catalog)`
+
+Validate a catalog and return `javascript` and `gin` arrays, exclusion reasons in
+`skipped`, and a `ginTargets` native version-1 manifest. Unknown or pending entries
+remain eligible. Targets use recorded commit SHAs when available. Skip native Gin
+execution when `ginTargets.targets` is empty. This function does not contact GitHub
+or refresh stale observations.
+
+`scanOrganization` additionally accepts `classificationCache` and `reclassify`.
+It refreshes classification before route scans, pins source refs, includes
+`skipped-classification` rows, and reports classification metrics. Route/audit
+checkpoint identity and policy invalidation remain independent of classification.

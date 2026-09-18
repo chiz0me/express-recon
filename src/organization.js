@@ -779,7 +779,10 @@ async function runPool(entries, concurrency, task) {
       await task(entries[index]);
     }
   });
-  await Promise.all(runners);
+  // Drain active workers before a caller releases its artifact writer lock.
+  const outcomes = await Promise.allSettled(runners);
+  const failed = outcomes.find((outcome) => outcome.status === "rejected");
+  if (failed) throw failed.reason;
 }
 
 function initialStatus(repository, opts, include, exclude) {
@@ -831,6 +834,7 @@ function aggregateSummary(entries, auditMode) {
     skippedForks: count("skipped-fork"),
     skippedDisabled: count("skipped-disabled"),
     skippedByFilter: count("skipped-filter"),
+    skippedByClassification: count("skipped-classification"),
     emptyRepositories: count("empty"),
     skippedByLimit: count("skipped-limit"),
     applications: supported.reduce(
@@ -956,7 +960,32 @@ async function scanOrganization(organization, opts = {}) {
   }));
   const eligible = entries.filter((entry) => entry.status === "eligible");
   for (const entry of eligible.slice(maxRepositories)) entry.status = "skipped-limit";
-  const selected = eligible.slice(0, maxRepositories);
+  let selected = eligible.slice(0, maxRepositories);
+  let classification = null;
+  if (opts.classificationCache) {
+    classification = await require("./organization-classification").classifyListing(
+      login,
+      listing,
+      {
+        ...opts,
+        tokenProvider: token,
+        onProgress: (event) => progress.emit(event),
+      },
+    );
+    const classified = new Map(
+      classification.repositories.map((entry) => [entry.repository.fullName.toLowerCase(), entry]),
+    );
+    for (const entry of selected) {
+      const data = classified.get(entry.repository.fullName.toLowerCase()).classification;
+      entry.classification = data;
+      if (data.complete && data.javascript === "not-applicable") {
+        entry.status = "skipped-classification";
+        entry.scanned = false;
+        entry.commit = data.commit;
+      }
+    }
+    selected = selected.filter((entry) => entry.status === "eligible");
+  }
   const pending = [];
   await runPool(selected, concurrency, async (entry) => {
     const resumed = resumeEntries.get(entry.repository.fullName.toLowerCase());
@@ -974,7 +1003,10 @@ async function scanOrganization(organization, opts = {}) {
       return;
     }
     try {
-      if ((await repositoryHead(entry.repository, opts, token)) !== resumed.commit) {
+      if (
+        (entry.classification?.commit || (await repositoryHead(entry.repository, opts, token))) !==
+        resumed.commit
+      ) {
         pending.push(entry);
         return;
       }
@@ -1093,7 +1125,7 @@ async function scanOrganization(organization, opts = {}) {
           scan = await scanner(
             entry.repository.fullName,
             {
-              ref: "HEAD",
+              ref: entry.classification?.commit || "HEAD",
               config: opts.config || {},
               scan: opts.scan || {},
               githubToken: validateToken(await token.getToken()) || undefined,
@@ -1132,6 +1164,9 @@ async function scanOrganization(organization, opts = {}) {
             concurrency,
           });
         }
+      }
+      if (entry.classification?.commit && scan.repository?.commit !== entry.classification.commit) {
+        throw new Error("Repository scan did not match the classified source revision");
       }
       const frameworks = frameworkEvidence(scan);
       const evidence = expressEvidence(scan, frameworks);
@@ -1253,6 +1288,9 @@ async function scanOrganization(organization, opts = {}) {
     },
     rateLimit: listing.rateLimit,
     summary,
+    ...(classification
+      ? { classification: { metrics: classification.metrics, coverage: classification.coverage } }
+      : {}),
     repositories: entries,
     diagnostics: [],
   };
@@ -1281,6 +1319,13 @@ async function scanOrganization(organization, opts = {}) {
 }
 
 module.exports = {
+  boundedResponseText,
+  repositoryHead,
+  repositoryPatterns,
+  repositoryGlob,
+  initialStatus,
+  positiveInteger,
+  runPool,
   DEFAULT_CONCURRENCY,
   DEFAULT_MAX_REPOSITORIES,
   DEFAULT_REPOSITORY_ATTEMPTS,

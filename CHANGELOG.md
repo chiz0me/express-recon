@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.0
+
+- Add persistent, commit-verified organization framework classification and
+  JavaScript/Gin scan plans, including nested and mixed-framework repositories.
+- Let `scan-org --classification-cache` avoid provably irrelevant repositories
+  and reuse classification during fresh route scans. Unknown inputs remain eligible.
+- Save classification after each repository and report cache invalidation and
+  probe costs independently from route/audit checkpoints.
+
 ## 0.19.1
 
 - Give organization scan phases independent bounded watchdog budgets so slow

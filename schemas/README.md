@@ -27,3 +27,7 @@ render schemas together; their references resolve locally. Schemas are included
 in the npm package. Pin a package version or repository tag for reproducibility.
 Do not edit published interchange versions in place: preserve existing readers,
 introduce an explicit new version for contract changes, and add migration tests.
+
+`native/repository-classification-v1.schema.json` describes the independent framework
+cache. The public loader also verifies repository identities, decision consistency
+and entry fingerprints; the schema alone does not verify freshness.

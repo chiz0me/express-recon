@@ -1279,6 +1279,8 @@ function organizationDetailLabel(status, evidenceValue) {
 }
 
 function organizationNoDetailLabel(status) {
+  if (status === "skipped-classification")
+    return "No JavaScript or API specification files in the classified commit";
   if (status === "not-express") return "No supported framework report";
   if (status === "inconclusive") return "No diagnostic artifact";
   return "No detailed report";

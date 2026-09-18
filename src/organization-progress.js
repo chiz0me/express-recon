@@ -50,6 +50,13 @@ function formatPlainProgress(event) {
   const repository = repositoryLabel(event);
   const elapsed = duration(event.durationMs ?? event.elapsedMs);
   switch (event.event) {
+    case "classification-started":
+      return `${prefix} CLASSIFY ${event.repositories ?? 0} repositories`;
+    case "classification-reused":
+    case "classification-completed":
+      return `${prefix} CLASSIFY ${repository} ${event.event === "classification-reused" ? "cached" : cleanLine(event.reason)}`;
+    case "classification-finished":
+      return `${prefix} CLASSIFIED ${event.repositories ?? 0} repositories · ${event.cacheHits ?? 0} cached · ${event.apiRequests ?? 0} API requests · ${elapsed}`;
     case "enumeration-started":
       return `${prefix} ENUMERATE ${cleanLine(event.organization)}`;
     case "enumeration-completed":
